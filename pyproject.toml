@@ -1,6 +1,6 @@
 [project]
 name = "gatectl"
-version = "0.0.0"
+version = "0.0.1"
 description = "Policy decisions (allow / deny / escalate) with first-class shadow mode"
 readme = "README.md"
 requires-python = ">=3.12"
