@@ -1,15 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gatectl/log",
+  "$id": "gatectl/log.json",
   "title": "gatectl log.jsonl record",
+  "description": "One line of log.jsonl (export --log prints these). Structured events: an off check, a shadow failure, a skipped or failed hook, a reconcile.",
   "type": "object",
   "properties": {
     "ts": {
-      "type": "string",
-      "format": "date-time"
+      "$ref": "defs.json#/$defs/ts"
     },
     "level": {
-      "type": "string",
       "enum": [
         "debug",
         "info",
@@ -18,16 +17,72 @@
       ]
     },
     "event": {
-      "type": "string"
+      "enum": [
+        "check_off",
+        "shadow_failure",
+        "hook_skipped",
+        "hook_failed",
+        "reconcile",
+        "warning"
+      ]
     },
     "message": {
-      "type": "string"
+      "type": "string",
+      "x-untrusted": true,
+      "description": "Untrusted: a human-readable line; may quote caller text, sanitized and capped.",
+      "maxLength": 2048
+    },
+    "policy": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/policy_name"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "scope": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/scope"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "decision_id": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/decision_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "hook": {
+      "enum": [
+        "post-decision",
+        "post-outcome",
+        "post-state-change",
+        null
+      ]
+    },
+    "data": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "x-untrusted": true,
+      "description": "Untrusted: event-specific context."
     }
   },
+  "additionalProperties": false,
   "required": [
     "ts",
     "level",
     "event"
-  ],
-  "additionalProperties": true
+  ]
 }

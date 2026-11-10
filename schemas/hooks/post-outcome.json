@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gatectl/hooks/post-outcome.json",
+  "title": "post-outcome hook payload (stdin)",
+  "description": "After an outcome is recorded.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "gatectl"
+    },
+    "hook": {
+      "const": "post-outcome"
+    },
+    "object_type": {
+      "const": "outcome"
+    },
+    "object_id": {
+      "$ref": "../defs.json#/$defs/decision_id"
+    },
+    "repo": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/repo_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "policy": {
+      "$ref": "../defs.json#/$defs/policy_name"
+    },
+    "scope": {
+      "$ref": "../defs.json#/$defs/scope"
+    },
+    "outcome": {
+      "$ref": "../defs.json#/$defs/outcome"
+    },
+    "signal": {
+      "$ref": "../defs.json#/$defs/signal"
+    },
+    "actor": {
+      "$ref": "../defs.json#/$defs/actor"
+    },
+    "effective_outcome": {
+      "$ref": "../defs.json#/$defs/effective_outcome"
+    },
+    "previous_effective_outcome": {
+      "$ref": "../defs.json#/$defs/effective_outcome"
+    },
+    "miss": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/miss"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "tool",
+    "hook",
+    "object_type",
+    "object_id",
+    "repo",
+    "policy",
+    "scope",
+    "outcome",
+    "signal",
+    "actor",
+    "effective_outcome",
+    "previous_effective_outcome",
+    "miss"
+  ]
+}

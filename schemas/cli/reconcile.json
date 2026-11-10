@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gatectl/cli/reconcile.json",
+  "title": "gatectl reconcile result",
+  "type": "object",
+  "properties": {
+    "leases_taken_over": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sessions_stopped": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sessions_forgotten": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "dirs_removed": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "leases_taken_over",
+    "sessions_stopped",
+    "sessions_forgotten",
+    "dirs_removed"
+  ]
+}

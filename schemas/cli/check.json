@@ -1,0 +1,251 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gatectl/cli/check.json",
+  "title": "gatectl check result",
+  "description": "stdout of check on exits 0, 11 and 13, always, whatever --json says. No input text appears here: only declared fields are stored, and they are shown by show. Exits 1 and 2 print the error envelope instead.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "decision_id": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/decision_id"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "null when the state is off or the decision could not be recorded (a shadow failure)."
+    },
+    "policy": {
+      "$ref": "../defs.json#/$defs/policy_name"
+    },
+    "scope": {
+      "$ref": "../defs.json#/$defs/scope"
+    },
+    "state": {
+      "$ref": "../defs.json#/$defs/state",
+      "description": "The effective state read when the decision was recorded."
+    },
+    "shadow": {
+      "type": "boolean",
+      "description": "true only in the shadow state."
+    },
+    "enforced": {
+      "type": "boolean",
+      "description": "true only in the enforced state. A caller that enables an automatic action must require enforced true and decision allow."
+    },
+    "decision": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/decision"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The would-be decision; null with decision_id null."
+    },
+    "reason": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/reason"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "null only when decision is null."
+    },
+    "fingerprint": {
+      "$ref": "../defs.json#/$defs/fingerprint"
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/check_entry"
+      },
+      "description": "In check order; empty when the state is off."
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/warning"
+      },
+      "description": "Codes such as repo_invalid."
+    },
+    "error": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/error"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "A shadow failure after the state was known: the decision could not be recorded."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "decision_id",
+    "policy",
+    "scope",
+    "state",
+    "shadow",
+    "enforced",
+    "decision",
+    "reason",
+    "fingerprint",
+    "checks",
+    "warnings",
+    "error"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "shadow"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "shadow": {
+            "const": true
+          },
+          "enforced": {
+            "const": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "enforced"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "shadow": {
+            "const": false
+          },
+          "enforced": {
+            "const": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "off"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "shadow": {
+            "const": false
+          },
+          "enforced": {
+            "const": false
+          },
+          "decision_id": {
+            "type": "null"
+          },
+          "decision": {
+            "type": "null"
+          },
+          "reason": {
+            "type": "null"
+          },
+          "checks": {
+            "maxItems": 0
+          },
+          "error": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "decision_id": {
+            "const": null
+          }
+        },
+        "required": [
+          "decision_id"
+        ]
+      },
+      "then": {
+        "properties": {
+          "decision": {
+            "type": "null"
+          },
+          "reason": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "decision": {
+            "$ref": "../defs.json#/$defs/decision"
+          },
+          "reason": {
+            "$ref": "../defs.json#/$defs/reason"
+          },
+          "error": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "decision_id": {
+            "type": "null"
+          },
+          "state": {
+            "enum": [
+              "shadow",
+              "enforced"
+            ]
+          }
+        },
+        "required": [
+          "decision_id",
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "error": {
+            "$ref": "../defs.json#/$defs/error"
+          }
+        }
+      }
+    }
+  ]
+}

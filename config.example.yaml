@@ -1,3 +1,79 @@
-# Example config for gatectl. Location: ~/.config/gatectl/config.yaml (drop-ins: config.d/*.yaml).
-# Keys are defined in docs/interface.md once designed.
+# Example config for gatectl. Location: ~/.config/gatectl/config.yaml (XDG-aware), plus
+# drop-ins in config.d/*.yaml merged in lexical order (maps merge, hook lists append).
+# Every key is shown with its default. Durations: 0, or an integer and a unit (ms, s, m, h, d).
+# Top-level and nested scalars can also be set as GATECTL_<KEY>, nested keys joined with __
+# (for example GATECTL_DEFAULTS__TIMEOUT). Lists and structured keys cannot.
+# Schema: schemas/config.json. Rules: docs/interface.md, section Config.
+
+# Used only for the default actor (human:<name>). null: the OS username.
+me:
+  name: null
+
+# The claude-session command, a list (never a shell string). Needed only by agent checks.
+session_cmd: [claude-session]
+
+defaults:
+  timeout: 60s              # total deadline for one check
+  script_timeout: 20s       # default timeout of one script check
+  record_reserve: 2s        # kept back from the deadline for recording and output
+  input_max_bytes: 1048576  # largest accepted input (1 MiB)
+  script_env_allow: [PATH, HOME, LANG, "LC_*"]  # environment variables script checks receive
+  recommend:                # default for every policy's recommend
+    confidence: 0.95
+    max_miss_rate: 0.05
+
+agent:
+  skill: "gatectl:gate-check"  # <plugin>:<skill>; custom skills need their plugin in plugin_dirs
+  plugin_dirs: []              # absolute paths of extra Claude Code plugin directories
+  model: null                  # null: Claude Code's default
+  permission_profile: null     # null: the bundled profile file; or an absolute path
+  sandbox: required            # required, optional or off
+  setting_sources: []          # any of user, project, local
+  env_allowlist: []            # environment variables an agent session may receive
+  threshold: 0.8               # an allow below this confidence becomes escalate
+  timeout: 300s                # default timeout of one agent check
+  cache_ttl: 10m               # reuse window for an identical input; 0 turns it off
+  max_parallel: 3              # live agent runs across all gatectl processes
+  min_start_budget: 30s        # least remaining budget at which an agent check may start
+
+retention:
+  older_than: null  # prune deletes older rows; null: prune does nothing without --older-than
+
+# Policies: a named, ordered list of checks plus a declared input. A policy's state here is only
+# its initial state (new policies start in shadow); later changes go through `gatectl set`.
+# Policy keys: state, timeout, input, checks, cache_ttl, record_input, recommend.
+# Check types: script (argv list, exit code decides), rule (field tests), agent (a Claude session).
+policies: {}
+# policies:
+#   auto-merge:
+#     state: shadow
+#     timeout: 60s
+#     cache_ttl: 10m
+#     record_input: false
+#     recommend: {confidence: 0.95, max_miss_rate: 0.05}
+#     input:
+#       require: [repo, head_sha]
+#       types: {repo: string, head_sha: string}
+#     checks:
+#       - {name: ci-green, type: rule, when: [{path: ci.state, op: ne, value: passing}], then: deny, else: allow}
+#       - {name: scope, type: script, argv: [/usr/local/bin/check-scope], timeout: 20s, env_allow: [SCOPE_DIR]}
+#       - {name: reviewer, type: agent, instruction: "Escalate if the change touches security-sensitive code.", threshold: 0.8, model: haiku, timeout: 300s, cache_ttl: 10m, sandbox: required}
+#       - {name: style, type: agent, instruction_file: /etc/gatectl/style.md, skill: "my-plugin:review", setting_sources: [], env_allowlist: []}
+
+# Per-repo overrides, keyed by repo id (host/full/project/path): any policy key replaces the
+# global key entirely, lists included. The override has its own fingerprint and track record.
+repos: {}
+# repos:
+#   github.com/org/repo:
+#     policies:
+#       auto-merge:
+#         timeout: 120s
+#         checks:
+#           - {name: ci-green, type: rule, when: [{path: ci.state, op: ne, value: passing}], then: deny}
+
+# Hooks: gatectl fires post-decision, post-outcome and post-state-change. Each is a list of
+# {cmd, timeout (default 30s), async (default false)}; the payload arrives as JSON on stdin.
 hooks: {}
+# hooks:
+#   post-state-change:
+#     - {cmd: "notify-team", timeout: 30s, async: true}

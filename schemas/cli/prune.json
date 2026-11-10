@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gatectl/cli/prune.json",
+  "title": "gatectl prune result",
+  "type": "object",
+  "properties": {
+    "dry_run": {
+      "type": "boolean"
+    },
+    "older_than": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/duration"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "null when no age is configured: nothing is deleted."
+    },
+    "deleted": {
+      "type": "object",
+      "properties": {
+        "decisions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outcomes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cache": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "decisions",
+        "outcomes",
+        "cache"
+      ],
+      "description": "With dry_run, what would be deleted."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "dry_run",
+    "older_than",
+    "deleted"
+  ]
+}

@@ -1,47 +1,342 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gatectl/audit",
+  "$id": "gatectl/audit.json",
   "title": "gatectl audit.jsonl record",
-  "description": "Audit record for gatectl. Whether this tool writes audit records is decided in its design session (architecture §14).",
+  "description": "One line of audit.jsonl (also what export prints by default). Appended for every decision, outcome, state change and prune; a decision's line is appended inside the transaction that inserts the decision. A decision record carries the input hash and the fingerprint, never the input. Retention is forever.",
   "type": "object",
   "properties": {
     "ts": {
-      "type": "string",
-      "format": "date-time"
+      "$ref": "defs.json#/$defs/ts"
     },
     "actor": {
-      "type": "string"
+      "$ref": "defs.json#/$defs/actor"
+    },
+    "stdin_tty": {
+      "type": "boolean"
     },
     "decision_id": {
       "oneOf": [
         {
-          "type": "string"
+          "$ref": "defs.json#/$defs/decision_id"
         },
         {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+          "$ref": "defs.json#/$defs/decision_ids"
         }
+      ],
+      "description": "A decision or outcome record: the decision's own id. Other records: the caller's --decision-id values."
+    },
+    "action": {
+      "enum": [
+        "decision",
+        "outcome",
+        "state_change",
+        "prune"
       ]
     },
     "target": {
-      "type": "string"
-    },
-    "action": {
-      "type": "string"
+      "type": "string",
+      "description": "decision and state_change: <policy>@<scope>. outcome: the decision id. prune: state.db."
     },
     "inputs": {
       "type": "object"
     },
-    "result": {}
+    "result": {
+      "type": "object"
+    }
   },
+  "additionalProperties": false,
   "required": [
     "ts",
     "actor",
-    "target",
+    "decision_id",
     "action",
+    "target",
+    "inputs",
     "result"
   ],
-  "additionalProperties": true
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "decision"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}@(?:\\*|[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+)$"
+          },
+          "decision_id": {
+            "$ref": "defs.json#/$defs/decision_id"
+          },
+          "inputs": {
+            "type": "object",
+            "properties": {
+              "policy": {
+                "$ref": "defs.json#/$defs/policy_name"
+              },
+              "scope": {
+                "$ref": "defs.json#/$defs/scope"
+              },
+              "input_sha256": {
+                "$ref": "defs.json#/$defs/sha256"
+              },
+              "fingerprint": {
+                "$ref": "defs.json#/$defs/fingerprint"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "policy",
+              "scope",
+              "input_sha256",
+              "fingerprint"
+            ]
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "decision": {
+                "$ref": "defs.json#/$defs/decision"
+              },
+              "reason": {
+                "$ref": "defs.json#/$defs/reason"
+              },
+              "state": {
+                "$ref": "defs.json#/$defs/state"
+              },
+              "shadow": {
+                "type": "boolean"
+              },
+              "enforced": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "decision",
+              "reason",
+              "state",
+              "shadow",
+              "enforced"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "outcome"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "$ref": "defs.json#/$defs/decision_id"
+          },
+          "decision_id": {
+            "$ref": "defs.json#/$defs/decision_id"
+          },
+          "inputs": {
+            "type": "object",
+            "properties": {
+              "signal": {
+                "$ref": "defs.json#/$defs/signal"
+              },
+              "outcome": {
+                "$ref": "defs.json#/$defs/outcome"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "signal",
+              "outcome"
+            ]
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "$ref": "defs.json#/$defs/outcome"
+              },
+              "signal": {
+                "$ref": "defs.json#/$defs/signal"
+              },
+              "effective_outcome": {
+                "$ref": "defs.json#/$defs/effective_outcome"
+              },
+              "miss": {
+                "oneOf": [
+                  {
+                    "$ref": "defs.json#/$defs/miss"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "outcome",
+              "signal",
+              "effective_outcome",
+              "miss"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "state_change"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}@(?:\\*|[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+)$"
+          },
+          "inputs": {
+            "type": "object",
+            "properties": {
+              "policy": {
+                "$ref": "defs.json#/$defs/policy_name"
+              },
+              "scope": {
+                "$ref": "defs.json#/$defs/scope"
+              },
+              "state": {
+                "$ref": "defs.json#/$defs/state"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "policy",
+              "scope",
+              "state"
+            ]
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "previous_state": {
+                "$ref": "defs.json#/$defs/state"
+              },
+              "state": {
+                "$ref": "defs.json#/$defs/state"
+              },
+              "cause": {
+                "$ref": "defs.json#/$defs/cause"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "x-untrusted": true,
+                "description": "Untrusted: the --reason-file text, at most 1 KiB.",
+                "maxLength": 1024
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "previous_state",
+              "state",
+              "cause",
+              "reason"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "prune"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "const": "state.db"
+          },
+          "inputs": {
+            "type": "object",
+            "properties": {
+              "older_than": {
+                "$ref": "defs.json#/$defs/duration"
+              },
+              "dry_run": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "older_than",
+              "dry_run"
+            ]
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "counts": {
+                "type": "object",
+                "properties": {
+                  "decisions": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "outcomes": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "cache": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "decisions",
+                  "outcomes",
+                  "cache"
+                ]
+              },
+              "older_than": {
+                "$ref": "defs.json#/$defs/duration"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "counts",
+              "older_than"
+            ]
+          }
+        }
+      }
+    }
+  ]
 }

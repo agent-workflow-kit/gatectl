@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gatectl/hooks/post-decision.json",
+  "title": "post-decision hook payload (stdin)",
+  "description": "After a decision is recorded and committed. Carries no input text and no labels key.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "gatectl"
+    },
+    "hook": {
+      "const": "post-decision"
+    },
+    "object_type": {
+      "const": "decision"
+    },
+    "object_id": {
+      "$ref": "../defs.json#/$defs/decision_id"
+    },
+    "repo": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/repo_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "policy": {
+      "$ref": "../defs.json#/$defs/policy_name"
+    },
+    "scope": {
+      "$ref": "../defs.json#/$defs/scope"
+    },
+    "state": {
+      "$ref": "../defs.json#/$defs/state"
+    },
+    "shadow": {
+      "type": "boolean"
+    },
+    "enforced": {
+      "type": "boolean"
+    },
+    "decision": {
+      "$ref": "../defs.json#/$defs/decision"
+    },
+    "reason": {
+      "$ref": "../defs.json#/$defs/reason"
+    },
+    "fingerprint": {
+      "$ref": "../defs.json#/$defs/fingerprint"
+    },
+    "actor": {
+      "$ref": "../defs.json#/$defs/actor"
+    },
+    "input_tool": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "x-untrusted": true,
+      "description": "Untrusted: the input's tool string, capped.",
+      "maxLength": 256
+    },
+    "input_hook": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "x-untrusted": true,
+      "description": "Untrusted: the input's hook string, capped.",
+      "maxLength": 256
+    },
+    "input_object_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "x-untrusted": true,
+      "description": "Untrusted: the input's object_id string, capped.",
+      "maxLength": 256
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "$ref": "../defs.json#/$defs/check_name"
+          },
+          "type": {
+            "$ref": "../defs.json#/$defs/check_type"
+          },
+          "verdict": {
+            "$ref": "../defs.json#/$defs/verdict"
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/reason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "duration_ms": {
+            "$ref": "../defs.json#/$defs/duration_ms"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "type",
+          "verdict",
+          "reason",
+          "duration_ms"
+        ]
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "tool",
+    "hook",
+    "object_type",
+    "object_id",
+    "repo",
+    "policy",
+    "scope",
+    "state",
+    "shadow",
+    "enforced",
+    "decision",
+    "reason",
+    "fingerprint",
+    "actor",
+    "input_tool",
+    "input_hook",
+    "input_object_id",
+    "checks"
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gatectl/cli/set.json",
+  "title": "gatectl set result",
+  "type": "object",
+  "properties": {
+    "policy": {
+      "$ref": "../defs.json#/$defs/policy_name"
+    },
+    "scope": {
+      "$ref": "../defs.json#/$defs/scope"
+    },
+    "state": {
+      "$ref": "../defs.json#/$defs/state"
+    },
+    "previous_state": {
+      "$ref": "../defs.json#/$defs/state"
+    },
+    "changed": {
+      "type": "boolean"
+    },
+    "hint": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Set for enforced on a policy with an agent check and no successful probe since the last config change."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "policy",
+    "scope",
+    "state",
+    "previous_state",
+    "changed",
+    "hint"
+  ]
+}

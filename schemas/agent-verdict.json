@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gatectl/agent-verdict.json",
+  "title": "gatectl agent verdict artifact",
+  "description": "verdict.json, written by the gate-check session and reported with claude-session report done --artifact. At most 16 KiB. Validated strictly: any unknown or missing key, bad type or enum, or nonce mismatch escalates with artifact_invalid.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "nonce": {
+      "$ref": "defs.json#/$defs/nonce",
+      "description": "The run's nonce from the prompt file, echoed."
+    },
+    "decision": {
+      "$ref": "defs.json#/$defs/decision"
+    },
+    "confidence": {
+      "$ref": "defs.json#/$defs/confidence"
+    },
+    "reasons": {
+      "$ref": "defs.json#/$defs/reasons_list"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "nonce",
+    "decision",
+    "confidence",
+    "reasons"
+  ]
+}

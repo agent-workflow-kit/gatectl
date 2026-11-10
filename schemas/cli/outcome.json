@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gatectl/cli/outcome.json",
+  "title": "gatectl outcome result",
+  "type": "object",
+  "properties": {
+    "decision_id": {
+      "$ref": "../defs.json#/$defs/decision_id"
+    },
+    "outcome": {
+      "$ref": "../defs.json#/$defs/outcome"
+    },
+    "signal": {
+      "$ref": "../defs.json#/$defs/signal"
+    },
+    "actor": {
+      "$ref": "../defs.json#/$defs/actor"
+    },
+    "changed": {
+      "type": "boolean",
+      "description": "false for a repeat of the latest outcome from the same actor and signal."
+    },
+    "effective_outcome": {
+      "$ref": "../defs.json#/$defs/effective_outcome"
+    },
+    "miss": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/miss"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "state_change": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/state_change"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Set when this outcome triggered the automatic drop to shadow."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "decision_id",
+    "outcome",
+    "signal",
+    "actor",
+    "changed",
+    "effective_outcome",
+    "miss",
+    "state_change"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "miss": {
+            "const": "over_strict"
+          }
+        },
+        "required": [
+          "miss"
+        ]
+      },
+      "then": {
+        "properties": {
+          "state_change": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
+}

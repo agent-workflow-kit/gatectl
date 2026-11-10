@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gatectl/cli/check-dry-run.json",
+  "title": "gatectl check --dry-run plan",
+  "description": "Printed by check --dry-run: the resolved plan. Nothing runs and nothing is recorded.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "dry_run": {
+      "const": true
+    },
+    "policy": {
+      "$ref": "../defs.json#/$defs/policy_name"
+    },
+    "scope": {
+      "$ref": "../defs.json#/$defs/scope"
+    },
+    "state": {
+      "$ref": "../defs.json#/$defs/state"
+    },
+    "fingerprint": {
+      "$ref": "../defs.json#/$defs/fingerprint"
+    },
+    "input_valid": {
+      "type": "boolean",
+      "description": "false when the declaration or the strict-JSON rules would escalate with input_invalid."
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/plan_check"
+      },
+      "description": "In execution order: script and rule checks first, then agent checks."
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/warning"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "dry_run",
+    "policy",
+    "scope",
+    "state",
+    "fingerprint",
+    "input_valid",
+    "checks",
+    "warnings"
+  ]
+}

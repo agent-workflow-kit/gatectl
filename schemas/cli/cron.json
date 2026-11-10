@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gatectl/cli/cron.json",
+  "title": "gatectl cron result",
+  "type": "object",
+  "properties": {
+    "action": {
+      "enum": [
+        "install",
+        "uninstall"
+      ]
+    },
+    "changed": {
+      "type": "boolean"
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "The crontab lines of the managed block; empty after uninstall."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "action",
+    "changed",
+    "entries"
+  ]
+}

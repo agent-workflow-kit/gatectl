@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gatectl/cli/decisions.json",
+  "title": "gatectl decisions result",
+  "type": "object",
+  "properties": {
+    "decisions": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/decision_row"
+      },
+      "description": "Newest first."
+    },
+    "truncated": {
+      "type": "boolean",
+      "description": "true when --limit cut the list."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "decisions",
+    "truncated"
+  ]
+}

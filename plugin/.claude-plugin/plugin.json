@@ -1,5 +1,5 @@
 {
   "name": "gatectl",
   "version": "0.0.0",
-  "description": "Default skills bundled with gatectl."
+  "description": "Default gate-check skill bundled with gatectl: applies a policy instruction to one fenced input and files an allow, deny or escalate verdict."
 }

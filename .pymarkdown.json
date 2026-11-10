@@ -11,6 +11,9 @@
     "md024": {
       "siblings_only": true
     },
+    "md041": {
+      "enabled": false
+    },
     "md033": {
       "enabled": false
     }

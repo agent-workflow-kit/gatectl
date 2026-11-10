@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gatectl/cli/policies.json",
+  "title": "gatectl policies result",
+  "type": "object",
+  "properties": {
+    "scope": {
+      "$ref": "../defs.json#/$defs/scope",
+      "description": "The scope shown: --repo, else *."
+    },
+    "policies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "$ref": "../defs.json#/$defs/policy_name"
+          },
+          "initial_state": {
+            "$ref": "../defs.json#/$defs/state"
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "scope": {
+                  "$ref": "../defs.json#/$defs/scope"
+                },
+                "state": {
+                  "$ref": "../defs.json#/$defs/state"
+                },
+                "set_by": {
+                  "$ref": "../defs.json#/$defs/actor"
+                },
+                "set_at": {
+                  "$ref": "../defs.json#/$defs/ts"
+                },
+                "cause": {
+                  "$ref": "../defs.json#/$defs/cause"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "scope",
+                "state",
+                "set_by",
+                "set_at",
+                "cause"
+              ]
+            },
+            "description": "Stored state rows."
+          },
+          "effective_state": {
+            "$ref": "../defs.json#/$defs/state"
+          },
+          "fingerprint": {
+            "$ref": "../defs.json#/$defs/fingerprint"
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "$ref": "../defs.json#/$defs/check_name"
+                },
+                "type": {
+                  "$ref": "../defs.json#/$defs/check_type"
+                },
+                "summary": {
+                  "type": "string",
+                  "description": "argv, rule conditions or skill, in one line."
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "name",
+                "type",
+                "summary"
+              ]
+            }
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "../defs.json#/$defs/record"
+            },
+            "description": "The track record, with its recommendation, of each fingerprint."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "initial_state",
+          "scopes",
+          "effective_state",
+          "fingerprint",
+          "checks",
+          "records"
+        ]
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "scope",
+    "policies"
+  ]
+}
