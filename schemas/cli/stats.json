@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gatectl/cli/stats.json",
+  "title": "gatectl stats result",
+  "type": "object",
+  "properties": {
+    "since": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/ts"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "records": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/record"
+      },
+      "description": "One per policy, repo (or none) and fingerprint."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "since",
+    "records"
+  ]
+}

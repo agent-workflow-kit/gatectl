@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gatectl/cli/set.json",
+  "title": "gatectl set result",
+  "type": "object",
+  "properties": {
+    "policy": {
+      "$ref": "../defs.json#/$defs/policy_name"
+    },
+    "scope": {
+      "$ref": "../defs.json#/$defs/scope"
+    },
+    "state": {
+      "$ref": "../defs.json#/$defs/state"
+    },
+    "previous_state": {
+      "$ref": "../defs.json#/$defs/state"
+    },
+    "changed": {
+      "type": "boolean"
+    },
+    "scopes_changed": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/scope"
+      },
+      "uniqueItems": true,
+      "description": "Every scope that changed. Always present."
+    },
+    "hint": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Hints joined by a space for enforced: no successful probe for the current agent configuration, no script or rule check, or a repo with no recorded decision of this policy (a spelling that matches nothing seen). null otherwise."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "policy",
+    "scope",
+    "state",
+    "previous_state",
+    "changed",
+    "scopes_changed",
+    "hint"
+  ]
+}

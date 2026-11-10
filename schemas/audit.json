@@ -1,47 +1,442 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gatectl/audit",
+  "$id": "gatectl/audit.json",
   "title": "gatectl audit.jsonl record",
-  "description": "Audit record for gatectl. Whether this tool writes audit records is decided in its design session (architecture §14).",
+  "description": "One line of audit.jsonl (also what export prints by default). Appended for every decision, outcome, state change and prune; a decision's line is appended inside the transaction that inserts the decision. A decision record carries the input hash and the fingerprint, never the input. Retention is forever.",
   "type": "object",
   "properties": {
     "ts": {
-      "type": "string",
-      "format": "date-time"
+      "$ref": "defs.json#/$defs/ts"
     },
     "actor": {
-      "type": "string"
+      "$ref": "defs.json#/$defs/actor"
+    },
+    "stdin_tty": {
+      "type": "boolean"
     },
     "decision_id": {
       "oneOf": [
         {
-          "type": "string"
+          "$ref": "defs.json#/$defs/decision_id"
         },
         {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+          "$ref": "defs.json#/$defs/decision_ids"
         }
+      ],
+      "description": "A decision or outcome record: the decision's own id (the caller's ids are in inputs.decision_ids). Other records: the caller's --decision-id values, mirrored in inputs.decision_ids."
+    },
+    "action": {
+      "enum": [
+        "decision",
+        "outcome",
+        "state_change",
+        "prune"
       ]
     },
     "target": {
-      "type": "string"
-    },
-    "action": {
-      "type": "string"
+      "type": "string",
+      "description": "decision and state_change: <policy>@<scope>. outcome: the decision id. prune: state.db."
     },
     "inputs": {
       "type": "object"
     },
-    "result": {}
+    "result": {
+      "type": "object"
+    }
   },
+  "additionalProperties": false,
   "required": [
     "ts",
     "actor",
-    "target",
+    "stdin_tty",
+    "decision_id",
     "action",
+    "target",
+    "inputs",
     "result"
   ],
-  "additionalProperties": true
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "decision"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}@(?:\\*|[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+)$"
+          },
+          "decision_id": {
+            "$ref": "defs.json#/$defs/decision_id"
+          },
+          "inputs": {
+            "type": "object",
+            "properties": {
+              "policy": {
+                "$ref": "defs.json#/$defs/policy_name"
+              },
+              "scope": {
+                "$ref": "defs.json#/$defs/scope"
+              },
+              "input_sha256": {
+                "$ref": "defs.json#/$defs/sha256"
+              },
+              "fingerprint": {
+                "$ref": "defs.json#/$defs/fingerprint"
+              },
+              "decision_ids": {
+                "$ref": "defs.json#/$defs/decision_ids"
+              },
+              "actor_source": {
+                "enum": [
+                  "flag",
+                  "default"
+                ],
+                "description": "flag: --actor was given. default: derived from stdin_tty."
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "policy",
+              "scope",
+              "input_sha256",
+              "fingerprint",
+              "decision_ids",
+              "actor_source"
+            ]
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "decision": {
+                "$ref": "defs.json#/$defs/decision"
+              },
+              "reason": {
+                "$ref": "defs.json#/$defs/reason"
+              },
+              "state": {
+                "$ref": "defs.json#/$defs/state"
+              },
+              "shadow": {
+                "type": "boolean"
+              },
+              "enforced": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "decision",
+              "reason",
+              "state",
+              "shadow",
+              "enforced"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "outcome"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "$ref": "defs.json#/$defs/decision_id"
+          },
+          "decision_id": {
+            "$ref": "defs.json#/$defs/decision_id"
+          },
+          "inputs": {
+            "type": "object",
+            "properties": {
+              "signal": {
+                "$ref": "defs.json#/$defs/signal"
+              },
+              "outcome": {
+                "$ref": "defs.json#/$defs/outcome"
+              },
+              "decision_ids": {
+                "$ref": "defs.json#/$defs/decision_ids"
+              },
+              "actor_source": {
+                "enum": [
+                  "flag",
+                  "default"
+                ],
+                "description": "flag: --actor was given. default: derived from stdin_tty."
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "signal",
+              "outcome",
+              "decision_ids",
+              "actor_source"
+            ]
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "outcome": {
+                "$ref": "defs.json#/$defs/outcome"
+              },
+              "signal": {
+                "$ref": "defs.json#/$defs/signal"
+              },
+              "effective_outcome": {
+                "$ref": "defs.json#/$defs/effective_outcome"
+              },
+              "miss": {
+                "oneOf": [
+                  {
+                    "$ref": "defs.json#/$defs/miss"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "outcome",
+              "signal",
+              "effective_outcome",
+              "miss"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "state_change"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}@(?:\\*|[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+)$"
+          },
+          "inputs": {
+            "type": "object",
+            "properties": {
+              "policy": {
+                "$ref": "defs.json#/$defs/policy_name"
+              },
+              "scope": {
+                "$ref": "defs.json#/$defs/scope"
+              },
+              "state": {
+                "$ref": "defs.json#/$defs/state"
+              },
+              "decision_ids": {
+                "$ref": "defs.json#/$defs/decision_ids"
+              },
+              "actor_source": {
+                "enum": [
+                  "flag",
+                  "default"
+                ],
+                "description": "flag: --actor was given. default: derived from stdin_tty."
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "policy",
+              "scope",
+              "state",
+              "decision_ids",
+              "actor_source"
+            ]
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "previous_state": {
+                "$ref": "defs.json#/$defs/state"
+              },
+              "state": {
+                "$ref": "defs.json#/$defs/state"
+              },
+              "cause": {
+                "$ref": "defs.json#/$defs/cause"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "x-untrusted": true,
+                "description": "Untrusted: the --reason-file text, at most 1 KiB.",
+                "maxLength": 1024
+              },
+              "triggered_by": {
+                "oneOf": [
+                  {
+                    "$ref": "defs.json#/$defs/decision_id"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The decision id for cause miss, else null."
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "previous_state",
+              "state",
+              "cause",
+              "reason",
+              "triggered_by"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "cause": {
+                      "const": "miss"
+                    }
+                  },
+                  "required": [
+                    "cause"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "triggered_by": {
+                      "$ref": "defs.json#/$defs/decision_id"
+                    }
+                  }
+                },
+                "else": {
+                  "properties": {
+                    "triggered_by": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "prune"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "const": "state.db"
+          },
+          "inputs": {
+            "type": "object",
+            "properties": {
+              "older_than": {
+                "oneOf": [
+                  {
+                    "$ref": "defs.json#/$defs/duration"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "null when only cache rows were deleted."
+              },
+              "decision_ids": {
+                "$ref": "defs.json#/$defs/decision_ids"
+              },
+              "actor_source": {
+                "enum": [
+                  "flag",
+                  "default"
+                ],
+                "description": "flag: --actor was given. default: derived from stdin_tty."
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "older_than",
+              "decision_ids",
+              "actor_source"
+            ]
+          },
+          "result": {
+            "type": "object",
+            "properties": {
+              "counts": {
+                "type": "object",
+                "properties": {
+                  "decisions": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "outcomes": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "cache": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "decisions",
+                  "outcomes",
+                  "cache"
+                ]
+              },
+              "older_than": {
+                "oneOf": [
+                  {
+                    "$ref": "defs.json#/$defs/duration"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "counts",
+              "older_than"
+            ]
+          }
+        }
+      }
+    }
+  ]
 }

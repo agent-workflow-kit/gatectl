@@ -1,12 +1,844 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gatectl/config",
+  "$id": "gatectl/config.json",
   "title": "gatectl config",
+  "description": "~/.config/gatectl/config.yaml (XDG-aware) plus config.d/*.yaml in lexical order (maps merge, hook lists append). A shared-structure error exits 2 (config_invalid), naming the key, for check, reconcile, prune, cron and set enforced; the other commands use the built-in default for an invalid shared key and carry on. A policy or override error fails only that policy's check. Precedence: flags, per-repo override, environment variables (only the keys listed in the interface), config (global file, then drop-ins), defaults. Ranges are in the interface, section Config; durations cannot be range-checked here.",
   "type": "object",
   "properties": {
+    "me": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._@-]{1,64}$",
+          "default": null,
+          "description": "Used only for the default actor; null: the OS username."
+        }
+      },
+      "additionalProperties": false,
+      "required": [],
+      "default": {}
+    },
+    "session_cmd": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1,
+      "default": [
+        "claude-session"
+      ],
+      "description": "Binding B: the claude-session command, a list (never a shell string). session_cmd[0] is an absolute path or a bare file name; a bare name is searched only in ~/.local/bin, /usr/local/bin, /opt/homebrew/bin, /usr/bin and /bin, never through the caller's PATH; a name with a / that is not absolute is a config error."
+    },
+    "defaults": {
+      "type": "object",
+      "properties": {
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Greater than 0 and at most 86400 s.",
+          "default": "60s"
+        },
+        "script_timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Greater than 0.",
+          "default": "20s"
+        },
+        "record_reserve": {
+          "$ref": "#/$defs/duration",
+          "description": "100 ms to 60 s.",
+          "default": "2s"
+        },
+        "input_max_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216,
+          "default": 1048576
+        },
+        "script_env_allow": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*\\*?$"
+          },
+          "uniqueItems": true,
+          "default": [
+            "PATH",
+            "HOME",
+            "LANG",
+            "LC_*"
+          ]
+        },
+        "recommend": {
+          "$ref": "#/$defs/recommend_cfg",
+          "default": {
+            "confidence": 0.95,
+            "max_miss_rate": 0.05
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [],
+      "default": {}
+    },
+    "agent": {
+      "type": "object",
+      "properties": {
+        "skill": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]*:[a-z0-9][a-z0-9_-]*$",
+          "description": "<plugin>:<skill>; the plugin directory must be in agent.plugin_dirs. A bare name is a config error.",
+          "default": "gatectl:gate-check"
+        },
+        "plugin_dirs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^/"
+          },
+          "default": []
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "default": null
+        },
+        "permission_profile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^/",
+          "description": "An absolute profile file; null: the bundled profile.",
+          "default": null
+        },
+        "sandbox": {
+          "enum": [
+            "required",
+            "preferred",
+            "off"
+          ],
+          "description": "claude-session's --sandbox levels, passed verbatim. preferred and off are reported by validate (sandbox_lowered).",
+          "default": "required"
+        },
+        "setting_sources": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "user",
+              "project",
+              "local"
+            ]
+          },
+          "uniqueItems": true,
+          "description": "Must stay empty: gate-check reads untrusted input and claude-session refuses any non-empty list (unsafe_setting_sources); validate reports it.",
+          "default": []
+        },
+        "env_allowlist": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "uniqueItems": true,
+          "default": []
+        },
+        "threshold": {
+          "$ref": "#/$defs/confidence",
+          "default": 0.8
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Greater than 0.",
+          "default": "300s"
+        },
+        "cache_ttl": {
+          "$ref": "#/$defs/duration",
+          "description": "0 (cache off) or a duration.",
+          "default": "10m"
+        },
+        "max_parallel": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32,
+          "default": 3
+        },
+        "min_start_budget": {
+          "$ref": "#/$defs/duration",
+          "description": "At least 1 s.",
+          "default": "30s"
+        },
+        "input_max_bytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 1048576,
+          "default": 65536,
+          "description": "Largest pretty-printed input an agent check accepts; a larger input escalates with input_invalid before a session starts."
+        }
+      },
+      "additionalProperties": false,
+      "required": [],
+      "default": {}
+    },
+    "retention": {
+      "type": "object",
+      "properties": {
+        "older_than": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/duration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "null, or a duration greater than 0. null: prune deletes no decisions without --older-than (expired cache rows are still deleted)."
+        }
+      },
+      "additionalProperties": false,
+      "required": [],
+      "default": {}
+    },
+    "policies": {
+      "type": "object",
+      "default": {},
+      "patternProperties": {
+        "^[a-z0-9][a-z0-9_-]{0,63}$": {
+          "$ref": "#/$defs/policy_def"
+        }
+      },
+      "additionalProperties": false
+    },
+    "repos": {
+      "type": "object",
+      "default": {},
+      "description": "Per-repo overrides keyed by repo id: policies.<name> may set any policy key, replacing the global key entirely.",
+      "patternProperties": {
+        "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+$": {
+          "type": "object",
+          "properties": {
+            "policies": {
+              "type": "object",
+              "patternProperties": {
+                "^[a-z0-9][a-z0-9_-]{0,63}$": {
+                  "$ref": "#/$defs/policy_override"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false,
+          "required": []
+        }
+      },
+      "additionalProperties": false
+    },
     "hooks": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "post-decision": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/hook_entry"
+          },
+          "default": []
+        },
+        "post-outcome": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/hook_entry"
+          },
+          "default": []
+        },
+        "post-state-change": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/hook_entry"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false,
+      "required": [],
+      "default": {}
     }
   },
-  "additionalProperties": true
+  "additionalProperties": false,
+  "required": [],
+  "$defs": {
+    "agent_check": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/check_name"
+        },
+        "type": {
+          "const": "agent"
+        },
+        "instruction": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Trusted configuration text. Exactly one of instruction and instruction_file."
+        },
+        "instruction_file": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "An absolute path read once when the fingerprint is computed."
+        },
+        "skill": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]*:[a-z0-9][a-z0-9_-]*$",
+          "description": "<plugin>:<skill>; the plugin directory must be in agent.plugin_dirs. A bare name is a config error."
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "threshold": {
+          "$ref": "#/$defs/confidence",
+          "description": "An allow below this confidence becomes escalate (low_confidence)."
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Greater than 0."
+        },
+        "cache_ttl": {
+          "$ref": "#/$defs/duration",
+          "description": "0 (cache off) or a duration."
+        },
+        "permission_profile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^/",
+          "description": "An absolute profile file; null: the bundled profile."
+        },
+        "sandbox": {
+          "enum": [
+            "required",
+            "preferred",
+            "off"
+          ],
+          "description": "claude-session's --sandbox levels, passed verbatim. preferred and off are reported by validate (sandbox_lowered)."
+        },
+        "setting_sources": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "user",
+              "project",
+              "local"
+            ]
+          },
+          "uniqueItems": true,
+          "description": "Must stay empty: gate-check reads untrusted input and claude-session refuses any non-empty list (unsafe_setting_sources); validate reports it."
+        },
+        "env_allowlist": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type"
+      ],
+      "oneOf": [
+        {
+          "required": [
+            "instruction"
+          ],
+          "not": {
+            "required": [
+              "instruction_file"
+            ]
+          }
+        },
+        {
+          "required": [
+            "instruction_file"
+          ],
+          "not": {
+            "required": [
+              "instruction"
+            ]
+          }
+        }
+      ]
+    },
+    "check_def": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/script_check"
+        },
+        {
+          "$ref": "#/$defs/rule_check"
+        },
+        {
+          "$ref": "#/$defs/agent_check"
+        }
+      ],
+      "description": "A check, discriminated by type."
+    },
+    "check_name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+      "description": "Unique within a policy."
+    },
+    "condition": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*$",
+          "description": "Dotted keys with numeric array indexes."
+        },
+        "op": {
+          "enum": [
+            "eq",
+            "ne",
+            "in",
+            "not_in",
+            "lt",
+            "le",
+            "gt",
+            "ge",
+            "glob",
+            "exists",
+            "absent"
+          ]
+        },
+        "value": {}
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "op"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "enum": [
+                  "exists",
+                  "absent"
+                ]
+              }
+            },
+            "required": [
+              "op"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "value"
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "value"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "enum": [
+                  "eq",
+                  "ne"
+                ]
+              }
+            },
+            "required": [
+              "op"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean",
+                  "null",
+                  "array",
+                  "object"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "enum": [
+                  "in",
+                  "not_in"
+                ]
+              }
+            },
+            "required": [
+              "op"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "array",
+                "items": {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "null"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "enum": [
+                  "lt",
+                  "le",
+                  "gt",
+                  "ge"
+                ]
+              }
+            },
+            "required": [
+              "op"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "const": "glob"
+              }
+            },
+            "required": [
+              "op"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            }
+          }
+        }
+      ]
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "decision": {
+      "enum": [
+        "allow",
+        "deny",
+        "escalate"
+      ]
+    },
+    "duration": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$"
+        },
+        {
+          "const": 0
+        }
+      ],
+      "description": "0, or an integer and a unit: ms, s, m, h, d."
+    },
+    "hook_entry": {
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Greater than 0.",
+          "default": "30s"
+        },
+        "async": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cmd"
+      ]
+    },
+    "initial_state": {
+      "enum": [
+        "off",
+        "shadow"
+      ],
+      "description": "A policy's initial state in the config: off or shadow. enforced is set only with gatectl set."
+    },
+    "input_decl": {
+      "type": "object",
+      "properties": {
+        "require": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "default": [],
+          "description": "Top-level keys that must be present and not null unless typed nullable."
+        },
+        "types": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^(?:string|integer|number|boolean|object|array)\\??$"
+          },
+          "default": {},
+          "description": "key -> string, integer, number, boolean, object or array; a trailing ? makes it nullable. integer is a JSON number written without fraction or exponent."
+        },
+        "ignore": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "not": {
+              "const": "repo"
+            }
+          },
+          "uniqueItems": true,
+          "default": [],
+          "description": "Top-level keys (volatile fields) left out of the agent cache key and out of case identity; still given to checks, still in input_sha256 and the fingerprint. May not name repo (a config error invalid_value: the scope is part of the key)."
+        }
+      },
+      "additionalProperties": false,
+      "required": []
+    },
+    "policy_def": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/initial_state",
+          "default": "shadow",
+          "description": "Initial state for scopes with no stored row: off or shadow. Later changes, and enforced, only through gatectl set."
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Total deadline for one check, greater than 0 and at most 86400 s; default defaults.timeout."
+        },
+        "applies_when": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/condition"
+          },
+          "minItems": 1,
+          "description": "Rule conditions, evaluated exactly like a rule check's when (ordered, stopping at the first false or error). When one is false the policy answers allow with reason not_applicable (shadow and enforced false), runs nothing and records nothing. A scoping filter, never a detector."
+        },
+        "input": {
+          "$ref": "#/$defs/input_decl"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/check_def"
+          },
+          "minItems": 1
+        },
+        "cache_ttl": {
+          "$ref": "#/$defs/duration",
+          "description": "Agent-check reuse window; precedence check > policy > agent.cache_ttl."
+        },
+        "record_input": {
+          "type": "boolean",
+          "default": false
+        },
+        "recommend": {
+          "$ref": "#/$defs/recommend_cfg"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "checks"
+      ]
+    },
+    "policy_override": {
+      "type": "object",
+      "properties": {
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Total deadline for one check, greater than 0 and at most 86400 s; default defaults.timeout."
+        },
+        "applies_when": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/condition"
+          },
+          "minItems": 1,
+          "description": "Rule conditions, evaluated exactly like a rule check's when (ordered, stopping at the first false or error). When one is false the policy answers allow with reason not_applicable (shadow and enforced false), runs nothing and records nothing. A scoping filter, never a detector."
+        },
+        "input": {
+          "$ref": "#/$defs/input_decl"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/check_def"
+          },
+          "minItems": 1
+        },
+        "cache_ttl": {
+          "$ref": "#/$defs/duration",
+          "description": "Agent-check reuse window; precedence check > policy > agent.cache_ttl."
+        },
+        "record_input": {
+          "type": "boolean",
+          "default": false
+        },
+        "recommend": {
+          "$ref": "#/$defs/recommend_cfg"
+        }
+      },
+      "additionalProperties": false,
+      "required": [],
+      "description": "A per-repo override: any policy key except state (a repo's state is its stored row); a key it sets replaces the global key entirely, except that recommend is a whole map whose missing sub-keys come from defaults.recommend."
+    },
+    "recommend_cfg": {
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1,
+          "default": 0.95
+        },
+        "max_miss_rate": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "default": 0.05
+        }
+      },
+      "additionalProperties": false,
+      "required": []
+    },
+    "rule_check": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/check_name"
+        },
+        "type": {
+          "const": "rule"
+        },
+        "when": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/condition"
+          },
+          "minItems": 1
+        },
+        "then": {
+          "$ref": "#/$defs/decision"
+        },
+        "else": {
+          "$ref": "#/$defs/decision",
+          "default": "allow"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type",
+        "when",
+        "then"
+      ]
+    },
+    "script_check": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/check_name"
+        },
+        "type": {
+          "const": "script"
+        },
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "prefixItems": [
+            {
+              "type": "string",
+              "pattern": "^/"
+            }
+          ],
+          "description": "A list, never a shell string. argv[0] must be an absolute path; it is resolved and checked when the check starts."
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Greater than 0."
+        },
+        "env_allow": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "uniqueItems": true,
+          "description": "Exact variable names; no trailing *."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type",
+        "argv"
+      ]
+    }
+  }
 }

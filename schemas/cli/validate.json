@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gatectl/cli/validate.json",
+  "title": "gatectl validate result",
+  "description": "Exit 0 (valid), exit 2 (problem list) and exit 12 (--probe failed: probe.ok false) all print this object.",
+  "type": "object",
+  "properties": {
+    "valid": {
+      "type": "boolean"
+    },
+    "problems": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/problem"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/problem"
+      },
+      "description": "Warning codes (relative_argv, sandbox_lowered, orphan_state, agent_only_policy, session_cmd_unresolved); they never make the config invalid."
+    },
+    "probe": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "exit_code": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "description": "claude-session's exit code; null if it did not run."
+            },
+            "end_reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^[a-z][a-z0-9_]*$"
+            },
+            "sandbox_active": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "ok": {
+              "type": "boolean"
+            },
+            "failed": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "x-untrusted": true,
+              "description": "Untrusted: what failed, from the probe's checks and claude-session.",
+              "maxLength": 2048
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "exit_code",
+            "end_reason",
+            "sandbox_active",
+            "ok",
+            "failed"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Present (non-null) only with --probe and when the config is valid."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "valid",
+    "problems",
+    "warnings",
+    "probe"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "valid": {
+            "const": true
+          }
+        },
+        "required": [
+          "valid"
+        ]
+      },
+      "then": {
+        "properties": {
+          "problems": {
+            "maxItems": 0
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "problems": {
+            "minItems": 1
+          },
+          "probe": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "properties": {
+        "problems": {
+          "items": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "unknown_key",
+                  "invalid_value",
+                  "invalid_rule",
+                  "glob_too_long",
+                  "unresolved_argv0",
+                  "skill_not_found",
+                  "plugin_not_found",
+                  "plugin_placeholders_missing",
+                  "instruction_file_unreadable",
+                  "override_unknown_policy",
+                  "override_unknown_key",
+                  "bare_skill_name",
+                  "unsafe_setting_sources",
+                  "deadline_too_short",
+                  "session_cmd_unresolved",
+                  "state_db_missing"
+                ]
+              }
+            }
+          }
+        },
+        "warnings": {
+          "items": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "relative_argv",
+                  "sandbox_lowered",
+                  "orphan_state",
+                  "agent_only_policy",
+                  "session_cmd_unresolved"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

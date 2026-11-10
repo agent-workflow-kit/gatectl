@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gatectl/hooks/post-state-change.json",
+  "title": "post-state-change hook payload (stdin)",
+  "description": "After set changed a state or wrote a row (one hook per scope written; not for a re-enforcement of an unchanged state), or the automatic drop wrote one.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "gatectl"
+    },
+    "hook": {
+      "const": "post-state-change"
+    },
+    "object_type": {
+      "const": "policy"
+    },
+    "object_id": {
+      "$ref": "../defs.json#/$defs/policy_name"
+    },
+    "repo": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/repo_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "scope": {
+      "$ref": "../defs.json#/$defs/scope"
+    },
+    "state": {
+      "$ref": "../defs.json#/$defs/state"
+    },
+    "previous_state": {
+      "$ref": "../defs.json#/$defs/state"
+    },
+    "cause": {
+      "$ref": "../defs.json#/$defs/cause"
+    },
+    "actor": {
+      "$ref": "../defs.json#/$defs/actor"
+    },
+    "decision_id": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/decision_id"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The decision that caused a miss drop; null for set."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "tool",
+    "hook",
+    "object_type",
+    "object_id",
+    "repo",
+    "scope",
+    "state",
+    "previous_state",
+    "cause",
+    "actor",
+    "decision_id"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "cause": {
+            "const": "miss"
+          }
+        },
+        "required": [
+          "cause"
+        ]
+      },
+      "then": {
+        "properties": {
+          "decision_id": {
+            "$ref": "../defs.json#/$defs/decision_id"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "decision_id": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
+}

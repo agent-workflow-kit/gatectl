@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gatectl/cli/reconcile.json",
+  "title": "gatectl reconcile result",
+  "type": "object",
+  "properties": {
+    "dry_run": {
+      "type": "boolean"
+    },
+    "already_running": {
+      "type": "boolean",
+      "description": "true when another reconcile holds the lease: nothing was done and the counts are 0."
+    },
+    "sessions_checked": {
+      "type": "boolean",
+      "description": "false when the session sweep was skipped (session_cmd does not resolve, a list failed, or another reconcile holds the lease)."
+    },
+    "slots_freed": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sessions_stopped": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sessions_forgotten": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "tmp_removed": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "tmp directories removed whose owner was dead."
+    },
+    "cache_expired": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Cache rows deleted past their expires_at."
+    },
+    "overdue": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Live slot holders past their expires_at; reported, never freed."
+    },
+    "overdue_holders": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "decision_id": {
+            "$ref": "../defs.json#/$defs/decision_id"
+          },
+          "pid": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "decision_id",
+          "pid"
+        ]
+      },
+      "description": "decision_id and PID of each overdue holder, so an operator can kill -9 that exact PID."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "dry_run",
+    "already_running",
+    "sessions_checked",
+    "slots_freed",
+    "sessions_stopped",
+    "sessions_forgotten",
+    "tmp_removed",
+    "cache_expired",
+    "overdue",
+    "overdue_holders"
+  ]
+}

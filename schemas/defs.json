@@ -1,0 +1,1492 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gatectl/defs.json",
+  "title": "gatectl shared definitions",
+  "description": "Not an output on its own. Shared definitions referenced by the CLI, hook, artifact, audit and log schemas. config.json embeds its own copies.",
+  "$defs": {
+    "policy_name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+    },
+    "check_name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+      "description": "Unique within a policy."
+    },
+    "decision_id": {
+      "type": "string",
+      "pattern": "^gd-[a-z2-7]{12}$",
+      "description": "gd- plus 12 lowercase base32 characters; satisfies the hook decision-id grammar callers validate."
+    },
+    "decision_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9._:@/-]{1,128}$"
+      },
+      "maxItems": 16,
+      "description": "The caller's --decision-id values, any grammar-valid id."
+    },
+    "repo_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+$",
+      "maxLength": 255,
+      "description": "host/<full project path>, at most 255 characters, no . or .. segment, compared exactly as written."
+    },
+    "scope": {
+      "type": "string",
+      "pattern": "^(?:\\*|[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+)$",
+      "maxLength": 255,
+      "description": "A repo id, or * for all repos."
+    },
+    "signal": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+      "description": "A free label naming where an outcome came from."
+    },
+    "duration": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$"
+        },
+        {
+          "const": 0
+        }
+      ],
+      "description": "0, or an integer and a unit: ms, s, m, h, d."
+    },
+    "ts": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$",
+      "description": "UTC, fixed form YYYY-MM-DDTHH:MM:SS.ffffffZ."
+    },
+    "actor": {
+      "type": "string",
+      "pattern": "^(?:human|auto):[A-Za-z0-9._@-]{1,64}$",
+      "description": "human:<name> or auto:<name>. A claim, advisory against same-user processes."
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "fingerprint": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "nonce": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "decision": {
+      "enum": [
+        "allow",
+        "deny",
+        "escalate"
+      ]
+    },
+    "state": {
+      "enum": [
+        "off",
+        "shadow",
+        "enforced"
+      ]
+    },
+    "initial_state": {
+      "enum": [
+        "off",
+        "shadow"
+      ],
+      "description": "A policy's initial state in the config: off or shadow. enforced is set only with gatectl set."
+    },
+    "verdict": {
+      "enum": [
+        "allow",
+        "deny",
+        "escalate",
+        "skipped"
+      ],
+      "description": "skipped: a check that did not run (a script or agent check after the deadline, any script or agent check after a deny, or an agent check after an escalate; a rule check is never skipped for the deadline)."
+    },
+    "check_type": {
+      "enum": [
+        "script",
+        "rule",
+        "agent"
+      ]
+    },
+    "reason": {
+      "enum": [
+        "all_passed",
+        "check_denied",
+        "check_escalated",
+        "input_invalid",
+        "timeout",
+        "budget_exhausted",
+        "busy",
+        "tool_missing",
+        "agent_unreported",
+        "artifact_invalid",
+        "low_confidence",
+        "sandbox_unavailable",
+        "check_error",
+        "not_applicable"
+      ],
+      "description": "Closed list; free text goes only in a check's detail."
+    },
+    "outcome": {
+      "enum": [
+        "agree",
+        "disagree"
+      ]
+    },
+    "effective_outcome": {
+      "enum": [
+        "pending",
+        "agree",
+        "disagree"
+      ]
+    },
+    "miss": {
+      "enum": [
+        "unsafe",
+        "over_strict"
+      ],
+      "description": "unsafe: a disagree on an allow. over_strict: a disagree on a deny or an escalate."
+    },
+    "cause": {
+      "enum": [
+        "set",
+        "miss"
+      ]
+    },
+    "recommend": {
+      "enum": [
+        "enforce",
+        "not_yet",
+        "keep",
+        "reconsider"
+      ],
+      "description": "Advisory only."
+    },
+    "exit_code": {
+      "enum": [
+        0,
+        1,
+        2,
+        10,
+        11,
+        12,
+        13,
+        20,
+        21
+      ]
+    },
+    "error_code": {
+      "enum": [
+        "usage",
+        "config_invalid",
+        "not_found",
+        "ambiguous",
+        "refused",
+        "failed",
+        "internal"
+      ]
+    },
+    "warning": {
+      "enum": [
+        "repo_invalid",
+        "repo_mismatch",
+        "definition_changed",
+        "config_problem",
+        "output_truncated"
+      ],
+      "description": "Closed list of check-result warning codes. config_problem: another policy in the config is invalid, or, for a command that runs no check, a shared key is invalid."
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "reasons_list": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 500
+      },
+      "maxItems": 10,
+      "x-untrusted": true,
+      "description": "Untrusted: the agent's reasons, at most 10 strings of at most 500 characters."
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "state_change": {
+      "type": "object",
+      "properties": {
+        "policy": {
+          "$ref": "#/$defs/policy_name"
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
+        "state": {
+          "$ref": "#/$defs/state"
+        },
+        "cause": {
+          "$ref": "#/$defs/cause"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "policy",
+        "scope",
+        "state",
+        "cause"
+      ]
+    },
+    "declared_fields": {
+      "type": "object",
+      "x-untrusted": true,
+      "description": "Untrusted: the values of the policy's declared input keys (strings capped at 256 characters, other values at 1 KiB of canonical JSON)."
+    },
+    "check_entry": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/check_name"
+        },
+        "type": {
+          "$ref": "#/$defs/check_type"
+        },
+        "verdict": {
+          "$ref": "#/$defs/verdict"
+        },
+        "reason": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/reason"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "null when the check allowed or was skipped."
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-untrusted": true,
+          "description": "Untrusted: script reason, rule or agent detail text, at most 1024 characters.",
+          "maxLength": 1024
+        },
+        "duration_ms": {
+          "$ref": "#/$defs/duration_ms"
+        },
+        "confidence": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/confidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Agent checks only; null when the agent produced no usable artifact."
+        },
+        "reused": {
+          "type": "boolean",
+          "description": "Agent checks only: the result came from the cache."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type",
+        "verdict",
+        "reason",
+        "detail",
+        "duration_ms"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "agent"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "confidence",
+              "reused"
+            ]
+          },
+          "else": {
+            "properties": {
+              "confidence": false,
+              "reused": false
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "enum": [
+                  "allow",
+                  "skipped"
+                ]
+              }
+            },
+            "required": [
+              "verdict"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/reason"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "const": "skipped"
+              }
+            },
+            "required": [
+              "verdict"
+            ]
+          },
+          "then": {
+            "properties": {
+              "detail": {
+                "type": "null"
+              },
+              "duration_ms": {
+                "const": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "agent"
+              },
+              "verdict": {
+                "const": "skipped"
+              }
+            },
+            "required": [
+              "type",
+              "verdict"
+            ]
+          },
+          "then": {
+            "properties": {
+              "confidence": {
+                "type": "null"
+              },
+              "reused": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
+    },
+    "plan_check": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/check_name"
+        },
+        "type": {
+          "$ref": "#/$defs/check_type"
+        },
+        "argv": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Script checks: the resolved argv (argv[0] absolute). null otherwise."
+        },
+        "skill": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Agent checks: the resolved <plugin>:<skill>. null otherwise."
+        },
+        "timeout_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "would_run": {
+          "type": "boolean",
+          "description": "false when the check would be skipped (an agent check after a deterministic deny or escalate), after a failed declaration, in state off, or when applies_when is false."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type",
+        "argv",
+        "skill",
+        "timeout_ms",
+        "would_run"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "script"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "argv": {
+                "type": "array"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "argv": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "agent"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "skill": {
+                "type": "string"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "skill": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/error_code"
+        },
+        "message": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: names the offending key or id; may quote caller-supplied text.",
+          "maxLength": 2048
+        },
+        "reason": {
+          "enum": [
+            "human_required",
+            "schema_newer",
+            "state_db_missing",
+            null
+          ],
+          "description": "refused: human_required. internal: schema_newer for a newer database, state_db_missing for a missing database over a non-empty audit log. null otherwise."
+        },
+        "details": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-untrusted": true,
+          "description": "Untrusted: code-specific context (an ambiguous prefix lists the matching ids)."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "reason",
+        "details"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "refused"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "const": "human_required"
+              }
+            }
+          },
+          "else": {}
+        }
+      ]
+    },
+    "input_decl": {
+      "type": "object",
+      "properties": {
+        "require": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "default": [],
+          "description": "Top-level keys that must be present and not null unless typed nullable."
+        },
+        "types": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^(?:string|integer|number|boolean|object|array)\\??$"
+          },
+          "default": {},
+          "description": "key -> string, integer, number, boolean, object or array; a trailing ? makes it nullable. integer is a JSON number written without fraction or exponent."
+        },
+        "ignore": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "not": {
+              "const": "repo"
+            }
+          },
+          "uniqueItems": true,
+          "default": [],
+          "description": "Top-level keys (volatile fields) left out of the agent cache key and out of case identity; still given to checks, still in input_sha256 and the fingerprint. May not name repo (a config error invalid_value: the scope is part of the key)."
+        }
+      },
+      "additionalProperties": false,
+      "required": []
+    },
+    "recommend_cfg": {
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1,
+          "default": 0.95
+        },
+        "max_miss_rate": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "default": 0.05
+        }
+      },
+      "additionalProperties": false,
+      "required": []
+    },
+    "condition": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*$",
+          "description": "Dotted keys with numeric array indexes."
+        },
+        "op": {
+          "enum": [
+            "eq",
+            "ne",
+            "in",
+            "not_in",
+            "lt",
+            "le",
+            "gt",
+            "ge",
+            "glob",
+            "exists",
+            "absent"
+          ]
+        },
+        "value": {}
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "op"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "enum": [
+                  "exists",
+                  "absent"
+                ]
+              }
+            },
+            "required": [
+              "op"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "value"
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "value"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "enum": [
+                  "eq",
+                  "ne"
+                ]
+              }
+            },
+            "required": [
+              "op"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean",
+                  "null",
+                  "array",
+                  "object"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "enum": [
+                  "in",
+                  "not_in"
+                ]
+              }
+            },
+            "required": [
+              "op"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "array",
+                "items": {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "null"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "enum": [
+                  "lt",
+                  "le",
+                  "gt",
+                  "ge"
+                ]
+              }
+            },
+            "required": [
+              "op"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "const": "glob"
+              }
+            },
+            "required": [
+              "op"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            }
+          }
+        }
+      ]
+    },
+    "script_check": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/check_name"
+        },
+        "type": {
+          "const": "script"
+        },
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "prefixItems": [
+            {
+              "type": "string",
+              "pattern": "^/"
+            }
+          ],
+          "description": "A list, never a shell string. argv[0] must be an absolute path; it is resolved and checked when the check starts."
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Greater than 0."
+        },
+        "env_allow": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "uniqueItems": true,
+          "description": "Exact variable names; no trailing *."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type",
+        "argv"
+      ]
+    },
+    "rule_check": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/check_name"
+        },
+        "type": {
+          "const": "rule"
+        },
+        "when": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/condition"
+          },
+          "minItems": 1
+        },
+        "then": {
+          "$ref": "#/$defs/decision"
+        },
+        "else": {
+          "$ref": "#/$defs/decision",
+          "default": "allow"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type",
+        "when",
+        "then"
+      ]
+    },
+    "agent_check": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/check_name"
+        },
+        "type": {
+          "const": "agent"
+        },
+        "instruction": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Trusted configuration text. Exactly one of instruction and instruction_file."
+        },
+        "instruction_file": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "An absolute path read once when the fingerprint is computed."
+        },
+        "skill": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]*:[a-z0-9][a-z0-9_-]*$",
+          "description": "<plugin>:<skill>; the plugin directory must be in agent.plugin_dirs. A bare name is a config error."
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "threshold": {
+          "$ref": "#/$defs/confidence",
+          "description": "An allow below this confidence becomes escalate (low_confidence)."
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Greater than 0."
+        },
+        "cache_ttl": {
+          "$ref": "#/$defs/duration",
+          "description": "0 (cache off) or a duration."
+        },
+        "permission_profile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^/",
+          "description": "An absolute profile file; null: the bundled profile."
+        },
+        "sandbox": {
+          "enum": [
+            "required",
+            "preferred",
+            "off"
+          ],
+          "description": "claude-session's --sandbox levels, passed verbatim. preferred and off are reported by validate (sandbox_lowered)."
+        },
+        "setting_sources": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "user",
+              "project",
+              "local"
+            ]
+          },
+          "uniqueItems": true,
+          "description": "Must stay empty: gate-check reads untrusted input and claude-session refuses any non-empty list (unsafe_setting_sources); validate reports it."
+        },
+        "env_allowlist": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type"
+      ],
+      "oneOf": [
+        {
+          "required": [
+            "instruction"
+          ],
+          "not": {
+            "required": [
+              "instruction_file"
+            ]
+          }
+        },
+        {
+          "required": [
+            "instruction_file"
+          ],
+          "not": {
+            "required": [
+              "instruction"
+            ]
+          }
+        }
+      ]
+    },
+    "check_def": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/script_check"
+        },
+        {
+          "$ref": "#/$defs/rule_check"
+        },
+        {
+          "$ref": "#/$defs/agent_check"
+        }
+      ],
+      "description": "A check, discriminated by type."
+    },
+    "policy_def": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/initial_state",
+          "default": "shadow",
+          "description": "Initial state for scopes with no stored row: off or shadow. Later changes, and enforced, only through gatectl set."
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Total deadline for one check, greater than 0 and at most 86400 s; default defaults.timeout."
+        },
+        "applies_when": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/condition"
+          },
+          "minItems": 1,
+          "description": "Rule conditions, evaluated exactly like a rule check's when (ordered, stopping at the first false or error). When one is false the policy answers allow with reason not_applicable (shadow and enforced false), runs nothing and records nothing. A scoping filter, never a detector."
+        },
+        "input": {
+          "$ref": "#/$defs/input_decl"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/check_def"
+          },
+          "minItems": 1
+        },
+        "cache_ttl": {
+          "$ref": "#/$defs/duration",
+          "description": "Agent-check reuse window; precedence check > policy > agent.cache_ttl."
+        },
+        "record_input": {
+          "type": "boolean",
+          "default": false
+        },
+        "recommend": {
+          "$ref": "#/$defs/recommend_cfg"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "checks"
+      ]
+    },
+    "policy_override": {
+      "type": "object",
+      "properties": {
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Total deadline for one check, greater than 0 and at most 86400 s; default defaults.timeout."
+        },
+        "applies_when": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/condition"
+          },
+          "minItems": 1,
+          "description": "Rule conditions, evaluated exactly like a rule check's when (ordered, stopping at the first false or error). When one is false the policy answers allow with reason not_applicable (shadow and enforced false), runs nothing and records nothing. A scoping filter, never a detector."
+        },
+        "input": {
+          "$ref": "#/$defs/input_decl"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/check_def"
+          },
+          "minItems": 1
+        },
+        "cache_ttl": {
+          "$ref": "#/$defs/duration",
+          "description": "Agent-check reuse window; precedence check > policy > agent.cache_ttl."
+        },
+        "record_input": {
+          "type": "boolean",
+          "default": false
+        },
+        "recommend": {
+          "$ref": "#/$defs/recommend_cfg"
+        }
+      },
+      "additionalProperties": false,
+      "required": [],
+      "description": "A per-repo override: any policy key except state (a repo's state is its stored row); a key it sets replaces the global key entirely, except that recommend is a whole map whose missing sub-keys come from defaults.recommend."
+    },
+    "hook_entry": {
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Greater than 0.",
+          "default": "30s"
+        },
+        "async": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cmd"
+      ]
+    },
+    "problem": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "enum": [
+            "unknown_key",
+            "invalid_value",
+            "invalid_rule",
+            "glob_too_long",
+            "unresolved_argv0",
+            "skill_not_found",
+            "plugin_not_found",
+            "plugin_placeholders_missing",
+            "instruction_file_unreadable",
+            "override_unknown_policy",
+            "override_unknown_key",
+            "bare_skill_name",
+            "unsafe_setting_sources",
+            "deadline_too_short",
+            "session_cmd_unresolved",
+            "state_db_missing",
+            "relative_argv",
+            "sandbox_lowered",
+            "orphan_state",
+            "agent_only_policy"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "description": "Dotted path of the offending config key."
+        },
+        "message": {
+          "type": "string",
+          "x-untrusted": true,
+          "description": "Untrusted: names the key; may quote config text.",
+          "maxLength": 2048
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "path",
+        "message"
+      ]
+    },
+    "decision_row": {
+      "type": "object",
+      "properties": {
+        "decision_id": {
+          "$ref": "#/$defs/decision_id"
+        },
+        "time": {
+          "$ref": "#/$defs/ts"
+        },
+        "policy": {
+          "$ref": "#/$defs/policy_name"
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
+        "state": {
+          "$ref": "#/$defs/state",
+          "description": "The effective state when the decision was recorded."
+        },
+        "decision": {
+          "$ref": "#/$defs/decision"
+        },
+        "reason": {
+          "$ref": "#/$defs/reason"
+        },
+        "fingerprint": {
+          "$ref": "#/$defs/fingerprint"
+        },
+        "actor": {
+          "$ref": "#/$defs/actor"
+        },
+        "tool": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-untrusted": true,
+          "description": "Untrusted: the input's tool string, capped.",
+          "maxLength": 256
+        },
+        "hook": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-untrusted": true,
+          "description": "Untrusted: the input's hook string, capped.",
+          "maxLength": 256
+        },
+        "object_type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-untrusted": true,
+          "description": "Untrusted: the input's object_type string, capped.",
+          "maxLength": 256
+        },
+        "object_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-untrusted": true,
+          "description": "Untrusted: the input's object_id string, capped.",
+          "maxLength": 256
+        },
+        "repo": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/repo_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "declared": {
+          "$ref": "#/$defs/declared_fields"
+        },
+        "input_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "state_rev": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "The rev of the state row that supplied the decision's state; null when the state came from the config's initial state or from an indeterminate scope."
+        },
+        "case_key": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "SHA-256 computed when the decision was recorded: the case identity (object_type, object_id and the declared values without the input.ignore keys; the input hash when object_id is null)."
+        },
+        "configured": {
+          "type": "boolean",
+          "description": "false for a decision of a policy that is no longer in the config (read-only history)."
+        },
+        "effective_outcome": {
+          "$ref": "#/$defs/effective_outcome"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "decision_id",
+        "time",
+        "policy",
+        "scope",
+        "state",
+        "decision",
+        "reason",
+        "fingerprint",
+        "actor",
+        "tool",
+        "hook",
+        "object_type",
+        "object_id",
+        "repo",
+        "declared",
+        "input_sha256",
+        "state_rev",
+        "case_key",
+        "configured",
+        "effective_outcome"
+      ]
+    },
+    "record": {
+      "type": "object",
+      "properties": {
+        "policy": {
+          "$ref": "#/$defs/policy_name"
+        },
+        "repo": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/repo_id"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "null for decisions with scope *."
+        },
+        "fingerprint": {
+          "$ref": "#/$defs/fingerprint"
+        },
+        "decisions": {
+          "type": "object",
+          "properties": {
+            "allow": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "deny": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "escalate": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "allow",
+            "deny",
+            "escalate"
+          ]
+        },
+        "outcomes": {
+          "type": "object",
+          "properties": {
+            "pending": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "agree": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "disagree": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "pending",
+            "agree",
+            "disagree"
+          ]
+        },
+        "unsafe_misses": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Allow decisions with effective outcome disagree."
+        },
+        "over_strict_misses": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Deny or escalate decisions with effective outcome disagree."
+        },
+        "unsafe_miss_cases": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "k: the number of cases with at least one unsafe miss."
+        },
+        "signals": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+          },
+          "description": "Outcome counts by signal."
+        },
+        "actor_kinds": {
+          "type": "object",
+          "properties": {
+            "human": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "automatic": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unattributed": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "human",
+            "automatic",
+            "unattributed"
+          ]
+        },
+        "reason_counts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/reason"
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "last_seen": {
+                "$ref": "#/$defs/ts"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "reason",
+              "count",
+              "last_seen"
+            ]
+          }
+        },
+        "configured": {
+          "type": "boolean",
+          "description": "false for a record of a policy that is no longer in the config."
+        },
+        "current": {
+          "type": "boolean",
+          "description": "true when the record's fingerprint is the current one for its scope."
+        },
+        "resolved_decisions": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The raw count of allow decisions with effective outcome agree or disagree."
+        },
+        "resolved_allows": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "n: cases (one per case_key) with at least one resolved allow."
+        },
+        "upper_bound": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "One-sided Clopper-Pearson upper bound of the unsafe-miss rate; 1 when n is 0."
+        },
+        "recommend": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/recommend"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "null with --since or when current is false."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "policy",
+        "repo",
+        "fingerprint",
+        "decisions",
+        "outcomes",
+        "unsafe_misses",
+        "over_strict_misses",
+        "unsafe_miss_cases",
+        "signals",
+        "actor_kinds",
+        "reason_counts",
+        "configured",
+        "current",
+        "resolved_decisions",
+        "resolved_allows",
+        "upper_bound",
+        "recommend"
+      ]
+    }
+  }
+}

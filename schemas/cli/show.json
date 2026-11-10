@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gatectl/cli/show.json",
+  "title": "gatectl show result",
+  "description": "One decision in full. Fields named declared carry the policy's declared input values only, never other input text.",
+  "type": "object",
+  "properties": {
+    "decision_id": {
+      "$ref": "../defs.json#/$defs/decision_id"
+    },
+    "time": {
+      "$ref": "../defs.json#/$defs/ts"
+    },
+    "policy": {
+      "$ref": "../defs.json#/$defs/policy_name"
+    },
+    "scope": {
+      "$ref": "../defs.json#/$defs/scope"
+    },
+    "state": {
+      "$ref": "../defs.json#/$defs/state",
+      "description": "The effective state when the decision was recorded."
+    },
+    "decision": {
+      "$ref": "../defs.json#/$defs/decision"
+    },
+    "reason": {
+      "$ref": "../defs.json#/$defs/reason"
+    },
+    "fingerprint": {
+      "$ref": "../defs.json#/$defs/fingerprint"
+    },
+    "actor": {
+      "$ref": "../defs.json#/$defs/actor"
+    },
+    "tool": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "x-untrusted": true,
+      "description": "Untrusted: the input's tool string, capped.",
+      "maxLength": 256
+    },
+    "hook": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "x-untrusted": true,
+      "description": "Untrusted: the input's hook string, capped.",
+      "maxLength": 256
+    },
+    "object_type": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "x-untrusted": true,
+      "description": "Untrusted: the input's object_type string, capped.",
+      "maxLength": 256
+    },
+    "object_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "x-untrusted": true,
+      "description": "Untrusted: the input's object_id string, capped.",
+      "maxLength": 256
+    },
+    "repo": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/repo_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "declared": {
+      "$ref": "../defs.json#/$defs/declared_fields"
+    },
+    "input_sha256": {
+      "$ref": "../defs.json#/$defs/sha256"
+    },
+    "state_rev": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "The rev of the state row that supplied the decision's state; null when the state came from the config's initial state or from an indeterminate scope."
+    },
+    "case_key": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "SHA-256 computed when the decision was recorded: the case identity (object_type, object_id and the declared values without the input.ignore keys; the input hash when object_id is null)."
+    },
+    "configured": {
+      "type": "boolean",
+      "description": "false for a decision of a policy that is no longer in the config (read-only history)."
+    },
+    "effective_outcome": {
+      "$ref": "../defs.json#/$defs/effective_outcome"
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/check_entry"
+      }
+    },
+    "cache_source": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "decision_id": {
+              "$ref": "../defs.json#/$defs/decision_id"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "decision_id"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The decision whose agent result was reused, when any check has reused true."
+    },
+    "outcomes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "time": {
+            "$ref": "../defs.json#/$defs/ts"
+          },
+          "outcome": {
+            "$ref": "../defs.json#/$defs/outcome"
+          },
+          "signal": {
+            "$ref": "../defs.json#/$defs/signal"
+          },
+          "actor": {
+            "$ref": "../defs.json#/$defs/actor"
+          },
+          "actor_kind": {
+            "enum": [
+              "human",
+              "automatic",
+              "unattributed"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "x-untrusted": true,
+            "description": "Untrusted: the outcome reason, at most 1 KiB.",
+            "maxLength": 1024
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "time",
+          "outcome",
+          "signal",
+          "actor",
+          "actor_kind",
+          "reason"
+        ]
+      },
+      "description": "History in time order."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "decision_id",
+    "time",
+    "policy",
+    "scope",
+    "state",
+    "decision",
+    "reason",
+    "fingerprint",
+    "actor",
+    "tool",
+    "hook",
+    "object_type",
+    "object_id",
+    "repo",
+    "declared",
+    "input_sha256",
+    "state_rev",
+    "case_key",
+    "configured",
+    "effective_outcome",
+    "checks",
+    "cache_source",
+    "outcomes"
+  ]
+}
