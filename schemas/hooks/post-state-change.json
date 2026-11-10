@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "gatectl/hooks/post-state-change.json",
   "title": "post-state-change hook payload (stdin)",
-  "description": "After set changed a state, or the automatic drop wrote one.",
+  "description": "After set changed a state or wrote a row (one hook per scope written; not for a re-enforcement of an unchanged state), or the automatic drop wrote one.",
   "type": "object",
   "properties": {
     "tool": {

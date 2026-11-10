@@ -24,11 +24,11 @@
     },
     "shadow": {
       "type": "boolean",
-      "description": "true only in the shadow state."
+      "description": "true only for an evaluated answer in the shadow state; false for not_applicable."
     },
     "enforced": {
       "type": "boolean",
-      "description": "true only in the enforced state. A caller that enables an automatic action must require enforced true and decision allow."
+      "description": "true only for an evaluated answer in the enforced state; false for not_applicable. A caller that enables an automatic action must require enforced true and decision allow."
     },
     "decision": {
       "oneOf": [
@@ -57,7 +57,7 @@
     },
     "input_sha256": {
       "$ref": "../defs.json#/$defs/sha256",
-      "description": "SHA-256 of the canonical JSON of the whole parsed input; present exactly when a decision was recorded."
+      "description": "SHA-256 of the canonical serialization of the whole parsed input (the raw bytes read when no object was parsed); present exactly when a decision was recorded."
     },
     "checks": {
       "type": "array",
@@ -110,7 +110,17 @@
         },
         "required": [
           "state"
-        ]
+        ],
+        "not": {
+          "properties": {
+            "reason": {
+              "const": "not_applicable"
+            }
+          },
+          "required": [
+            "reason"
+          ]
+        }
       },
       "then": {
         "properties": {
@@ -132,7 +142,17 @@
         },
         "required": [
           "state"
-        ]
+        ],
+        "not": {
+          "properties": {
+            "reason": {
+              "const": "not_applicable"
+            }
+          },
+          "required": [
+            "reason"
+          ]
+        }
       },
       "then": {
         "properties": {
@@ -256,6 +276,12 @@
           },
           {
             "properties": {
+              "state": {
+                "enum": [
+                  "shadow",
+                  "enforced"
+                ]
+              },
               "decision": {
                 "const": "allow"
               },
@@ -267,6 +293,12 @@
               },
               "error": {
                 "type": "null"
+              },
+              "shadow": {
+                "const": false
+              },
+              "enforced": {
+                "const": false
               }
             }
           },
@@ -316,9 +348,26 @@
       },
       "then": {
         "not": {
-          "required": [
-            "decision_id"
+          "anyOf": [
+            {
+              "required": [
+                "decision_id"
+              ]
+            },
+            {
+              "required": [
+                "input_sha256"
+              ]
+            }
           ]
+        },
+        "properties": {
+          "shadow": {
+            "const": false
+          },
+          "enforced": {
+            "const": false
+          }
         }
       }
     }

@@ -7,6 +7,10 @@
     "dry_run": {
       "type": "boolean"
     },
+    "already_running": {
+      "type": "boolean",
+      "description": "true when another prune holds the lease: nothing was done."
+    },
     "older_than": {
       "oneOf": [
         {
@@ -16,7 +20,7 @@
           "type": "null"
         }
       ],
-      "description": "null when no age is configured: nothing is deleted."
+      "description": "null when no age is configured: no decisions are deleted (expired cache rows still are)."
     },
     "deleted": {
       "type": "object",
@@ -45,14 +49,24 @@
     "kept_current": {
       "type": "integer",
       "minimum": 0,
-      "description": "Decisions older than the age that were kept because their policy, scope and fingerprint are current."
+      "description": "Decisions older than the age that were kept because they are current (their fingerprint is the current effective fingerprint of their scope for a configured policy)."
+    },
+    "skipped_policies": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/policy_name"
+      },
+      "uniqueItems": true,
+      "description": "Policies skipped because their fingerprint computation hit the unreadable marker."
     }
   },
   "additionalProperties": false,
   "required": [
     "dry_run",
+    "already_running",
     "older_than",
     "deleted",
-    "kept_current"
+    "kept_current",
+    "skipped_policies"
   ]
 }

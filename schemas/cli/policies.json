@@ -45,7 +45,12 @@
                 },
                 "definition_changed": {
                   "type": "boolean",
-                  "description": "true when the row's state is enforced and the scope's current fingerprint differs from the row's."
+                  "description": "true when the row's state is enforced and the row's fingerprint differs from the current fingerprint of the row's own scope."
+                },
+                "rev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Store-wide revision of the row; increases with every row write."
                 }
               },
               "additionalProperties": false,
@@ -56,7 +61,8 @@
                 "set_at",
                 "cause",
                 "fingerprint",
-                "definition_changed"
+                "definition_changed",
+                "rev"
               ]
             },
             "description": "Stored state rows."

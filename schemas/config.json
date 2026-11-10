@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "gatectl/config.json",
   "title": "gatectl config",
-  "description": "~/.config/gatectl/config.yaml (XDG-aware) plus config.d/*.yaml in lexical order (maps merge, hook lists append). Shared structure errors exit 2 (config_invalid) for every command, naming the key; a policy or override error fails only that policy's check. Precedence: flags, environment variables (only the keys listed in the interface), config (global file, then drop-ins), defaults. Per-repo overrides are not a layer: they replace policy keys for one scope.",
+  "description": "~/.config/gatectl/config.yaml (XDG-aware) plus config.d/*.yaml in lexical order (maps merge, hook lists append). A shared-structure error exits 2 (config_invalid), naming the key, for check, reconcile, prune, cron and set enforced; the other commands use the built-in default for an invalid shared key and carry on. A policy or override error fails only that policy's check. Precedence: flags, per-repo override, environment variables (only the keys listed in the interface), config (global file, then drop-ins), defaults. Ranges are in the interface, section Config; durations cannot be range-checked here.",
   "type": "object",
   "properties": {
     "me": {
@@ -32,26 +32,30 @@
       "default": [
         "claude-session"
       ],
-      "description": "Binding B: the claude-session command, a list (never a shell string)."
+      "description": "Binding B: the claude-session command, a list (never a shell string). session_cmd[0] is an absolute path or a bare file name; a bare name is searched only in ~/.local/bin, /usr/local/bin, /opt/homebrew/bin, /usr/bin and /bin, never through the caller's PATH; a name with a / that is not absolute is a config error."
     },
     "defaults": {
       "type": "object",
       "properties": {
         "timeout": {
           "$ref": "#/$defs/duration",
+          "description": "Greater than 0 and at most 86400 s.",
           "default": "60s"
         },
         "script_timeout": {
           "$ref": "#/$defs/duration",
+          "description": "Greater than 0.",
           "default": "20s"
         },
         "record_reserve": {
           "$ref": "#/$defs/duration",
+          "description": "100 ms to 60 s.",
           "default": "2s"
         },
         "input_max_bytes": {
           "type": "integer",
           "minimum": 1,
+          "maximum": 16777216,
           "default": 1048576
         },
         "script_env_allow": {
@@ -151,20 +155,31 @@
         },
         "timeout": {
           "$ref": "#/$defs/duration",
+          "description": "Greater than 0.",
           "default": "300s"
         },
         "cache_ttl": {
           "$ref": "#/$defs/duration",
+          "description": "0 (cache off) or a duration.",
           "default": "10m"
         },
         "max_parallel": {
           "type": "integer",
           "minimum": 1,
+          "maximum": 32,
           "default": 3
         },
         "min_start_budget": {
           "$ref": "#/$defs/duration",
+          "description": "At least 1 s.",
           "default": "30s"
+        },
+        "input_max_bytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 1048576,
+          "default": 65536,
+          "description": "Largest pretty-printed input an agent check accepts; a larger input escalates with input_invalid before a session starts."
         }
       },
       "additionalProperties": false,
@@ -184,7 +199,7 @@
             }
           ],
           "default": null,
-          "description": "null: prune does nothing without --older-than."
+          "description": "null, or a duration greater than 0. null: prune deletes no decisions without --older-than (expired cache rows are still deleted)."
         }
       },
       "additionalProperties": false,
@@ -275,7 +290,7 @@
         "instruction_file": {
           "type": "string",
           "pattern": "^/",
-          "description": "An absolute path read each time the check runs."
+          "description": "An absolute path read once when the fingerprint is computed."
         },
         "skill": {
           "type": "string",
@@ -294,10 +309,12 @@
           "description": "An allow below this confidence becomes escalate (low_confidence)."
         },
         "timeout": {
-          "$ref": "#/$defs/duration"
+          "$ref": "#/$defs/duration",
+          "description": "Greater than 0."
         },
         "cache_ttl": {
-          "$ref": "#/$defs/duration"
+          "$ref": "#/$defs/duration",
+          "description": "0 (cache off) or a duration."
         },
         "permission_profile": {
           "type": [
@@ -580,6 +597,7 @@
         },
         "timeout": {
           "$ref": "#/$defs/duration",
+          "description": "Greater than 0.",
           "default": "30s"
         },
         "async": {
@@ -625,11 +643,14 @@
           "type": "array",
           "items": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "not": {
+              "const": "repo"
+            }
           },
           "uniqueItems": true,
           "default": [],
-          "description": "Top-level keys (volatile fields) left out of the agent cache key only; still given to checks, still in input_sha256 and the fingerprint."
+          "description": "Top-level keys (volatile fields) left out of the agent cache key and out of case identity; still given to checks, still in input_sha256 and the fingerprint. May not name repo (a config error invalid_value: the scope is part of the key)."
         }
       },
       "additionalProperties": false,
@@ -645,7 +666,7 @@
         },
         "timeout": {
           "$ref": "#/$defs/duration",
-          "description": "Total deadline for one check; default defaults.timeout."
+          "description": "Total deadline for one check, greater than 0 and at most 86400 s; default defaults.timeout."
         },
         "applies_when": {
           "type": "array",
@@ -653,7 +674,7 @@
             "$ref": "#/$defs/condition"
           },
           "minItems": 1,
-          "description": "Rule conditions (same grammar as a rule check's when). When one is false the policy answers allow with reason not_applicable, runs nothing and records nothing."
+          "description": "Rule conditions, evaluated exactly like a rule check's when (ordered, stopping at the first false or error). When one is false the policy answers allow with reason not_applicable (shadow and enforced false), runs nothing and records nothing. A scoping filter, never a detector."
         },
         "input": {
           "$ref": "#/$defs/input_decl"
@@ -687,7 +708,7 @@
       "properties": {
         "timeout": {
           "$ref": "#/$defs/duration",
-          "description": "Total deadline for one check; default defaults.timeout."
+          "description": "Total deadline for one check, greater than 0 and at most 86400 s; default defaults.timeout."
         },
         "applies_when": {
           "type": "array",
@@ -695,7 +716,7 @@
             "$ref": "#/$defs/condition"
           },
           "minItems": 1,
-          "description": "Rule conditions (same grammar as a rule check's when). When one is false the policy answers allow with reason not_applicable, runs nothing and records nothing."
+          "description": "Rule conditions, evaluated exactly like a rule check's when (ordered, stopping at the first false or error). When one is false the policy answers allow with reason not_applicable (shadow and enforced false), runs nothing and records nothing. A scoping filter, never a detector."
         },
         "input": {
           "$ref": "#/$defs/input_decl"
@@ -799,7 +820,8 @@
           "description": "A list, never a shell string. argv[0] must be an absolute path; it is resolved and checked when the check starts."
         },
         "timeout": {
-          "$ref": "#/$defs/duration"
+          "$ref": "#/$defs/duration",
+          "description": "Greater than 0."
         },
         "env_allow": {
           "type": "array",

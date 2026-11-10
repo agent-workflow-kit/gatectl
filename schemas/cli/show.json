@@ -85,6 +85,25 @@
     "input_sha256": {
       "$ref": "../defs.json#/$defs/sha256"
     },
+    "state_rev": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "The rev of the state row that supplied the decision's state; null when the state came from the config's initial state or from an indeterminate scope."
+    },
+    "case_key": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "SHA-256 computed when the decision was recorded: the case identity (object_type, object_id and the declared values without the input.ignore keys; the input hash when object_id is null)."
+    },
     "configured": {
       "type": "boolean",
       "description": "false for a decision of a policy that is no longer in the config (read-only history)."
@@ -183,6 +202,8 @@
     "repo",
     "declared",
     "input_sha256",
+    "state_rev",
+    "case_key",
     "configured",
     "effective_outcome",
     "checks",

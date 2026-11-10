@@ -5,8 +5,8 @@
 # GATECTL_DEFAULTS__TIMEOUT): defaults.timeout, defaults.script_timeout, defaults.record_reserve,
 # agent.timeout, agent.cache_ttl, agent.max_parallel, agent.min_start_budget, retention.older_than.
 # Safety keys (agent.sandbox, permission_profile, setting_sources, env_allowlist, threshold, model,
-# defaults.input_max_bytes), lists and structured keys cannot be set from the environment.
-# Precedence: flags > environment > config (global file, then config.d in lexical order) > defaults.
+# agent.input_max_bytes, defaults.input_max_bytes), lists and structured keys cannot be set from the environment.
+# Precedence: flags > per-repo override > environment > config (global file, then config.d in lexical order) > defaults.
 # Schema: schemas/config.json. Rules: docs/interface.md, section Config.
 
 # Used only for the default actor (human:<name>). null: the OS username.
@@ -39,6 +39,7 @@ agent:
   cache_ttl: 10m               # reuse window for an identical input; 0 turns it off
   max_parallel: 3              # live agent runs across all gatectl processes
   min_start_budget: 30s        # least remaining budget at which an agent check may start
+  input_max_bytes: 65536       # largest pretty-printed input an agent check accepts (1024 to 1048576); a larger one escalates
 
 retention:
   older_than: null  # prune deletes older rows; null: prune does nothing without --older-than
@@ -50,20 +51,22 @@ retention:
 # Check types: script (argv list, argv[0] absolute, exit code decides), rule (field tests), agent
 # (a Claude session). Reuse window: a check's cache_ttl > the policy's cache_ttl > agent.cache_ttl.
 # Total deadline: --timeout > the policy's timeout > defaults.timeout. When applies_when is false
-# the gate answers allow with reason not_applicable and records nothing.
+# the gate answers allow with reason not_applicable (enforced false, so it never authorizes
+# anything) and records nothing.
+# applies_when example for a policy wired on a forgectl or pr-comment pre-post hook:
+#   applies_when: [{path: action, op: in, value: [review, approve]}]
 policies: {}
 # policies:
 #   auto-merge:
 #     state: shadow  # off or shadow; use gatectl set to enforce
 #     timeout: 60s
-#     applies_when: [{path: action, op: eq, value: approve}]
 #     cache_ttl: 10m
 #     record_input: false
 #     recommend: {confidence: 0.95, max_miss_rate: 0.05}
 #     input:
 #       require: [repo, head_sha]
 #       types: {repo: string, head_sha: string}
-#       ignore: [event_id]  # volatile keys left out of the agent cache key only
+#       ignore: [event_id]  # volatile keys left out of the agent cache key and case identity
 #     checks:
 #       - {name: ci-green, type: rule, when: [{path: ci.state, op: ne, value: passing}], then: deny, else: allow}
 #       - {name: scope, type: script, argv: [/usr/local/bin/check-scope], timeout: 20s, env_allow: [SCOPE_DIR]}

@@ -25,14 +25,14 @@
         "$ref": "../defs.json#/$defs/scope"
       },
       "uniqueItems": true,
-      "description": "Every scope written; with --all every scope that changed. Always present."
+      "description": "Every scope that changed. Always present."
     },
     "hint": {
       "type": [
         "string",
         "null"
       ],
-      "description": "Hints joined by a space for enforced: no successful probe for the current agent configuration, or no script or rule check. null otherwise."
+      "description": "Hints joined by a space for enforced: no successful probe for the current agent configuration, no script or rule check, or a repo with no recorded decision of this policy (a spelling that matches nothing seen). null otherwise."
     }
   },
   "additionalProperties": false,

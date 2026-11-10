@@ -24,7 +24,7 @@
         "type": "string",
         "pattern": "^[A-Za-z0-9._:@/-]{1,128}$"
       },
-      "maxItems": 32,
+      "maxItems": 16,
       "description": "The caller's --decision-id values, any grammar-valid id."
     },
     "repo_id": {
@@ -106,7 +106,7 @@
         "escalate",
         "skipped"
       ],
-      "description": "skipped: a check that did not run (after a deny, after the deadline, or an agent check after a deny or escalate)."
+      "description": "skipped: a check that did not run (a script or agent check after the deadline, any script or agent check after a deny, or an agent check after an escalate; a rule check is never skipped for the deadline)."
     },
     "check_type": {
       "enum": [
@@ -201,7 +201,7 @@
         "config_problem",
         "output_truncated"
       ],
-      "description": "Closed list of check-result warning codes."
+      "description": "Closed list of check-result warning codes. config_problem: another policy in the config is invalid, or, for a command that runs no check, a shared key is invalid."
     },
     "confidence": {
       "type": "number",
@@ -608,11 +608,14 @@
           "type": "array",
           "items": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "not": {
+              "const": "repo"
+            }
           },
           "uniqueItems": true,
           "default": [],
-          "description": "Top-level keys (volatile fields) left out of the agent cache key only; still given to checks, still in input_sha256 and the fingerprint."
+          "description": "Top-level keys (volatile fields) left out of the agent cache key and out of case identity; still given to checks, still in input_sha256 and the fingerprint. May not name repo (a config error invalid_value: the scope is part of the key)."
         }
       },
       "additionalProperties": false,
@@ -826,7 +829,8 @@
           "description": "A list, never a shell string. argv[0] must be an absolute path; it is resolved and checked when the check starts."
         },
         "timeout": {
-          "$ref": "#/$defs/duration"
+          "$ref": "#/$defs/duration",
+          "description": "Greater than 0."
         },
         "env_allow": {
           "type": "array",
@@ -894,7 +898,7 @@
         "instruction_file": {
           "type": "string",
           "pattern": "^/",
-          "description": "An absolute path read each time the check runs."
+          "description": "An absolute path read once when the fingerprint is computed."
         },
         "skill": {
           "type": "string",
@@ -913,10 +917,12 @@
           "description": "An allow below this confidence becomes escalate (low_confidence)."
         },
         "timeout": {
-          "$ref": "#/$defs/duration"
+          "$ref": "#/$defs/duration",
+          "description": "Greater than 0."
         },
         "cache_ttl": {
-          "$ref": "#/$defs/duration"
+          "$ref": "#/$defs/duration",
+          "description": "0 (cache off) or a duration."
         },
         "permission_profile": {
           "type": [
@@ -1007,7 +1013,7 @@
         },
         "timeout": {
           "$ref": "#/$defs/duration",
-          "description": "Total deadline for one check; default defaults.timeout."
+          "description": "Total deadline for one check, greater than 0 and at most 86400 s; default defaults.timeout."
         },
         "applies_when": {
           "type": "array",
@@ -1015,7 +1021,7 @@
             "$ref": "#/$defs/condition"
           },
           "minItems": 1,
-          "description": "Rule conditions (same grammar as a rule check's when). When one is false the policy answers allow with reason not_applicable, runs nothing and records nothing."
+          "description": "Rule conditions, evaluated exactly like a rule check's when (ordered, stopping at the first false or error). When one is false the policy answers allow with reason not_applicable (shadow and enforced false), runs nothing and records nothing. A scoping filter, never a detector."
         },
         "input": {
           "$ref": "#/$defs/input_decl"
@@ -1049,7 +1055,7 @@
       "properties": {
         "timeout": {
           "$ref": "#/$defs/duration",
-          "description": "Total deadline for one check; default defaults.timeout."
+          "description": "Total deadline for one check, greater than 0 and at most 86400 s; default defaults.timeout."
         },
         "applies_when": {
           "type": "array",
@@ -1057,7 +1063,7 @@
             "$ref": "#/$defs/condition"
           },
           "minItems": 1,
-          "description": "Rule conditions (same grammar as a rule check's when). When one is false the policy answers allow with reason not_applicable, runs nothing and records nothing."
+          "description": "Rule conditions, evaluated exactly like a rule check's when (ordered, stopping at the first false or error). When one is false the policy answers allow with reason not_applicable (shadow and enforced false), runs nothing and records nothing. A scoping filter, never a detector."
         },
         "input": {
           "$ref": "#/$defs/input_decl"
@@ -1094,6 +1100,7 @@
         },
         "timeout": {
           "$ref": "#/$defs/duration",
+          "description": "Greater than 0.",
           "default": "30s"
         },
         "async": {
@@ -1234,6 +1241,25 @@
         "input_sha256": {
           "$ref": "#/$defs/sha256"
         },
+        "state_rev": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "The rev of the state row that supplied the decision's state; null when the state came from the config's initial state or from an indeterminate scope."
+        },
+        "case_key": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "SHA-256 computed when the decision was recorded: the case identity (object_type, object_id and the declared values without the input.ignore keys; the input hash when object_id is null)."
+        },
         "configured": {
           "type": "boolean",
           "description": "false for a decision of a policy that is no longer in the config (read-only history)."
@@ -1260,6 +1286,8 @@
         "repo",
         "declared",
         "input_sha256",
+        "state_rev",
+        "case_key",
         "configured",
         "effective_outcome"
       ]
@@ -1332,11 +1360,18 @@
         },
         "unsafe_misses": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "description": "Allow decisions with effective outcome disagree."
         },
         "over_strict_misses": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "description": "Deny or escalate decisions with effective outcome disagree."
+        },
+        "unsafe_miss_cases": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "k: the number of cases with at least one unsafe miss."
         },
         "signals": {
           "type": "object",
@@ -1412,16 +1447,13 @@
         "resolved_allows": {
           "type": "integer",
           "minimum": 0,
-          "description": "n: cases (one per object_type, object_id and declared fields) with at least one resolved allow."
+          "description": "n: cases (one per case_key) with at least one resolved allow."
         },
         "upper_bound": {
-          "type": [
-            "number",
-            "null"
-          ],
+          "type": "number",
           "minimum": 0,
           "maximum": 1,
-          "description": "One-sided Clopper-Pearson upper bound of the unsafe-miss rate; null when n is 0."
+          "description": "One-sided Clopper-Pearson upper bound of the unsafe-miss rate; 1 when n is 0."
         },
         "recommend": {
           "oneOf": [
@@ -1444,6 +1476,7 @@
         "outcomes",
         "unsafe_misses",
         "over_strict_misses",
+        "unsafe_miss_cases",
         "signals",
         "actor_kinds",
         "reason_counts",

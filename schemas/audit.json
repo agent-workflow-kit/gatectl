@@ -48,6 +48,7 @@
   "required": [
     "ts",
     "actor",
+    "stdin_tty",
     "decision_id",
     "action",
     "target",
@@ -290,6 +291,17 @@
                 "x-untrusted": true,
                 "description": "Untrusted: the --reason-file text, at most 1 KiB.",
                 "maxLength": 1024
+              },
+              "triggered_by": {
+                "oneOf": [
+                  {
+                    "$ref": "defs.json#/$defs/decision_id"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The decision id for cause miss, else null."
               }
             },
             "additionalProperties": false,
@@ -297,7 +309,36 @@
               "previous_state",
               "state",
               "cause",
-              "reason"
+              "reason",
+              "triggered_by"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "cause": {
+                      "const": "miss"
+                    }
+                  },
+                  "required": [
+                    "cause"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "triggered_by": {
+                      "$ref": "defs.json#/$defs/decision_id"
+                    }
+                  }
+                },
+                "else": {
+                  "properties": {
+                    "triggered_by": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
             ]
           }
         }
@@ -323,10 +364,15 @@
             "type": "object",
             "properties": {
               "older_than": {
-                "$ref": "defs.json#/$defs/duration"
-              },
-              "dry_run": {
-                "type": "boolean"
+                "oneOf": [
+                  {
+                    "$ref": "defs.json#/$defs/duration"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "null when only cache rows were deleted."
               },
               "decision_ids": {
                 "$ref": "defs.json#/$defs/decision_ids"
@@ -342,7 +388,6 @@
             "additionalProperties": false,
             "required": [
               "older_than",
-              "dry_run",
               "decision_ids",
               "actor_source"
             ]
@@ -374,7 +419,14 @@
                 ]
               },
               "older_than": {
-                "$ref": "defs.json#/$defs/duration"
+                "oneOf": [
+                  {
+                    "$ref": "defs.json#/$defs/duration"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "additionalProperties": false,

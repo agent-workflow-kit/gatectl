@@ -18,7 +18,7 @@
     },
     "changed": {
       "type": "boolean",
-      "description": "false for a repeat of the latest outcome from the same actor and signal."
+      "description": "true when the decision's effective outcome changed; every outcome call appends one record."
     },
     "effective_outcome": {
       "$ref": "../defs.json#/$defs/effective_outcome"

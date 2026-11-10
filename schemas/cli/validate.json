@@ -19,7 +19,7 @@
       "items": {
         "$ref": "../defs.json#/$defs/problem"
       },
-      "description": "Warning codes (relative_argv, sandbox_lowered, orphan_state, agent_only_policy); they never make the config invalid."
+      "description": "Warning codes (relative_argv, sandbox_lowered, orphan_state, agent_only_policy, session_cmd_unresolved); they never make the config invalid."
     },
     "probe": {
       "oneOf": [
@@ -148,7 +148,8 @@
                   "relative_argv",
                   "sandbox_lowered",
                   "orphan_state",
-                  "agent_only_policy"
+                  "agent_only_policy",
+                  "session_cmd_unresolved"
                 ]
               }
             }
