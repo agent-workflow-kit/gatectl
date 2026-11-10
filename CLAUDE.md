@@ -3,7 +3,8 @@
 gatectl is a awkit L1 primitive: policy decisions (allow / deny / escalate) with first-class shadow mode. It must work
 fully standalone (no harness, bus, shared library or shared contracts package).
 
-- The default `gate-check` skill lives in `plugin/skills/gate-check/` (plugin `gatectl`); it is designed in this tool's design session.
+- The default `gate-check` skill lives in `plugin/skills/gate-check/` (plugin `gatectl`); its contract (input, artifact, nonce) is in `docs/interface.md`, section Agent checks.
+- `docs/interface.md` is the single normative source for this tool's rules; `docs/design.md` records decisions and structure and links to it; `docs/plan.md` is the staged implementation plan.
 
 **Naming.** Tools have no shared prefix; see design guide §1 naming rules.
 
@@ -33,10 +34,9 @@ fully standalone (no harness, bus, shared library or shared contracts package).
 
 ## Workflow
 
-1. Start with a design session that resolves the open topics in `docs/design.md` and records
-   the decisions there.
-2. Write `docs/interface.md` and `schemas/`.
-3. Implement test-first.
+1. The design session is done (`docs/design.md`, `docs/interface.md`, `schemas/`).
+2. Implement test-first, one stage at a time from `docs/plan.md`; pick up the GitHub issues in dependency order.
+3. Keep `docs/interface.md` current and update `awkit-docs/interface-registry.md` on every interface change.
 
 ## Repository workflow
 
