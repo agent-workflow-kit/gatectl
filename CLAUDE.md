@@ -35,7 +35,7 @@ fully standalone (no harness, bus, shared library or shared contracts package).
 ## Workflow
 
 1. The design session is done (`docs/design.md`, `docs/interface.md`, `schemas/`).
-2. Implement test-first, one stage at a time; pick up the GitHub issues in dependency order.
+2. Implement test-first, one stage of `docs/plan.md` at a time; pick up the GitHub issues in dependency order.
 3. Keep `docs/interface.md` current and update `awkit-docs/interface-registry.md` on every interface change.
 
 ## Repository workflow

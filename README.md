@@ -4,7 +4,7 @@ Policy decisions (allow / deny / escalate) with first-class shadow mode.
 
 ## Status
 
-Designed: the interface is specified in [docs/interface.md](docs/interface.md) (0.1.0-design) and the decisions are in [docs/design.md](docs/design.md).
+Designed: the interface is specified in [docs/interface.md](docs/interface.md) (0.1.0-design), the decisions are in [docs/design.md](docs/design.md) and the staged implementation plan is in [docs/plan.md](docs/plan.md).
 
 ## Layer
 

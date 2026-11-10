@@ -1,6 +1,6 @@
 # gatectl: design
 
-Status: designed, 2026-11-10 (interface 0.1.0-design). [interface.md](interface.md) holds the normative rules; this document records the decisions, the reasoning and the internal structure, and links to the interface headings instead of restating them.
+Status: designed, 2026-11-10 (interface 0.1.0-design). [interface.md](interface.md) holds the normative rules; this document records the decisions, the reasoning and the internal structure, and links to the interface headings instead of restating them. The staged implementation plan is [plan.md](plan.md).
 
 ## Role and layer
 
@@ -61,7 +61,7 @@ Review pass 1 put eleven questions to the user and pass 2 one. The user chose th
 - **R-9:** `prune` never deletes decisions of a current fingerprint ([Commands](interface.md#commands), D-17).
 - **R-10:** `argv[0]` must be absolute, and the check's `PATH` loses empty and relative entries ([Script checks](interface.md#script-checks), D-3).
 - **R-11:** a result with no recorded decision omits `decision_id` rather than printing null ([Check result](interface.md#check-result), D-20).
-- **R-12:** a human files `agree` (at a terminal, or through a tool that relays the human's own action, such as review-watch's accept); automation files only `disagree` (reverts, incidents); an automatic `agree` is recorded and never counts, so S-18 stays and the README and Outcomes no longer say that automation can build a track record ([Outcomes](interface.md#outcomes), D-15).
+- **R-12:** a human files `agree` (at a terminal, or through a tool that relays the human's own action, such as review-watch's accept); automation files only `disagree` (reverts, incidents); an automatic `agree` is recorded and never counts, so the README and Outcomes no longer say that automation can build a track record ([Outcomes](interface.md#outcomes), D-15).
 
 ## Resolved open topics
 
@@ -152,7 +152,7 @@ Commands that cron or a caller run concurrently are safe: decisions and outcomes
 
 ## Test strategy
 
-All subprocess calls go through `gateway.py`; tests substitute fakes.
+All subprocess calls go through `gateway.py`; tests substitute fakes. [plan.md](plan.md) assigns each group below to a stage.
 
 - **Fake claude-session** in `tests/fakebin/`: scenarios for a valid artifact, a nonce mismatch, a wrong schema, no artifact, unreported (exit 14, also `no_result`), timeout (exit 16), a `done` run whose end reason is `timeout`, needs-input (exit 13), `sandbox_unavailable` (exit 12), `claude_not_found` (exit 12), a status whose SHA-256 differs, a missing skill and a hang, each for `start`, `exec --session-id`, `list`, `stop` and `forget`; also exit 13 (`check_escalated`), exit 0 with an outcome other than `done`, and exit 0 with `report.implicit` true. Sibling `outcome` and `status` schemas are copied into `tests/` pinned to claude-session's version.
 - **Process tests** with real child processes: the hostile-script cases from the spike (a grandchild that ignores SIGTERM, 100 MB of output, closed stdout, a check that never reads a 5 MB stdin, an early exit, bad UTF-8, duplicate keys, deep nesting, control characters), the group kill, the lifeline watchdog and the output caps. Added for the review results: a caller that reads `check` stdout to EOF while an async and a sync post hook sleep 20 s sees EOF and the exit within one second, and a hook cannot write to the caller's stdout or stderr; the caller kills `check` with SIGTERM during a script check and during an agent run and no process or session is left; SIGKILL of gatectl during an agent run, after which `reconcile` stops and forgets the session and removes `tmp/<id>`; `reconcile` run in a loop while a 20 s script check, an agent run and a hook are live removes nothing of theirs, and after a SIGKILL of each owner the next `reconcile` removes the directory and stops and forgets the session; a fake claude-session whose `exec` ignores SIGTERM and whose `stop` hangs: `check` exits within deadline + 30 s with `escalate`/`timeout` and no leaked process, and SIGTERM during `start` leaves no session after `reconcile`; the EOF test extended to the lifeline watchdog and to a `check` killed with SIGKILL while an `exec` runs (the caller reading to EOF is released at once; a container without an init is listed in the README); a truncated payload, an oversized payload and a stalled writer with an enforced repo row and a shadow `*` row each escalate and exit 13, and the same with `--repo` of the enforced repo; a zombie holder frees its slot; killing gatectl between the group sweep and the `done` message and between `done` and the reap, with no recycled group signaled; strict JSON cases (`1e999`, a lone surrogate escape, a 100k-deep array, a 5,000-digit integer, a 1 MiB repo string, a FIFO or `/dev/zero` as `--input`, a numeric `object_id` recorded as null), each `input_invalid` or exit 2 with nothing failing during recording.
