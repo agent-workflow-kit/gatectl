@@ -39,7 +39,7 @@ agent:
   cache_ttl: 10m               # reuse window for an identical input; 0 turns it off
   max_parallel: 3              # live agent runs across all gatectl processes
   min_start_budget: 30s        # least remaining budget at which an agent check may start
-  input_max_bytes: 65536       # largest pretty-printed input an agent check accepts (1024 to 1048576); a larger one escalates
+  input_max_bytes: 65536       # largest pretty-printed input an agent check accepts (1024 to 1048576); a larger input, or one with a line over 16 KiB, escalates
 
 retention:
   older_than: null  # prune deletes older rows; null: prune does nothing without --older-than
@@ -50,7 +50,7 @@ retention:
 # Policy keys: state, timeout, applies_when, input, checks, cache_ttl, record_input, recommend.
 # Check types: script (argv list, argv[0] absolute, exit code decides), rule (field tests), agent
 # (a Claude session). Reuse window: a check's cache_ttl > the policy's cache_ttl > agent.cache_ttl.
-# Total deadline: --timeout > the policy's timeout > defaults.timeout. When applies_when is false
+# Total deadline: --timeout > the repo override's timeout > the policy's timeout > defaults.timeout. When applies_when is false
 # the gate answers allow with reason not_applicable (enforced false, so it never authorizes
 # anything) and records nothing.
 # applies_when example for a policy wired on a forgectl or pr-comment pre-post hook:
