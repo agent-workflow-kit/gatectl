@@ -30,11 +30,13 @@
     "repo_id": {
       "type": "string",
       "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+$",
-      "description": "host/<full project path>."
+      "maxLength": 255,
+      "description": "host/<full project path>, at most 255 characters, no . or .. segment, compared exactly as written."
     },
     "scope": {
       "type": "string",
       "pattern": "^(?:\\*|[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+)$",
+      "maxLength": 255,
       "description": "A repo id, or * for all repos."
     },
     "signal": {
@@ -90,6 +92,13 @@
         "enforced"
       ]
     },
+    "initial_state": {
+      "enum": [
+        "off",
+        "shadow"
+      ],
+      "description": "A policy's initial state in the config: off or shadow. enforced is set only with gatectl set."
+    },
     "verdict": {
       "enum": [
         "allow",
@@ -97,7 +106,7 @@
         "escalate",
         "skipped"
       ],
-      "description": "skipped: an agent check (or a later check after a deny) that did not run."
+      "description": "skipped: a check that did not run (after a deny, after the deadline, or an agent check after a deny or escalate)."
     },
     "check_type": {
       "enum": [
@@ -120,7 +129,8 @@
         "artifact_invalid",
         "low_confidence",
         "sandbox_unavailable",
-        "check_error"
+        "check_error",
+        "not_applicable"
       ],
       "description": "Closed list; free text goes only in a check's detail."
     },
@@ -184,9 +194,14 @@
       ]
     },
     "warning": {
-      "type": "string",
-      "pattern": "^[a-z][a-z0-9_]*$",
-      "description": "A warning code such as repo_invalid; the set is open."
+      "enum": [
+        "repo_invalid",
+        "repo_mismatch",
+        "definition_changed",
+        "config_problem",
+        "output_truncated"
+      ],
+      "description": "Closed list of check-result warning codes."
     },
     "confidence": {
       "type": "number",
@@ -349,6 +364,54 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "verdict": {
+                "const": "skipped"
+              }
+            },
+            "required": [
+              "verdict"
+            ]
+          },
+          "then": {
+            "properties": {
+              "detail": {
+                "type": "null"
+              },
+              "duration_ms": {
+                "const": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "agent"
+              },
+              "verdict": {
+                "const": "skipped"
+              }
+            },
+            "required": [
+              "type",
+              "verdict"
+            ]
+          },
+          "then": {
+            "properties": {
+              "confidence": {
+                "type": "null"
+              },
+              "reused": {
+                "const": false
+              }
+            }
+          }
         }
       ]
     },
@@ -392,7 +455,7 @@
         },
         "would_run": {
           "type": "boolean",
-          "description": "false when the check would be skipped (an agent check after a deterministic deny or escalate, or after a failed declaration)."
+          "description": "false when the check would be skipped (an agent check after a deterministic deny or escalate), after a failed declaration, in state off, or when applies_when is false."
         }
       },
       "additionalProperties": false,
@@ -475,9 +538,10 @@
           "enum": [
             "human_required",
             "schema_newer",
+            "state_db_missing",
             null
           ],
-          "description": "refused: human_required. internal: schema_newer for a newer database. null otherwise."
+          "description": "refused: human_required. internal: schema_newer for a newer database, state_db_missing for a missing database over a non-empty audit log. null otherwise."
         },
         "details": {
           "type": [
@@ -538,7 +602,17 @@
             "pattern": "^(?:string|integer|number|boolean|object|array)\\??$"
           },
           "default": {},
-          "description": "key -> string, integer, number, boolean, object or array; a trailing ? makes it nullable."
+          "description": "key -> string, integer, number, boolean, object or array; a trailing ? makes it nullable. integer is a JSON number written without fraction or exponent."
+        },
+        "ignore": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "default": [],
+          "description": "Top-level keys (volatile fields) left out of the agent cache key only; still given to checks, still in input_sha256 and the fingerprint."
         }
       },
       "additionalProperties": false,
@@ -626,6 +700,35 @@
             "properties": {
               "op": {
                 "enum": [
+                  "eq",
+                  "ne"
+                ]
+              }
+            },
+            "required": [
+              "op"
+            ]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean",
+                  "null",
+                  "array",
+                  "object"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "enum": [
                   "in",
                   "not_in"
                 ]
@@ -689,7 +792,9 @@
           "then": {
             "properties": {
               "value": {
-                "type": "string"
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
               }
             }
           }
@@ -712,7 +817,13 @@
             "minLength": 1
           },
           "minItems": 1,
-          "description": "A list, never a shell string."
+          "prefixItems": [
+            {
+              "type": "string",
+              "pattern": "^/"
+            }
+          ],
+          "description": "A list, never a shell string. argv[0] must be an absolute path; it is resolved and checked when the check starts."
         },
         "timeout": {
           "$ref": "#/$defs/duration"
@@ -723,7 +834,8 @@
             "type": "string",
             "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
           },
-          "uniqueItems": true
+          "uniqueItems": true,
+          "description": "Exact variable names; no trailing *."
         }
       },
       "additionalProperties": false,
@@ -817,9 +929,10 @@
         "sandbox": {
           "enum": [
             "required",
-            "optional",
+            "preferred",
             "off"
-          ]
+          ],
+          "description": "claude-session's --sandbox levels, passed verbatim. preferred and off are reported by validate (sandbox_lowered)."
         },
         "setting_sources": {
           "type": "array",
@@ -830,7 +943,8 @@
               "local"
             ]
           },
-          "uniqueItems": true
+          "uniqueItems": true,
+          "description": "Must stay empty: gate-check reads untrusted input and claude-session refuses any non-empty list (unsafe_setting_sources); validate reports it."
         },
         "env_allowlist": {
           "type": "array",
@@ -887,13 +1001,21 @@
       "type": "object",
       "properties": {
         "state": {
-          "$ref": "#/$defs/state",
+          "$ref": "#/$defs/initial_state",
           "default": "shadow",
-          "description": "Initial state for scopes with no stored row; later changes only through set."
+          "description": "Initial state for scopes with no stored row: off or shadow. Later changes, and enforced, only through gatectl set."
         },
         "timeout": {
           "$ref": "#/$defs/duration",
           "description": "Total deadline for one check; default defaults.timeout."
+        },
+        "applies_when": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/condition"
+          },
+          "minItems": 1,
+          "description": "Rule conditions (same grammar as a rule check's when). When one is false the policy answers allow with reason not_applicable, runs nothing and records nothing."
         },
         "input": {
           "$ref": "#/$defs/input_decl"
@@ -907,7 +1029,7 @@
         },
         "cache_ttl": {
           "$ref": "#/$defs/duration",
-          "description": "Agent-check reuse window; default agent.cache_ttl."
+          "description": "Agent-check reuse window; precedence check > policy > agent.cache_ttl."
         },
         "record_input": {
           "type": "boolean",
@@ -925,14 +1047,17 @@
     "policy_override": {
       "type": "object",
       "properties": {
-        "state": {
-          "$ref": "#/$defs/state",
-          "default": "shadow",
-          "description": "Initial state for scopes with no stored row; later changes only through set."
-        },
         "timeout": {
           "$ref": "#/$defs/duration",
           "description": "Total deadline for one check; default defaults.timeout."
+        },
+        "applies_when": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/condition"
+          },
+          "minItems": 1,
+          "description": "Rule conditions (same grammar as a rule check's when). When one is false the policy answers allow with reason not_applicable, runs nothing and records nothing."
         },
         "input": {
           "$ref": "#/$defs/input_decl"
@@ -946,7 +1071,7 @@
         },
         "cache_ttl": {
           "$ref": "#/$defs/duration",
-          "description": "Agent-check reuse window; default agent.cache_ttl."
+          "description": "Agent-check reuse window; precedence check > policy > agent.cache_ttl."
         },
         "record_input": {
           "type": "boolean",
@@ -958,7 +1083,7 @@
       },
       "additionalProperties": false,
       "required": [],
-      "description": "A per-repo override: any policy key; a key it sets replaces the global key entirely."
+      "description": "A per-repo override: any policy key except state (a repo's state is its stored row); a key it sets replaces the global key entirely, except that recommend is a whole map whose missing sub-keys come from defaults.recommend."
     },
     "hook_entry": {
       "type": "object",
@@ -985,8 +1110,28 @@
       "type": "object",
       "properties": {
         "code": {
-          "type": "string",
-          "pattern": "^[a-z][a-z0-9_]*$"
+          "enum": [
+            "unknown_key",
+            "invalid_value",
+            "invalid_rule",
+            "glob_too_long",
+            "unresolved_argv0",
+            "skill_not_found",
+            "plugin_not_found",
+            "plugin_placeholders_missing",
+            "instruction_file_unreadable",
+            "override_unknown_policy",
+            "override_unknown_key",
+            "bare_skill_name",
+            "unsafe_setting_sources",
+            "deadline_too_short",
+            "session_cmd_unresolved",
+            "state_db_missing",
+            "relative_argv",
+            "sandbox_lowered",
+            "orphan_state",
+            "agent_only_policy"
+          ]
         },
         "path": {
           "type": "string",
@@ -1083,6 +1228,16 @@
             }
           ]
         },
+        "declared": {
+          "$ref": "#/$defs/declared_fields"
+        },
+        "input_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "configured": {
+          "type": "boolean",
+          "description": "false for a decision of a policy that is no longer in the config (read-only history)."
+        },
         "effective_outcome": {
           "$ref": "#/$defs/effective_outcome"
         }
@@ -1103,6 +1258,9 @@
         "object_type",
         "object_id",
         "repo",
+        "declared",
+        "input_sha256",
+        "configured",
         "effective_outcome"
       ]
     },
@@ -1238,10 +1396,23 @@
             ]
           }
         },
+        "configured": {
+          "type": "boolean",
+          "description": "false for a record of a policy that is no longer in the config."
+        },
+        "current": {
+          "type": "boolean",
+          "description": "true when the record's fingerprint is the current one for its scope."
+        },
+        "resolved_decisions": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The raw count of allow decisions with effective outcome agree or disagree."
+        },
         "resolved_allows": {
           "type": "integer",
           "minimum": 0,
-          "description": "n: allow decisions with effective outcome agree or disagree."
+          "description": "n: cases (one per object_type, object_id and declared fields) with at least one resolved allow."
         },
         "upper_bound": {
           "type": [
@@ -1261,7 +1432,7 @@
               "type": "null"
             }
           ],
-          "description": "null with --since."
+          "description": "null with --since or when current is false."
         }
       },
       "additionalProperties": false,
@@ -1276,6 +1447,9 @@
         "signals",
         "actor_kinds",
         "reason_counts",
+        "configured",
+        "current",
+        "resolved_decisions",
         "resolved_allows",
         "upper_bound",
         "recommend"

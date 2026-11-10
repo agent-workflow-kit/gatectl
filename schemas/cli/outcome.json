@@ -31,7 +31,8 @@
         {
           "type": "null"
         }
-      ]
+      ],
+      "description": "Non-null only when this outcome record changed the effective outcome to disagree."
     },
     "state_change": {
       "oneOf": [

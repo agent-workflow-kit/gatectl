@@ -23,7 +23,7 @@
           "$ref": "defs.json#/$defs/decision_ids"
         }
       ],
-      "description": "A decision or outcome record: the decision's own id. Other records: the caller's --decision-id values."
+      "description": "A decision or outcome record: the decision's own id (the caller's ids are in inputs.decision_ids). Other records: the caller's --decision-id values, mirrored in inputs.decision_ids."
     },
     "action": {
       "enum": [
@@ -88,6 +88,16 @@
               },
               "fingerprint": {
                 "$ref": "defs.json#/$defs/fingerprint"
+              },
+              "decision_ids": {
+                "$ref": "defs.json#/$defs/decision_ids"
+              },
+              "actor_source": {
+                "enum": [
+                  "flag",
+                  "default"
+                ],
+                "description": "flag: --actor was given. default: derived from stdin_tty."
               }
             },
             "additionalProperties": false,
@@ -95,7 +105,9 @@
               "policy",
               "scope",
               "input_sha256",
-              "fingerprint"
+              "fingerprint",
+              "decision_ids",
+              "actor_source"
             ]
           },
           "result": {
@@ -156,12 +168,24 @@
               },
               "outcome": {
                 "$ref": "defs.json#/$defs/outcome"
+              },
+              "decision_ids": {
+                "$ref": "defs.json#/$defs/decision_ids"
+              },
+              "actor_source": {
+                "enum": [
+                  "flag",
+                  "default"
+                ],
+                "description": "flag: --actor was given. default: derived from stdin_tty."
               }
             },
             "additionalProperties": false,
             "required": [
               "signal",
-              "outcome"
+              "outcome",
+              "decision_ids",
+              "actor_source"
             ]
           },
           "result": {
@@ -225,13 +249,25 @@
               },
               "state": {
                 "$ref": "defs.json#/$defs/state"
+              },
+              "decision_ids": {
+                "$ref": "defs.json#/$defs/decision_ids"
+              },
+              "actor_source": {
+                "enum": [
+                  "flag",
+                  "default"
+                ],
+                "description": "flag: --actor was given. default: derived from stdin_tty."
               }
             },
             "additionalProperties": false,
             "required": [
               "policy",
               "scope",
-              "state"
+              "state",
+              "decision_ids",
+              "actor_source"
             ]
           },
           "result": {
@@ -291,12 +327,24 @@
               },
               "dry_run": {
                 "type": "boolean"
+              },
+              "decision_ids": {
+                "$ref": "defs.json#/$defs/decision_ids"
+              },
+              "actor_source": {
+                "enum": [
+                  "flag",
+                  "default"
+                ],
+                "description": "flag: --actor was given. default: derived from stdin_tty."
               }
             },
             "additionalProperties": false,
             "required": [
               "older_than",
-              "dry_run"
+              "dry_run",
+              "decision_ids",
+              "actor_source"
             ]
           },
           "result": {

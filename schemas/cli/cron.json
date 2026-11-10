@@ -10,6 +10,9 @@
         "uninstall"
       ]
     },
+    "dry_run": {
+      "type": "boolean"
+    },
     "changed": {
       "type": "boolean"
     },
@@ -24,6 +27,7 @@
   "additionalProperties": false,
   "required": [
     "action",
+    "dry_run",
     "changed",
     "entries"
   ]

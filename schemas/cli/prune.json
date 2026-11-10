@@ -41,12 +41,18 @@
         "cache"
       ],
       "description": "With dry_run, what would be deleted."
+    },
+    "kept_current": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Decisions older than the age that were kept because their policy, scope and fingerprint are current."
     }
   },
   "additionalProperties": false,
   "required": [
     "dry_run",
     "older_than",
-    "deleted"
+    "deleted",
+    "kept_current"
   ]
 }

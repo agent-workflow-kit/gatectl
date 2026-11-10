@@ -4,7 +4,10 @@
   "title": "gatectl reconcile result",
   "type": "object",
   "properties": {
-    "leases_taken_over": {
+    "dry_run": {
+      "type": "boolean"
+    },
+    "slots_freed": {
       "type": "integer",
       "minimum": 0
     },
@@ -16,16 +19,23 @@
       "type": "integer",
       "minimum": 0
     },
-    "dirs_removed": {
+    "tmp_removed": {
       "type": "integer",
       "minimum": 0
+    },
+    "overdue": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Live slot holders past their expires_at; reported, never freed."
     }
   },
   "additionalProperties": false,
   "required": [
-    "leases_taken_over",
+    "dry_run",
+    "slots_freed",
     "sessions_stopped",
     "sessions_forgotten",
-    "dirs_removed"
+    "tmp_removed",
+    "overdue"
   ]
 }

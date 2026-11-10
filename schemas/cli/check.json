@@ -9,15 +9,8 @@
       "const": 1
     },
     "decision_id": {
-      "oneOf": [
-        {
-          "$ref": "../defs.json#/$defs/decision_id"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "description": "null when the state is off or the decision could not be recorded (a shadow failure)."
+      "$ref": "../defs.json#/$defs/decision_id",
+      "description": "Present exactly when a decision was recorded; absent in state off, in a shadow failure and for not_applicable. A caller reads an absent decision_id as null."
     },
     "policy": {
       "$ref": "../defs.json#/$defs/policy_name"
@@ -46,7 +39,7 @@
           "type": "null"
         }
       ],
-      "description": "The would-be decision; null with decision_id null."
+      "description": "The would-be decision; null only in state off."
     },
     "reason": {
       "oneOf": [
@@ -62,19 +55,23 @@
     "fingerprint": {
       "$ref": "../defs.json#/$defs/fingerprint"
     },
+    "input_sha256": {
+      "$ref": "../defs.json#/$defs/sha256",
+      "description": "SHA-256 of the canonical JSON of the whole parsed input; present exactly when a decision was recorded."
+    },
     "checks": {
       "type": "array",
       "items": {
         "$ref": "../defs.json#/$defs/check_entry"
       },
-      "description": "In check order; empty when the state is off."
+      "description": "Every check in execution order; empty when the state is off, for not_applicable and when the declaration failed."
     },
     "warnings": {
       "type": "array",
       "items": {
         "$ref": "../defs.json#/$defs/warning"
       },
-      "description": "Codes such as repo_invalid."
+      "description": "Closed codes: repo_invalid, repo_mismatch, definition_changed, config_problem, output_truncated."
     },
     "error": {
       "oneOf": [
@@ -91,7 +88,6 @@
   "additionalProperties": false,
   "required": [
     "schema_version",
-    "decision_id",
     "policy",
     "scope",
     "state",
@@ -168,52 +164,50 @@
           "enforced": {
             "const": false
           },
-          "decision_id": {
-            "type": "null"
-          },
-          "decision": {
-            "type": "null"
-          },
-          "reason": {
-            "type": "null"
-          },
           "checks": {
             "maxItems": 0
           },
           "error": {
             "type": "null"
           }
+        },
+        "not": {
+          "required": [
+            "decision_id"
+          ]
         }
       }
     },
     {
       "if": {
-        "properties": {
-          "decision_id": {
-            "const": null
-          }
-        },
         "required": [
           "decision_id"
         ]
       },
       "then": {
-        "properties": {
-          "decision": {
-            "type": "null"
-          },
-          "reason": {
-            "type": "null"
-          }
-        }
-      },
-      "else": {
+        "required": [
+          "input_sha256"
+        ],
         "properties": {
           "decision": {
             "$ref": "../defs.json#/$defs/decision"
           },
           "reason": {
-            "$ref": "../defs.json#/$defs/reason"
+            "enum": [
+              "all_passed",
+              "check_denied",
+              "check_escalated",
+              "input_invalid",
+              "timeout",
+              "budget_exhausted",
+              "busy",
+              "tool_missing",
+              "agent_unreported",
+              "artifact_invalid",
+              "low_confidence",
+              "sandbox_unavailable",
+              "check_error"
+            ]
           },
           "error": {
             "type": "null"
@@ -223,27 +217,108 @@
     },
     {
       "if": {
-        "properties": {
-          "decision_id": {
-            "type": "null"
+        "not": {
+          "required": [
+            "decision_id"
+          ]
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "input_sha256"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "not": {
+          "required": [
+            "decision_id"
+          ]
+        }
+      },
+      "then": {
+        "oneOf": [
+          {
+            "properties": {
+              "state": {
+                "const": "off"
+              },
+              "decision": {
+                "type": "null"
+              },
+              "reason": {
+                "type": "null"
+              }
+            }
           },
-          "state": {
-            "enum": [
-              "shadow",
-              "enforced"
-            ]
+          {
+            "properties": {
+              "decision": {
+                "const": "allow"
+              },
+              "reason": {
+                "const": "not_applicable"
+              },
+              "checks": {
+                "maxItems": 0
+              },
+              "error": {
+                "type": "null"
+              }
+            }
+          },
+          {
+            "properties": {
+              "state": {
+                "const": "shadow"
+              },
+              "decision": {
+                "$ref": "../defs.json#/$defs/decision"
+              },
+              "reason": {
+                "enum": [
+                  "all_passed",
+                  "check_denied",
+                  "check_escalated",
+                  "input_invalid",
+                  "timeout",
+                  "budget_exhausted",
+                  "busy",
+                  "tool_missing",
+                  "agent_unreported",
+                  "artifact_invalid",
+                  "low_confidence",
+                  "sandbox_unavailable",
+                  "check_error"
+                ]
+              },
+              "error": {
+                "$ref": "../defs.json#/$defs/error"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": {
+            "const": "not_applicable"
           }
         },
         "required": [
-          "decision_id",
-          "state"
+          "reason"
         ]
       },
       "then": {
-        "properties": {
-          "error": {
-            "$ref": "../defs.json#/$defs/error"
-          }
+        "not": {
+          "required": [
+            "decision_id"
+          ]
         }
       }
     }

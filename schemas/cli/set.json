@@ -19,12 +19,20 @@
     "changed": {
       "type": "boolean"
     },
+    "scopes_changed": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/scope"
+      },
+      "uniqueItems": true,
+      "description": "Every scope written; with --all every scope that changed. Always present."
+    },
     "hint": {
       "type": [
         "string",
         "null"
       ],
-      "description": "Set for enforced on a policy with an agent check and no successful probe since the last config change."
+      "description": "Hints joined by a space for enforced: no successful probe for the current agent configuration, or no script or rule check. null otherwise."
     }
   },
   "additionalProperties": false,
@@ -34,6 +42,7 @@
     "state",
     "previous_state",
     "changed",
+    "scopes_changed",
     "hint"
   ]
 }

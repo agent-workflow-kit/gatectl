@@ -1,8 +1,12 @@
 # Example config for gatectl. Location: ~/.config/gatectl/config.yaml (XDG-aware), plus
 # drop-ins in config.d/*.yaml merged in lexical order (maps merge, hook lists append).
 # Every key is shown with its default. Durations: 0, or an integer and a unit (ms, s, m, h, d).
-# Top-level and nested scalars can also be set as GATECTL_<KEY>, nested keys joined with __
-# (for example GATECTL_DEFAULTS__TIMEOUT). Lists and structured keys cannot.
+# Only these keys can also be set as GATECTL_<KEY>, nested keys joined with __ (for example
+# GATECTL_DEFAULTS__TIMEOUT): defaults.timeout, defaults.script_timeout, defaults.record_reserve,
+# agent.timeout, agent.cache_ttl, agent.max_parallel, agent.min_start_budget, retention.older_than.
+# Safety keys (agent.sandbox, permission_profile, setting_sources, env_allowlist, threshold, model,
+# defaults.input_max_bytes), lists and structured keys cannot be set from the environment.
+# Precedence: flags > environment > config (global file, then config.d in lexical order) > defaults.
 # Schema: schemas/config.json. Rules: docs/interface.md, section Config.
 
 # Used only for the default actor (human:<name>). null: the OS username.
@@ -27,8 +31,8 @@ agent:
   plugin_dirs: []              # absolute paths of extra Claude Code plugin directories
   model: null                  # null: Claude Code's default
   permission_profile: null     # null: the bundled profile file; or an absolute path
-  sandbox: required            # required, optional or off
-  setting_sources: []          # any of user, project, local
+  sandbox: required            # required, preferred or off (claude-session --sandbox levels)
+  setting_sources: []          # must stay empty: gate-check reads untrusted input and claude-session refuses any source
   env_allowlist: []            # environment variables an agent session may receive
   threshold: 0.8               # an allow below this confidence becomes escalate
   timeout: 300s                # default timeout of one agent check
@@ -40,28 +44,35 @@ retention:
   older_than: null  # prune deletes older rows; null: prune does nothing without --older-than
 
 # Policies: a named, ordered list of checks plus a declared input. A policy's state here is only
-# its initial state (new policies start in shadow); later changes go through `gatectl set`.
-# Policy keys: state, timeout, input, checks, cache_ttl, record_input, recommend.
-# Check types: script (argv list, exit code decides), rule (field tests), agent (a Claude session).
+# its initial state: off or shadow (new policies start in shadow); enforcing, and every later change,
+# goes through `gatectl set`.
+# Policy keys: state, timeout, applies_when, input, checks, cache_ttl, record_input, recommend.
+# Check types: script (argv list, argv[0] absolute, exit code decides), rule (field tests), agent
+# (a Claude session). Reuse window: a check's cache_ttl > the policy's cache_ttl > agent.cache_ttl.
+# Total deadline: --timeout > the policy's timeout > defaults.timeout. When applies_when is false
+# the gate answers allow with reason not_applicable and records nothing.
 policies: {}
 # policies:
 #   auto-merge:
-#     state: shadow
+#     state: shadow  # off or shadow; use gatectl set to enforce
 #     timeout: 60s
+#     applies_when: [{path: action, op: eq, value: approve}]
 #     cache_ttl: 10m
 #     record_input: false
 #     recommend: {confidence: 0.95, max_miss_rate: 0.05}
 #     input:
 #       require: [repo, head_sha]
 #       types: {repo: string, head_sha: string}
+#       ignore: [event_id]  # volatile keys left out of the agent cache key only
 #     checks:
 #       - {name: ci-green, type: rule, when: [{path: ci.state, op: ne, value: passing}], then: deny, else: allow}
 #       - {name: scope, type: script, argv: [/usr/local/bin/check-scope], timeout: 20s, env_allow: [SCOPE_DIR]}
 #       - {name: reviewer, type: agent, instruction: "Escalate if the change touches security-sensitive code.", threshold: 0.8, model: haiku, timeout: 300s, cache_ttl: 10m, sandbox: required}
 #       - {name: style, type: agent, instruction_file: /etc/gatectl/style.md, skill: "my-plugin:review", setting_sources: [], env_allowlist: []}
 
-# Per-repo overrides, keyed by repo id (host/full/project/path): any policy key replaces the
-# global key entirely, lists included. The override has its own fingerprint and track record.
+# Per-repo overrides, keyed by repo id (host/full/project/path): any policy key except state
+# replaces the global key entirely, lists included (a repo's state is its stored row). The override
+# has its own fingerprint and track record.
 repos: {}
 # repos:
 #   github.com/org/repo:
@@ -73,6 +84,8 @@ repos: {}
 
 # Hooks: gatectl fires post-decision, post-outcome and post-state-change. Each is a list of
 # {cmd, timeout (default 30s), async (default false)}; the payload arrives as JSON on stdin.
+# Hooks run after the result is printed; `check` runs hooks detached; hook stdout and stderr are
+# discarded.
 hooks: {}
 # hooks:
 #   post-state-change:

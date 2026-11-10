@@ -4,7 +4,7 @@ Policy decisions (allow / deny / escalate) with first-class shadow mode.
 
 ## Status
 
-Designed: the interface is specified in [docs/interface.md](docs/interface.md) (0.1.0-design) and the decisions are in [docs/design.md](docs/design.md). Implementation follows [docs/plan.md](docs/plan.md).
+Designed: the interface is specified in [docs/interface.md](docs/interface.md) (0.1.0-design) and the decisions are in [docs/design.md](docs/design.md).
 
 ## Layer
 
@@ -29,21 +29,21 @@ gatectl set auto-merge enforced --repo github.com/org/repo
 ## Commands
 
 ```text
-gatectl check <policy> [--input <file> | --input -] [--timeout <seconds>] [--repo <id>] [--no-cache] [--dry-run]
-gatectl outcome <decision-id> agree|disagree [--signal <name>] [--reason-file <file>]
-gatectl decisions [--since <time>] [--policy <p>] [--repo <id>] [--object-id <x>] [--outcome pending|agree|disagree]
+gatectl check <policy> [--input <file> | --input -] [--timeout <seconds>] [--repo <id>] [--no-cache] [--dry-run] [--actor A]
+gatectl outcome <decision-id> agree|disagree [--signal S] [--reason-file F|-]
+gatectl decisions [--since T] [--policy P] [--repo R] [--object-id X] [--outcome pending|agree|disagree] [--decision allow|deny|escalate] [--declared key=value] [--limit N]
 gatectl show <decision-id>
-gatectl stats [--policy <p>] [--repo <id>] [--since <time>]
-gatectl set <policy> off|shadow|enforced [--repo <id>]
-gatectl policies [--repo <id>]
+gatectl stats [--policy P] [--repo R] [--since T]
+gatectl set <policy> off|shadow|enforced [--repo ID] [--all] [--reason-file F]
+gatectl policies [--repo ID]
 gatectl validate [--probe]
-gatectl export [--log] [--since <time>]
-gatectl reconcile
-gatectl prune [--older-than <duration>]
-gatectl cron install|uninstall
+gatectl export [--log] [--since T]
+gatectl reconcile [--dry-run]
+gatectl prune [--older-than D] [--dry-run]
+gatectl cron install|uninstall [--dry-run]
 ```
 
-`check` prints one JSON object on stdout. Exit codes: 0 allow (or any result in `shadow` or `off`), 11 deny, 13 escalate, 1 internal error, 2 usage error. Setting `enforced` is a human action. The full rules are in [docs/interface.md](docs/interface.md).
+`check` prints one JSON object on stdout. Exit codes: 0 allow (or any result in `shadow` or `off`), 11 deny, 13 escalate, 12 operation failed (`validate --probe`), 20 refused, 21 ambiguous id, 1 internal error, 2 usage error. Setting `enforced` is a human action; `gatectl set <policy> off --all` is the kill switch, and `shadow` and `off` disable veto gates, so watch `post-state-change`. The full rules are in [docs/interface.md](docs/interface.md#commands).
 
 ## Using it as a hook
 
@@ -56,7 +56,22 @@ hooks:
       timeout: 600
 ```
 
-A hook that launches claude-session sessions must set `exclude_kinds: [gate-check]`, or gatectl's own agent checks recurse.
+A claude-session `pre-launch` hook that calls gatectl must set `exclude_kinds: [gate-check]`, or gatectl's own agent checks recurse until the hook times out; a `post-state-change` entry that notifies should exclude `gate-check` too.
+
+### Wiring checklist
+
+1. The caller's hook `timeout` must exceed gatectl's `--timeout`. The default hook timeout is 30 s and the default deadline is 60 s, so a hook wired without both is killed and counted as a veto even in shadow.
+2. Set `exclude_kinds: [gate-check]` as above.
+3. A jobsctl `pre-start` gate holds the job's slot while it runs.
+4. The hook lists of forgectl, pr-comment, wtctl and termctl have no selectors, so a policy wired there sees every action of that hook point. Give the policy `applies_when: [{path: action, op: eq, value: approve}]` (for example for forgectl and pr-comment hooks) so other actions answer `allow` with reason `not_applicable` and nothing is run or recorded.
+5. jobsctl and termctl payloads carry no repo, so their decisions are scoped `*` and `input: {require: [repo]}` would escalate every call.
+6. A gate wired as a hook files no outcomes: whoever operates it files `outcome` (`decisions --json` rows carry the declared fields for scripting).
+7. `shadow` and `off` remove a veto: wire `post-state-change` to a notification.
+8. Trying a policy: every real `check` is recorded, so iterate with a scratch policy name that stays `off` or `shadow` and ignore its pending decisions (they never count); `check --dry-run` validates without running.
+
+### Binding an action to a decision
+
+A decision id only references a recorded decision. A caller that must prove which revision a gate evaluated compares the declared field in `gatectl show <id> --json` with the revision it acts on; pr-comment's `--decision-id` guard is a presence check. List the revision key in the policy's `input.require` so it is a declared field.
 
 ## Configuration
 
@@ -72,7 +87,7 @@ Agent checks also need Claude Code and, because they run in claude-session's req
 
 ## Environment variables
 
-Top-level scalar config keys can be set as `GATECTL_<KEY>` (`GATECTL_DEFAULTS__TIMEOUT`). gatectl reads no credentials.
+These config keys can be set as `GATECTL_<KEY>`, nested keys joined with `__` (`GATECTL_DEFAULTS__TIMEOUT`): `defaults.timeout`, `defaults.script_timeout`, `defaults.record_reserve`, `agent.timeout`, `agent.cache_ttl`, `agent.max_parallel`, `agent.min_start_budget`, `retention.older_than`. Safety keys (`agent.sandbox`, `agent.permission_profile`, `agent.setting_sources`, `agent.env_allowlist`, `agent.threshold`, `agent.model`, `defaults.input_max_bytes`), lists and structured config cannot be set from the environment. gatectl reads no credentials.
 
 ## Install
 

@@ -23,6 +23,10 @@
         "hook_skipped",
         "hook_failed",
         "reconcile",
+        "drop_skipped",
+        "terminated",
+        "not_applicable",
+        "cron",
         "warning"
       ]
     },

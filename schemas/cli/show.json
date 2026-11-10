@@ -79,14 +79,18 @@
         }
       ]
     },
-    "effective_outcome": {
-      "$ref": "../defs.json#/$defs/effective_outcome"
+    "declared": {
+      "$ref": "../defs.json#/$defs/declared_fields"
     },
     "input_sha256": {
       "$ref": "../defs.json#/$defs/sha256"
     },
-    "declared": {
-      "$ref": "../defs.json#/$defs/declared_fields"
+    "configured": {
+      "type": "boolean",
+      "description": "false for a decision of a policy that is no longer in the config (read-only history)."
+    },
+    "effective_outcome": {
+      "$ref": "../defs.json#/$defs/effective_outcome"
     },
     "checks": {
       "type": "array",
@@ -177,9 +181,10 @@
     "object_type",
     "object_id",
     "repo",
-    "effective_outcome",
-    "input_sha256",
     "declared",
+    "input_sha256",
+    "configured",
+    "effective_outcome",
     "checks",
     "cache_source",
     "outcomes"

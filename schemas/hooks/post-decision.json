@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "gatectl/hooks/post-decision.json",
   "title": "post-decision hook payload (stdin)",
-  "description": "After a decision is recorded and committed. Carries no input text and no labels key.",
+  "description": "After a decision is recorded and committed. Carries no input text and no labels key. Runs detached after the result is printed.",
   "type": "object",
   "properties": {
     "tool": {
@@ -53,33 +53,6 @@
     },
     "actor": {
       "$ref": "../defs.json#/$defs/actor"
-    },
-    "input_tool": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "x-untrusted": true,
-      "description": "Untrusted: the input's tool string, capped.",
-      "maxLength": 256
-    },
-    "input_hook": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "x-untrusted": true,
-      "description": "Untrusted: the input's hook string, capped.",
-      "maxLength": 256
-    },
-    "input_object_id": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "x-untrusted": true,
-      "description": "Untrusted: the input's object_id string, capped.",
-      "maxLength": 256
     },
     "checks": {
       "type": "array",
@@ -136,9 +109,6 @@
     "reason",
     "fingerprint",
     "actor",
-    "input_tool",
-    "input_hook",
-    "input_object_id",
     "checks"
   ]
 }

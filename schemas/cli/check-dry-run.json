@@ -25,7 +25,7 @@
     },
     "input_valid": {
       "type": "boolean",
-      "description": "false when the declaration or the strict-JSON rules would escalate with input_invalid."
+      "description": "false when the declaration or the strict-JSON rules would escalate with input_invalid; the plan is still printed and the exit is 0."
     },
     "checks": {
       "type": "array",
