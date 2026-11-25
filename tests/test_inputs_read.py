@@ -282,7 +282,7 @@ def test_dash_on_a_tty_is_read_like_any_stdin_until_the_deadline() -> None:
         start = time.monotonic()
         raw = read("-", fd=slave, deadline=start + 0.3, reserve=0.0)
         assert raw.status == "timeout"
-        assert raw.data == b'{"a":1}\r\n' or raw.data.startswith(b'{"a":1}')
+        assert raw.data.startswith(b'{"a":1}')
         assert time.monotonic() - start < 2
     finally:
         os.close(master)
@@ -334,13 +334,14 @@ def test_write_only_pipe_as_stdin_returns_promptly_without_a_deadline(
     assert time.monotonic() - start < 2
 
 
-def test_write_only_socket_end_is_unreadable() -> None:
+def test_socket_with_read_side_shut_is_a_complete_empty_read() -> None:
     import socket
 
     a, b = socket.socketpair()
     try:
         a.shutdown(socket.SHUT_RD)  # still O_RDWR: reads see EOF, which is a complete empty read
-        assert read(None, fd=a.fileno()).status in {"complete", "unreadable"}
+        raw = read(None, fd=a.fileno())
+        assert (raw.data, raw.status) == (b"", "complete")
     finally:
         a.close()
         b.close()
