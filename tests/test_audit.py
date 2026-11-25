@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
+import copy
 import errno
 import json
 import multiprocessing
 import os
+import signal
 import stat
 from pathlib import Path
 from typing import Any
@@ -49,6 +52,22 @@ def decision_record(**over: Any) -> dict[str, Any]:
     )
     record.update(over)
     return record
+
+
+@contextlib.contextmanager
+def hang_guard(seconds: int = 10):
+    """Fail the test instead of hanging if the body blocks (FIFO opens)."""
+
+    def _fire(signum, frame):  # pragma: no cover - only on a regression
+        raise AssertionError("blocked")
+
+    old = signal.signal(signal.SIGALRM, _fire)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
 
 
 def read_lines(path: Path) -> list[str]:
@@ -98,19 +117,85 @@ class TestAppend:
             os.umask(old)
         assert stat.S_IMODE((sdir / "log.jsonl").stat().st_mode) == 0o600
 
-    def test_existing_dir_mode_is_left_alone(self, sdir: Path) -> None:
+    def test_existing_dir_mode_is_tightened(self, sdir: Path) -> None:
         sdir.mkdir(parents=True, mode=0o755)
         os.chmod(sdir, 0o755)
         audit.append_audit(decision_record(), state_dir=sdir)
-        assert stat.S_IMODE(sdir.stat().st_mode) == 0o755
+        assert stat.S_IMODE(sdir.stat().st_mode) == 0o700
 
-    def test_existing_file_mode_is_not_widened_or_changed(self, sdir: Path) -> None:
+    def test_existing_file_mode_is_tightened(self, sdir: Path) -> None:
         sdir.mkdir(parents=True)
         path = sdir / "audit.jsonl"
         path.write_bytes(b"")
-        os.chmod(path, 0o640)
+        os.chmod(path, 0o644)
         audit.append_audit(decision_record(), state_dir=sdir)
-        assert stat.S_IMODE(path.stat().st_mode) == 0o640
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert len(read_lines(path)) == 1
+
+    def test_file_owned_by_someone_else_is_refused(
+        self, sdir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sdir.mkdir(parents=True, mode=0o700)
+        path = sdir / "audit.jsonl"
+        path.write_bytes(b"")
+        monkeypatch.setattr(audit, "_geteuid", lambda: os.geteuid() + 1)
+        with pytest.raises(OSError, match="not owned"):
+            audit._open_append(path)
+        assert path.read_bytes() == b""
+
+    def test_dir_owned_by_someone_else_is_refused(
+        self, sdir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sdir.mkdir(parents=True, mode=0o700)
+        monkeypatch.setattr(audit, "_geteuid", lambda: os.geteuid() + 1)
+        with pytest.raises(OSError, match="not owned"):
+            audit.append_audit(decision_record(), state_dir=sdir)
+        assert not (sdir / "audit.jsonl").exists()
+
+    def test_symlinked_state_dir_is_refused(self, tmp_path: Path) -> None:
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real)
+        with pytest.raises(OSError):
+            audit.append_audit(decision_record(), state_dir=link)
+        assert not (real / "audit.jsonl").exists()
+
+    def test_directory_target_is_refused(self, sdir: Path) -> None:
+        (sdir / "audit.jsonl").mkdir(parents=True)
+        with pytest.raises(OSError):
+            audit.append_audit(decision_record(), state_dir=sdir)
+
+    def test_device_target_is_refused(self, sdir: Path) -> None:
+        sdir.mkdir(parents=True)
+        (sdir / "log.jsonl").symlink_to("/dev/null")  # O_NOFOLLOW refuses it as well
+        with pytest.raises(OSError):
+            audit.append_log(audit.log_record(level="info", event="cron"), state_dir=sdir)
+
+    def test_fifo_target_is_refused_without_blocking(self, sdir: Path) -> None:
+        sdir.mkdir(parents=True)
+        os.mkfifo(sdir / "audit.jsonl", 0o600)
+        with hang_guard(), pytest.raises(OSError):
+            audit.append_audit(decision_record(), state_dir=sdir)
+
+    def test_fifo_with_a_reader_is_still_refused(self, sdir: Path) -> None:
+        sdir.mkdir(parents=True)
+        fifo = sdir / "audit.jsonl"
+        os.mkfifo(fifo, 0o600)
+        reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            with hang_guard(), pytest.raises(OSError, match="not a regular file"):
+                audit.append_audit(decision_record(), state_dir=sdir)
+        finally:
+            os.close(reader)
+
+    def test_descriptor_is_blocking_after_open(self, sdir: Path) -> None:
+        sdir.mkdir(parents=True)
+        fd = audit._open_append(sdir / "log.jsonl")
+        try:
+            assert os.get_blocking(fd)
+        finally:
+            os.close(fd)
 
     def test_one_json_line_per_record_appended(self, sdir: Path) -> None:
         for i in range(3):
@@ -232,15 +317,15 @@ class TestFailures:
             audit.append_audit(decision_record(), state_dir=sdir)
 
     @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permissions")
-    def test_read_only_directory(self, sdir: Path) -> None:
-        sdir.mkdir(parents=True)
-        os.chmod(sdir, 0o500)
+    def test_read_only_parent_directory(self, sdir: Path) -> None:
+        sdir.parent.mkdir(parents=True)
+        os.chmod(sdir.parent, 0o500)
         try:
             with pytest.raises(PermissionError):
                 audit.append_audit(decision_record(), state_dir=sdir)
         finally:
-            os.chmod(sdir, 0o700)
-        assert not (sdir / "audit.jsonl").exists()
+            os.chmod(sdir.parent, 0o700)
+        assert not sdir.exists()
 
     @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permissions")
     def test_read_only_file(self, sdir: Path) -> None:
@@ -378,6 +463,23 @@ class TestCap:
         snapshot = json.dumps(rec, sort_keys=True)
         audit.encode_line(rec)
         assert json.dumps(rec, sort_keys=True) == snapshot
+
+    def test_encode_does_not_mutate_input_when_shortening(self) -> None:
+        rec = audit.log_record(
+            level="info",
+            event="warning",
+            message="m" * 2000,
+            data={"a": ["x" * 40_000, {"b": "y" * 40_000}], "c": "z" * 40_000},
+        )
+        before = copy.deepcopy(rec)
+        assert len(audit.encode_line(rec)) <= CAP
+        assert rec == before
+        audit_rec = decision_record()
+        audit_rec["result"] = {"state": "x", "reason": "r" * 500_000}
+        audit_rec["data"] = {"k": "d" * 500_000}
+        before = copy.deepcopy(audit_rec)
+        assert len(audit.encode_line(audit_rec)) <= CAP
+        assert audit_rec == before
 
 
 class TestSanitizing:
@@ -618,7 +720,6 @@ class TestConcurrency:
         ]
         for p in procs:
             p.start()
-        pids = [p.pid for p in procs]
         try:
             for p in procs:
                 p.join(timeout=120)
@@ -627,7 +728,6 @@ class TestConcurrency:
                 if p.is_alive():
                     p.kill()  # this exact child, started above
                     p.join(timeout=10)
-        assert all(pid is not None for pid in pids)
         assert all(p.exitcode == 0 for p in procs)
         raw = (sdir / "log.jsonl").read_bytes()
         lines = raw.split(b"\n")
@@ -657,3 +757,63 @@ class TestConcurrency:
         assert all(p.exitcode == 0 for p in procs)
         assert len(read_lines(sdir / "log.jsonl")) == 40
         assert stat.S_IMODE((sdir / "log.jsonl").stat().st_mode) == 0o600
+
+
+class TestKeyCollisions:
+    def _data(self, data: dict[str, Any]) -> dict[str, Any]:
+        rec = audit.log_record(level="info", event="warning", data=data)
+        return json.loads(audit.encode_line(rec))["data"]
+
+    def test_sanitized_keys_stay_distinct(self) -> None:
+        out = self._data({"a\x00": 1, "a\x01": 2, "a\ufffd": 3})
+        assert len(out) == 3
+        assert sorted(out.values()) == [1, 2, 3]
+        assert out == {f"a{MARKER}": 1, f"a{MARKER}#2": 2, f"a{MARKER}#3": 3}
+
+    def test_capped_keys_stay_distinct_within_the_cap(self) -> None:
+        out = self._data({"k" * 300 + "1": 1, "k" * 300 + "2": 2, "k" * 300 + "3": 3})
+        assert sorted(out.values()) == [1, 2, 3]
+        assert all(len(key) <= 256 for key in out)
+        assert len(out) == 3
+
+    def test_unsanitized_keys_are_untouched(self) -> None:
+        rec = audit.log_record(level="info", event="warning", data={"a\x00": 1, "a\x01": 2})
+        data = json.loads(audit.encode_line(rec, sanitize_text=False))["data"]
+        assert data == {"a\x00": 1, "a\x01": 2}
+
+
+class TestCapsWithoutSanitizing:
+    def test_message_and_reason_are_cut_when_the_flag_is_off(self) -> None:
+        rec = audit.log_record(level="info", event="warning", message="m\n" * 3000)
+        out = json.loads(audit.encode_line(rec, sanitize_text=False))
+        assert out["message"] == ("m\n" * 3000)[:2048]
+        audit_rec = decision_record(result={"state": "x", "reason": "r\n" * 3000})
+        out = json.loads(audit.encode_line(audit_rec, sanitize_text=False))
+        assert out["result"]["reason"] == ("r\n" * 3000)[:1024]
+
+
+class TestDecisionIdList:
+    def _build(self, ids: list[str]) -> dict[str, Any]:
+        return audit.audit_record(
+            action="prune",
+            target="p@*",
+            decision_id=ids,
+            actor="auto:unknown",
+            stdin_tty=False,
+            actor_source="default",
+            inputs={},
+            result={},
+        )
+
+    def test_seventeen_ids_are_refused(self) -> None:
+        with pytest.raises(ValueError):
+            self._build([f"id{i}" for i in range(17)])
+
+    def test_sixteen_ids_are_accepted(self) -> None:
+        rec = self._build([f"id{i}" for i in range(16)])
+        assert len(rec["decision_id"]) == 16
+
+    @pytest.mark.parametrize("bad", ["", "a b", "x" * 129, "a\n"])
+    def test_ids_outside_the_grammar_are_refused(self, bad: str) -> None:
+        with pytest.raises(ValueError):
+            self._build(["ok", bad])

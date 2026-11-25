@@ -119,6 +119,7 @@ class TestRepoId:
         assert ids.is_repo_id("h/.a")
 
     def test_non_str(self) -> None:
+        # Deliberately wrong type: the predicate must answer False, not raise, for non-strings.
         assert not ids.is_repo_id(None)  # type: ignore[arg-type]
 
 
@@ -357,3 +358,55 @@ class TestDuration:
     def test_non_str(self) -> None:
         with pytest.raises(UsageError):
             ids.parse_duration(None)  # type: ignore[arg-type]
+
+
+def _schema_pattern(def_name: str) -> re.Pattern[str]:
+    """The schema's regex with ``$`` read as end of string (as in ECMA-262, not Python's
+    ``$``, which also matches before a trailing newline)."""
+    import json
+
+    from tests.schema_util import SCHEMAS
+
+    defs = json.loads((SCHEMAS / "defs.json").read_text(encoding="utf-8"))["$defs"]
+    pattern = defs[def_name]["pattern"] if "pattern" in defs[def_name] else None
+    assert pattern is not None
+    return re.compile(pattern.replace("$", r"\Z"))
+
+
+_CORPUS = [
+    "a", "abc", "a-b_c", "-a", "_a", "A", "a" * 64, "a" * 65, "", " ", "a b", "a\n", "\na",
+    "gd-abcdefghijkl", "gd-abcdefghijk", "gd-abcdefghijkl\n", "gd-ABCDEFGHIJKL", "gd-abcdefghij18",
+    "sig", "s" * 32, "s" * 33, "1sig", "a:b", "a@b/c", "x" * 128, "x" * 129, "a\x00", "é",
+    "h/p", "h.io/a/b", "h:80/a", "h:123456/a", "h/..", "h/.", "h/a/..", "h/a\n", "h//a", "H/a",
+    "-h/a", "h-/a", "h/...", "h/.a",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("def_name", "predicate"),
+    [
+        ("policy_name", ids.is_policy_name),
+        ("check_name", ids.is_check_name),
+        ("decision_id", ids.is_decision_id),
+        ("signal", ids.is_signal),
+        ("repo_id", ids.is_repo_id),
+    ],
+)
+def test_ids_match_the_schema_patterns(def_name, predicate) -> None:
+    pattern = _schema_pattern(def_name)
+    for value in _CORPUS:
+        expected = pattern.fullmatch(value) is not None
+        if def_name == "repo_id":
+            expected = expected and len(value) <= 255
+        assert predicate(value) == expected, (def_name, value)
+
+
+def test_caller_decision_id_matches_the_schema_item_pattern() -> None:
+    import json
+
+    from tests.schema_util import SCHEMAS
+
+    defs = json.loads((SCHEMAS / "defs.json").read_text(encoding="utf-8"))["$defs"]
+    pattern = re.compile(defs["decision_ids"]["items"]["pattern"].replace("$", r"\Z"))
+    for value in _CORPUS:
+        assert ids.is_caller_decision_id(value) == (pattern.fullmatch(value) is not None), value

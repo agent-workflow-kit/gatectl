@@ -35,6 +35,11 @@ def test_offset_times_are_converted_to_utc() -> None:
     )
 
 
+def test_format_overflow_at_the_datetime_edge_is_a_value_error() -> None:
+    with pytest.raises(ValueError):
+        clock.format_ts(datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=5))))
+
+
 def test_naive_datetime_rejected_for_format() -> None:
     with pytest.raises(ValueError, match="naive"):
         clock.format_ts(datetime(2026, 1, 1))

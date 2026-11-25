@@ -19,6 +19,11 @@ This plan implements [interface.md](interface.md) and [design.md](design.md). Th
 | `gateway.py` | 0 | every subprocess call |
 | `config.py` | 1 | Pydantic models, drop-ins, per-part validation, overrides, fingerprint |
 | `audit.py` | 0 | `audit.jsonl` and `log.jsonl` writers |
+| `sanitize.py` | 0 | the untrusted-text sanitizer |
+| `ids.py` | 0 | identifier grammars, decision ids, actors, durations |
+| `clock.py` | 0 | fixed-width UTC timestamps and `--since` parsing |
+| `inputhash.py` | 0 | canonical input serialization and `input_sha256` |
+| `errors.py` | 0 | errors that carry an exit code |
 | `store.py` | 2 | SQLite, migrations, state rows, decisions, outcomes, cache, leases |
 | `runner.py` | 3 | script runner: selector loop, process group, caps, lifeline watchdog |
 | `rules.py` | 3 | the closed rule evaluator and the linear glob matcher |

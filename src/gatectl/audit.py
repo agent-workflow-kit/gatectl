@@ -13,15 +13,18 @@ line in a reader that splits on more than ``\\n``, and sizes are measured on the
 
 from __future__ import annotations
 
+import errno
 import json
 import os
+import stat
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from gatectl.clock import now_ts
-from gatectl.sanitize import MARKER, sanitize
+from gatectl.ids import MAX_CALLER_DECISION_IDS, is_caller_decision_id
+from gatectl.sanitize import DEFAULT_MAX_LEN, MARKER, sanitize
 
 LINE_CAP = 64 * 1024
 MESSAGE_CAP = 2048  # schemas/log.json: message maxLength
@@ -47,6 +50,7 @@ LOG_EVENTS = frozenset(
 # Seams the tests replace (the module ``os`` itself is never patched).
 _open = os.open
 _write = os.write
+_geteuid = os.geteuid
 
 
 class ShortWriteError(OSError):
@@ -68,27 +72,47 @@ def state_dir() -> Path:
 
 
 def _ensure_dir(path: Path) -> None:
-    """Create the state directory with mode 0700 (set explicitly). An existing one is kept."""
+    """The state directory: created 0700, or an existing real directory owned by this user
+    tightened to 0700. A symlink, a non-directory or another user's directory is refused."""
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.mkdir(path, 0o700)
     except FileExistsError:
-        return
-    os.chmod(path, 0o700)
+        pass
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode):
+        raise NotADirectoryError(f"{path.name} is not a directory")
+    if info.st_uid != _geteuid():
+        raise PermissionError(f"{path.name} is not owned by the current user")
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        os.chmod(path, 0o700)
+
+
+def _vet(fd: int, path: Path) -> None:
+    """Refuse anything but a regular file owned by this user; set mode 0600 and blocking."""
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError(errno.EINVAL, f"{path.name} is not a regular file")
+    if info.st_uid != _geteuid():
+        raise PermissionError(f"{path.name} is not owned by the current user")
+    if stat.S_IMODE(info.st_mode) != 0o600:
+        os.fchmod(fd, 0o600)
+    os.set_blocking(fd, True)
 
 
 def _open_append(path: Path) -> int:
-    flags = os.O_WRONLY | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW
+    # O_NONBLOCK so that opening a FIFO never waits for a reader; cleared again in ``_vet``.
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
     for _ in range(3):
         try:
             fd = _open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
             try:
-                return _open(path, flags)
+                fd = _open(path, flags)
             except FileNotFoundError:
                 continue  # removed between the two opens: try to create it again
         try:
-            os.fchmod(fd, 0o600)
+            _vet(fd, path)
         except BaseException:
             os.close(fd)
             raise
@@ -97,6 +121,19 @@ def _open_append(path: Path) -> int:
 
 
 # --- encoding ----------------------------------------------------------------------------
+
+
+def _unique_key(base: str, taken: Mapping[str, Any]) -> str:
+    """``base`` if free, else ``base#2``, ``base#3``... cutting ``base`` to stay in 256 chars."""
+    if base not in taken:
+        return base
+    n = 2
+    while True:
+        suffix = f"#{n}"
+        candidate = base[: DEFAULT_MAX_LEN - len(suffix)] + suffix
+        if candidate not in taken:
+            return candidate
+        n += 1
 
 
 def _clean(value: Any, sanitize_text: bool, depth: int = 0) -> Any:
@@ -110,7 +147,8 @@ def _clean(value: Any, sanitize_text: bool, depth: int = 0) -> Any:
         for key, item in value.items():
             if not isinstance(key, str):
                 raise TypeError("free-text object keys must be strings")
-            out[sanitize(key) if sanitize_text else key] = _clean(item, sanitize_text, depth + 1)
+            clean_key = _unique_key(sanitize(key), out) if sanitize_text else key
+            out[clean_key] = _clean(item, sanitize_text, depth + 1)
         return out
     if isinstance(value, list | tuple):
         return [_clean(item, sanitize_text, depth + 1) for item in value]
@@ -185,14 +223,16 @@ def encode_line(record: Mapping[str, Any], *, sanitize_text: bool = True) -> byt
     """
     rec: dict[str, Any] = dict(record)
     if isinstance(rec.get("message"), str):
-        rec["message"] = sanitize(rec["message"], MESSAGE_CAP) if sanitize_text else rec["message"]
+        message = rec["message"]
+        rec["message"] = sanitize(message, MESSAGE_CAP) if sanitize_text else message[:MESSAGE_CAP]
     if "data" in rec:
         rec["data"] = _clean(rec["data"], sanitize_text)
     if isinstance(rec.get("result"), Mapping):
         result = dict(rec["result"])
         if isinstance(result.get("reason"), str):
+            reason = result["reason"]
             result["reason"] = (
-                sanitize(result["reason"], REASON_CAP) if sanitize_text else result["reason"]
+                sanitize(reason, REASON_CAP) if sanitize_text else reason[:REASON_CAP]
             )
         rec["result"] = result
     line = _dump(rec)
@@ -256,8 +296,13 @@ def audit_record(
     """
     if action not in AUDIT_ACTIONS:
         raise ValueError(f"unknown audit action: {action!r}")
-    if len(caller_decision_ids) > 16:
+    if len(caller_decision_ids) > MAX_CALLER_DECISION_IDS:
         raise ValueError("at most 16 caller decision_ids")
+    if not isinstance(decision_id, str):
+        if len(decision_id) > MAX_CALLER_DECISION_IDS:
+            raise ValueError("at most 16 decision_ids")
+        if not all(is_caller_decision_id(item) for item in decision_id):
+            raise ValueError("decision_id outside the id grammar")
     return {
         "ts": ts if ts is not None else now_ts(now),
         "actor": actor,

@@ -28,7 +28,10 @@ def _require_aware(moment: datetime) -> datetime:
 
 def format_ts(moment: datetime) -> str:
     """Format an aware datetime as UTC in the fixed 27-character form."""
-    m = _require_aware(moment)
+    try:
+        m = _require_aware(moment)
+    except OverflowError:
+        raise ValueError("datetime out of range after conversion to UTC") from None
     return (
         f"{m.year:04d}-{m.month:02d}-{m.day:02d}T"
         f"{m.hour:02d}:{m.minute:02d}:{m.second:02d}.{m.microsecond:06d}Z"
@@ -52,7 +55,7 @@ def parse_since(text: str, now: datetime) -> datetime:
     """``--since``: an RFC 3339 time with ``Z`` or an offset (never naive), or a duration.
 
     A duration means "now minus". Conservative reading: only the upper-case ``T`` and ``Z`` and
-    a ``+hh:mm`` offset are accepted. The result is an aware UTC datetime.
+    a ``+hh:mm`` or ``-hh:mm`` offset are accepted. The result is an aware UTC datetime.
     """
     now_utc = _require_aware(now)
     if not isinstance(text, str):
