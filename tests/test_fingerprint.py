@@ -9,6 +9,7 @@ import os
 import random
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -864,11 +865,14 @@ def test_same_size_rewrite_restoring_mtime_during_read_is_unreadable(
     f.write_bytes(b"a" * 100)
     st = f.stat()
     real_read = os.read
+    fired = {"done": False}
 
     def read(fd: int, n: int) -> bytes:
         data = real_read(fd, n)
-        if data and os.fstat(fd).st_ino == st.st_ino:
-            f.write_bytes(b"b" * 100)
+        if data and not fired["done"] and os.fstat(fd).st_ino == st.st_ino:
+            fired["done"] = True  # once, in the first pass: the second pass reads equal bytes
+            time.sleep(0.05)  # ctime is a coarse clock: step past the creation tick
+            f.write_bytes(b"a" * 100)  # same size, same bytes: only the ctime can show it
             os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))
         return data
 
