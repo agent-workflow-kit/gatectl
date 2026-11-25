@@ -794,3 +794,109 @@ def test_pinned_definition_text(tmp_path: Path, bundled: Path) -> None:
         '"when":[{"op":"eq","path":"a.b","value":1}]}],'
         '"input":{"ignore":[],"require":[],"types":{}},"policy":"p"}'
     )
+
+
+# --- review round 1 ---------------------------------------------------------------------
+
+
+def skill_files_of(
+    tmp_path: Path, bundled: Path, skill: str, shared: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    doc = policy_doc(agent_check(skill=skill))
+    cfg = load(tmp_path, {**(shared or {}), "policies": {"p": doc}})
+    d = definition("p", cfg.resolve_policy("p"), cfg.shared, bundled_plugin=str(bundled))
+    return d["checks"][0]["skill_files"]
+
+
+def test_hostile_deeply_nested_plugin_json_does_not_raise(tmp_path: Path, bundled: Path) -> None:
+    (bundled / ".claude-plugin" / "plugin.json").write_bytes(b"[" * 60000)
+    assert set(skill_files_of(tmp_path, bundled, "gatectl:gate-check").values()) == {UNREADABLE}
+    other = make_plugin(tmp_path / "other", name="other")
+    (other / ".claude-plugin" / "plugin.json").write_bytes(b"[" * 60000)
+    files = skill_files_of(
+        tmp_path, bundled, "other:gate-check", {"agent": {"plugin_dirs": [str(other)]}}
+    )
+    assert set(files.values()) == {UNREADABLE}
+
+
+def test_null_check_model_and_profile_inherit_the_block_value(
+    tmp_path: Path, bundled: Path
+) -> None:
+    shared = {"agent": {"model": "haiku", "permission_profile": str(bundled / "x.json")}}
+    (bundled / "x.json").write_bytes(b"{}")
+    absent = fp(tmp_path, bundled, policy_doc(agent_check()), shared=shared)
+    null = agent_check(model=None, permission_profile=None)
+    assert fp(tmp_path, bundled, policy_doc(null), shared=shared) == absent
+    own = agent_check(model="haiku", permission_profile=str(bundled / "x.json"))
+    assert fp(tmp_path, bundled, policy_doc(own), shared=shared) == absent
+
+
+def test_plugin_json_of_100_kib_resolves(tmp_path: Path, bundled: Path) -> None:
+    doc = {"name": "gatectl", "pad": "x" * (100 * 1024)}
+    (bundled / ".claude-plugin" / "plugin.json").write_text(json.dumps(doc))
+    assert UNREADABLE not in skill_files_of(tmp_path, bundled, "gatectl:gate-check").values()
+
+
+def test_plugin_json_over_1_mib_is_not_found(tmp_path: Path, bundled: Path) -> None:
+    doc = {"name": "gatectl", "pad": "x" * (1024 * 1024)}
+    (bundled / ".claude-plugin" / "plugin.json").write_text(json.dumps(doc))
+    assert set(skill_files_of(tmp_path, bundled, "gatectl:gate-check").values()) == {UNREADABLE}
+
+
+def test_fifo_plugin_json_returns_promptly(tmp_path: Path, bundled: Path) -> None:
+    pj = bundled / ".claude-plugin" / "plugin.json"
+    pj.unlink()
+    os.mkfifo(pj)
+    assert set(skill_files_of(tmp_path, bundled, "gatectl:gate-check").values()) == {UNREADABLE}
+
+
+def test_plugin_json_symlink_to_dev_zero_returns_promptly(tmp_path: Path, bundled: Path) -> None:
+    pj = bundled / ".claude-plugin" / "plugin.json"
+    pj.unlink()
+    pj.symlink_to("/dev/zero")
+    assert set(skill_files_of(tmp_path, bundled, "gatectl:gate-check").values()) == {UNREADABLE}
+
+
+def test_same_size_rewrite_restoring_mtime_during_read_is_unreadable(
+    tmp_path: Path, bundled: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    f = tmp_path / "torn"
+    f.write_bytes(b"a" * 100)
+    st = f.stat()
+    real_read = os.read
+
+    def read(fd: int, n: int) -> bytes:
+        data = real_read(fd, n)
+        if data and os.fstat(fd).st_ino == st.st_ino:
+            f.write_bytes(b"b" * 100)
+            os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))
+        return data
+
+    monkeypatch.setattr(fpmod.os, "read", read)
+    assert argv_files(tmp_path, bundled, str(f)) == [UNREADABLE]
+
+
+def test_rewrite_between_the_two_passes_is_unreadable(
+    tmp_path: Path, bundled: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    f = tmp_path / "between"
+    f.write_bytes(b"a" * 100)
+    real_stat = os.stat
+    calls = {"n": 0}
+
+    def stat(path: Any, *a: Any, **k: Any) -> os.stat_result:
+        if str(path) == str(f):
+            calls["n"] += 1
+            if calls["n"] == 2:  # the start of the second pass
+                f.write_bytes(b"b" * 100)
+        return real_stat(path, *a, **k)
+
+    monkeypatch.setattr(fpmod.os, "stat", stat)
+    assert argv_files(tmp_path, bundled, str(f)) == [UNREADABLE]
+    assert calls["n"] >= 2
+
+
+def test_recently_written_file_is_still_hashed(tmp_path: Path, bundled: Path) -> None:
+    f = tmp_path / "fresh"
+    f.write_bytes(b"fresh")
+    assert argv_files(tmp_path, bundled, str(f)) == [hashlib.sha256(b"fresh").hexdigest()]

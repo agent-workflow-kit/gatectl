@@ -17,7 +17,8 @@ This plan implements [interface.md](interface.md) and [design.md](design.md). Th
 | Module | Stage | Responsibility |
 |---|---|---|
 | `gateway.py` | 0 | every subprocess call |
-| `config.py` | 1 | Pydantic models, drop-ins, per-part validation, overrides, fingerprint |
+| `config.py` | 1 | Pydantic models, drop-ins, per-part validation, overrides |
+| `fingerprint.py` | 1 | normalized effective definition and policy fingerprint |
 | `audit.py` | 0 | `audit.jsonl` and `log.jsonl` writers |
 | `sanitize.py` | 0 | the untrusted-text sanitizer |
 | `ids.py` | 0 | identifier grammars, decision ids, actors, durations |

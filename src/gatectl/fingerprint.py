@@ -36,6 +36,8 @@ INSTRUCTION_CAP = 64 * 1024
 _CHUNK = 64 * 1024
 # The permission profile used when neither the check nor the ``agent:`` block names one.
 # TODO(#21): the bundled profile file is added with the bundled plugin; confirm this name then.
+# Deferred (not blocking): the file does not exist until #21 ships the bundled plugin, so default
+# agent checks hash `unreadable` for it until then and their fingerprints change when it lands.
 BUNDLED_PROFILE = "permission-profile.json"
 
 _ABSENT = (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.ENAMETOOLONG)
@@ -69,12 +71,26 @@ class _Files:
         while it was read; ``None`` for an ``optional`` file that is absent or not a regular file.
         """
         try:
-            return self._hash(path, cap, over, optional)
+            data = self._load(path, cap, over, optional)
         except (OSError, ValueError):
             return UNREADABLE
+        if isinstance(data, bytes):
+            return hashlib.sha256(data).hexdigest()
+        return data
 
-    def _hash(self, path: str, cap: int, over: str, optional: bool) -> Any:
-        if self._expired() or not path.startswith("/"):
+    def _load(self, path: str, cap: int, over: str, optional: bool) -> Any:
+        """The file's bytes, read twice and equal both times (else the marker), or the
+        non-content contribution of ``hash`` (marker, ``None``, size and mtime)."""
+        if self._expired():
+            return UNREADABLE  # checked once per file, not per pass
+        first = self._pass(path, cap, over, optional)
+        if not isinstance(first, bytes):
+            return first
+        second = self._pass(path, cap, over, optional)
+        return first if second == first else UNREADABLE  # rewritten between the passes
+
+    def _pass(self, path: str, cap: int, over: str, optional: bool) -> Any:
+        if not path.startswith("/"):
             return UNREADABLE
         gone = None if optional else UNREADABLE
         try:
@@ -96,7 +112,7 @@ class _Files:
                 if over == "unreadable":
                     return UNREADABLE
                 return {"size": opened.st_size, "mtime_ns": opened.st_mtime_ns}
-            digest = hashlib.sha256()
+            chunks: list[bytes] = []
             total = 0
             while True:
                 chunk = os.read(fd, _CHUNK)
@@ -105,33 +121,31 @@ class _Files:
                 total += len(chunk)
                 if total > cap:
                     return UNREADABLE  # grew while being read
-                digest.update(chunk)
+                chunks.append(chunk)
             after = os.fstat(fd)
         finally:
             os.close(fd)
-        if (after.st_size, after.st_mtime_ns) != (opened.st_size, opened.st_mtime_ns) or (
-            total != after.st_size
-        ):
+        # ctime cannot be set from user space, so a same-size rewrite that restores mtime shows
+        if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
+            opened.st_size,
+            opened.st_mtime_ns,
+            opened.st_ctime_ns,
+        ) or total != after.st_size:
             return UNREADABLE  # changed while being read
-        return digest.hexdigest()
+        return b"".join(chunks)
 
     def plugin_name(self, directory: str) -> str | None:
-        """The ``name`` in ``<directory>/.claude-plugin/plugin.json``, or None."""
+        """The ``name`` in ``<directory>/.claude-plugin/plugin.json``, or None.
+
+        Read like every hashed file, up to ``FILE_CAP``; a larger file cannot identify its plugin.
+        """
         path = f"{directory}/.claude-plugin/plugin.json"
         try:
-            if self._expired() or not path.startswith("/"):
-                return None
-            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY)
-            try:
-                if not stat.S_ISREG(os.fstat(fd).st_mode):
-                    return None
-                data = os.read(fd, INSTRUCTION_CAP + 1)
-            finally:
-                os.close(fd)
-            if len(data) > INSTRUCTION_CAP:
+            data = self._load(path, FILE_CAP, "unreadable", False)
+            if not isinstance(data, bytes):
                 return None
             name = json.loads(data).get("name")
-        except (OSError, ValueError, AttributeError):
+        except (OSError, ValueError, AttributeError, RecursionError):
             return None
         return name if isinstance(name, str) else None
 
@@ -199,6 +213,8 @@ def _agent(
     skill = pick(check.skill, block.skill)
     profile = pick(check.permission_profile, block.permission_profile)
     if check.instruction_file is not None:
+        # todo(#22): the prompt writer must read instruction_file once and use the same bytes as
+        # the fingerprint (definition() returns only the digest)
         instruction = files.hash(check.instruction_file, cap=INSTRUCTION_CAP, over="unreadable")
     else:
         instruction = _text_sha256(check.instruction or "")
