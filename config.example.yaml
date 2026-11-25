@@ -9,9 +9,10 @@
 # Precedence: flags > per-repo override > environment > config (global file, then config.d in lexical order) > defaults.
 # Schema: schemas/config.json. Rules: docs/interface.md, section Config.
 
-# Used only for the default actor (human:<name>). null: the OS username. Any string is accepted:
-# characters outside [A-Za-z0-9._@-] become _, the name is cut to 64 characters, and an empty one
-# becomes user.
+# Used only for the default actor (human:<name>). null: the OS username. Any string of at most 1024
+# characters is accepted and its content never fails a command (a non-string or longer value is a
+# config error; quote numeric names in YAML): characters outside [A-Za-z0-9._@-] become _, the
+# name is cut to 64 characters, and an empty one becomes user.
 me:
   name: null
 

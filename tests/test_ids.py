@@ -334,7 +334,7 @@ class TestActorName:
 
     @pytest.mark.parametrize("raw", [5, 1.5, True, ["a"], {"a": 1}, b"x"])
     def test_a_non_string_becomes_user(self, raw: object) -> None:
-        assert ids.actor_name(raw) == "user"  # type: ignore[arg-type]
+        assert ids.actor_name(raw) == "user"
 
     def test_every_result_is_a_valid_actor_name(self) -> None:
         for raw in ["", "\n", "x" * 5000, "\x1b]0;t\x07", "\u202e", "a\x00"]:
