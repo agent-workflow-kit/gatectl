@@ -3,6 +3,9 @@
 Test fixtures only: ``src/`` never imports or reads them. To move to a newer claude-session,
 re-copy the files from that tag, update ``PINNED_VERSION`` and ``PINNED_COMMIT`` and re-run the
 tests; every file carries the pinned version in its ``$comment`` header.
+
+The samples under ``samples/`` were recorded at the sibling tree ``v0.45.2-4-g3ac0daa``, which is
+schema-equivalent to the tag (only one description string in ``status.json`` differs).
 """
 
 from __future__ import annotations

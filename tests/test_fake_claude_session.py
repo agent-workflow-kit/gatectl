@@ -8,11 +8,16 @@ shapes are also compared with real claude-session output recorded at the pinned 
 
 from __future__ import annotations
 
+import ast
 import hashlib
+import importlib.machinery
+import importlib.util
 import json
 import os
+import re
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -65,6 +70,16 @@ def wait_until(predicate: Any, what: str, limit: float = 10.0) -> None:
     raise AssertionError(f"timed out waiting for {what}")
 
 
+def load_fake() -> Any:
+    """The fake as a module (it is a script without a ``.py`` name)."""
+    loader = importlib.machinery.SourceFileLoader("fake_claude_session_under_test", str(FAKE))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
 def agent_verdict_errors(data: bytes) -> list[str]:
     return gatectl_errors("agent-verdict", json.loads(data))
 
@@ -90,6 +105,7 @@ def test_start_output_has_the_same_keys_as_real_claude_session(fake: FakeSession
 def test_start_ids_are_distinct_and_match_the_id_grammar(fake: FakeSession) -> None:
     ids = {started(fake)["csession_id"] for _ in range(5)}
     assert len(ids) == 5
+    assert all(re.fullmatch(r"cs-[a-z2-7]{8}", i) for i in ids)
 
 
 def test_start_requires_json(fake: FakeSession) -> None:
@@ -114,6 +130,11 @@ def test_start_refuses_a_headless_session_with_neither_skill_nor_prompt(fake: Fa
         ["--setting-sources", "bogus"],
         ["--env-allowlist-only", "1BAD"],
         ["--skill", "bad skill"],
+        ["--kind", "gate-check\n"],
+        ["--skill", "a\n"],
+        ["--label", "a=b\n"],
+        ["--env-allowlist-only", "NAME\n"],
+        ["--timeout", "5s\n"],
         ["--prompt-file", "/nonexistent/prompt.md"],
         ["--sandbox", "sometimes"],
     ],
@@ -317,6 +338,9 @@ def test_exit_zero_with_an_outcome_other_than_done(fake: FakeSession) -> None:
     # claude-session never does this (its exit_code rules forbid it), so the pinned schema
     # rejects the object: the fake is deliberately off-schema here, and says so.
     assert pinned.errors("exec", result.json)
+    # ... and only there: with a consistent exit code (13 for blocked) the object is valid, so
+    # the exit code is the single off-schema field.
+    assert pinned.errors("exec", {**result.json, "exit_code": 13}) == []
     run = fake.run("status", info["csession_id"], "--json").json["run"]
     assert (run["outcome"], run["exit_code"]) == ("blocked", 0)  # status agrees: same off-schema
 
@@ -633,22 +657,149 @@ def test_stop_terminates_a_live_run_with_sigterm(fake: FakeSession) -> None:
     assert (proc.returncode, outcome["end_reason"]) == (15, "stopped")
 
 
-def test_stop_escalates_to_sigkill_when_exec_ignores_sigterm(fake: FakeSession) -> None:
+def test_stop_sigkills_the_child_that_ignores_sigterm_and_exec_finalizes(
+    fake: FakeSession,
+) -> None:
+    # observed live: the wrapper is TERMed, claude ignores it, stop KILLs the child after the
+    # grace and the wrapper finalizes the run itself
     fake.scenario = "hang_ignore_term"
     info = started(fake)
-    proc = fake.popen(*fake.exec_args(info))
+    proc = fake.popen(*fake.exec_args(info), FAKE_CS_HANG_MAX="30")
     try:
-        wait_until(lambda: status(fake, info)["run"]["wrapper_pid"], "adoption")
+        wait_until(lambda: status(fake, info)["run"]["child_pid"], "the child")
+        child = status(fake, info)["run"]["child_pid"]
         result = fake.run("stop", info["csession_id"], "--grace", "300ms", "--json")
+        out, _ = proc.communicate(timeout=10)
+    finally:
+        stop_process(proc)
+    assert result.returncode == 0
+    assert pinned.errors("stop", result.json) == []
+    assert result.json["signals"] == [
+        {"pid": proc.pid, "role": "wrapper", "signal": "SIGTERM"},
+        {"pid": child, "role": "child", "signal": "SIGKILL"},
+    ]
+    assert result.json["recorded_by_stop"] is False
+    assert (result.json["outcome"], result.json["end_reason"]) == ("killed", "stopped")
+    outcome = json.loads(out)
+    assert pinned.errors("exec", outcome) == []
+    assert (proc.returncode, outcome["outcome"], outcome["end_reason"]) == (15, "killed", "stopped")
+
+
+def test_stop_sigkills_a_wrapper_that_ignores_sigterm_after_a_further_kill_grace(
+    fake: FakeSession,
+) -> None:
+    # the documented fallback (not observed live): the wrapper dies unfinalized, stop records it
+    fake.scenario = "hang_ignore_term_wrapper"
+    info = started(fake)
+    proc = fake.popen(*fake.exec_args(info), FAKE_CS_HANG_MAX="30")
+    try:
+        wait_until(lambda: status(fake, info)["state"] == "working", "the session phase")
+        result = fake.run(
+            "stop", info["csession_id"], "--grace", "300ms", "--json", FAKE_CS_KILL_GRACE="0.3"
+        )
         proc.communicate(timeout=10)
     finally:
         stop_process(proc)
     assert result.returncode == 0
     assert pinned.errors("stop", result.json) == []
     assert [s["signal"] for s in result.json["signals"]] == ["SIGTERM", "SIGKILL"]
+    assert {s["role"] for s in result.json["signals"]} == {"wrapper"}
     assert result.json["recorded_by_stop"] is True
     assert (result.json["outcome"], result.json["end_reason"]) == ("killed", "stopped")
     assert proc.returncode == -signal.SIGKILL
+
+
+def test_stop_default_grace_is_the_kill_grace() -> None:
+    module = load_fake()
+    assert module.DEFAULT_KILL_GRACE == 10.0
+    os.environ.pop("FAKE_CS_KILL_GRACE", None)
+    assert module.kill_grace() == 10.0
+
+
+def test_stop_without_grace_waits_the_kill_grace_before_killing(fake: FakeSession) -> None:
+    fake.scenario = "hang_ignore_term_wrapper"
+    info = started(fake)
+    proc = fake.popen(*fake.exec_args(info), FAKE_CS_HANG_MAX="30")
+    try:
+        wait_until(lambda: status(fake, info)["state"] == "working", "the session phase")
+        begun = time.monotonic()
+        result = fake.run("stop", info["csession_id"], "--json", FAKE_CS_KILL_GRACE="0.5")
+        elapsed = time.monotonic() - begun
+    finally:
+        stop_process(proc)
+    assert result.returncode == 0
+    assert elapsed >= 1.0  # grace (the kill grace, 0.5) plus the further kill grace (0.5)
+
+
+def test_stop_never_signals_a_wrapper_it_cannot_identify(fake: FakeSession) -> None:
+    fake.scenario = "hang"
+    info = started(fake)
+    proc = fake.popen(*fake.exec_args(info), FAKE_CS_NO_PROC="1", FAKE_CS_HANG_MAX="30")
+    try:
+        wait_until(lambda: status(fake, info)["run"]["wrapper_pid"], "adoption")
+        result = fake.run(
+            "stop", info["csession_id"], "--grace", "300ms", "--json", FAKE_CS_NO_PROC="1"
+        )
+        assert proc.poll() is None  # untouched
+    finally:
+        stop_process(proc)
+    assert result.returncode == 0
+    assert pinned.errors("stop", result.json) == []
+    assert result.json["signals"] == []
+    assert result.json["recorded_by_stop"] is True
+    assert (result.json["outcome"], result.json["end_reason"]) == ("killed", "stopped")
+
+
+def test_stop_is_bounded_when_the_wrapper_survives_sigkill(fake: FakeSession) -> None:
+    fake.scenario = "hang_ignore_term_wrapper"
+    info = started(fake)
+    proc = fake.popen(*fake.exec_args(info), FAKE_CS_HANG_MAX="30")
+    try:
+        wait_until(lambda: status(fake, info)["state"] == "working", "the session phase")
+        begun = time.monotonic()
+        result = fake.run(
+            "stop",
+            info["csession_id"],
+            "--grace",
+            "200ms",
+            "--json",
+            FAKE_CS_KILL_GRACE="0.2",
+            FAKE_CS_SIGKILL_LOST="1",
+        )
+        elapsed = time.monotonic() - begun
+        assert proc.poll() is None  # the dropped SIGKILL left it alive
+        live = status(fake, info)["live"]  # not recorded as ended
+    finally:
+        stop_process(proc)
+    assert elapsed < 5
+    assert result.returncode == 12
+    assert pinned.errors("stop", result.json) == []
+    assert result.json["ended"] is False
+    assert (result.json["run_exit_code"], result.json["outcome"], result.json["end_reason"]) == (
+        None,
+        None,
+        None,
+    )
+    assert live is True
+
+
+@pytest.mark.parametrize("behavior", ["ended_false", "fail:12", "fail"])
+def test_stop_behaviors_for_a_still_live_run_print_the_real_stop_object(
+    fake: FakeSession, behavior: str
+) -> None:
+    info = started(fake)
+    result = fake.run("stop", info["csession_id"], "--json", FAKE_CS_BEHAVIOR_STOP=behavior)
+    assert result.returncode == 12
+    assert pinned.errors("stop", result.json) == []
+    assert result.json["ended"] is False
+    assert result.json["outcome"] is None and result.json["run_exit_code"] is None
+    assert status(fake, info)["live"] is True
+
+
+def test_stop_fail_other_than_12_is_an_error_envelope(fake: FakeSession) -> None:
+    info = started(fake)
+    result = fake.run("stop", info["csession_id"], "--json", FAKE_CS_BEHAVIOR_STOP="fail:1")
+    assert (result.returncode, result.json["error"]["code"]) == (1, "internal")
 
 
 def test_stop_unknown_session_is_not_found(fake: FakeSession) -> None:
@@ -692,8 +843,42 @@ def test_a_hang_ends_itself_after_the_hang_limit(fake: FakeSession) -> None:
     assert result.returncode == 16 and result.json["end_reason"] == "timeout"
 
 
-def test_hang_ignoring_sigterm_survives_it_and_ends_by_its_limit(fake: FakeSession) -> None:
+def test_a_signal_to_the_wrapper_is_forwarded_to_a_child_that_ignores_sigterm(
+    fake: FakeSession,
+) -> None:
     fake.scenario = "hang_ignore_term"
+    info = started(fake)
+    proc = fake.popen(*fake.exec_args(info), FAKE_CS_HANG_MAX="1.5")
+    try:
+        wait_until(lambda: status(fake, info)["run"]["child_pid"], "the child")
+        proc.send_signal(signal.SIGTERM)
+        time.sleep(0.3)
+        assert proc.poll() is None  # the child ignored it; the wrapper waits for the child
+        out, _ = proc.communicate(timeout=10)
+    finally:
+        stop_process(proc)
+    assert (proc.returncode, json.loads(out)["end_reason"]) == (15, "forwarded_term")
+
+
+def test_a_sigint_after_a_stop_request_is_still_a_forwarded_int(fake: FakeSession) -> None:
+    fake.scenario = "hang"
+    info = started(fake)
+    proc = fake.popen(*fake.exec_args(info), FAKE_CS_HANG_MAX="30")
+    try:
+        wait_until(lambda: status(fake, info)["state"] == "working", "the session phase")
+        path = fake.state / "sessions" / f"{info['csession_id']}.json"
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["stop_requested_at"] = "2026-01-01T00:00:00.000000Z"
+        path.write_text(json.dumps(record), encoding="utf-8")
+        proc.send_signal(signal.SIGINT)
+        out, _ = proc.communicate(timeout=10)
+    finally:
+        stop_process(proc)
+    assert (proc.returncode, json.loads(out)["end_reason"]) == (15, "forwarded_int")
+
+
+def test_hang_ignoring_sigterm_survives_it_and_ends_by_its_limit(fake: FakeSession) -> None:
+    fake.scenario = "hang_ignore_term_wrapper"
     info = started(fake)
     proc = fake.popen(*fake.exec_args(info), FAKE_CS_HANG_MAX="3")
     try:
@@ -762,6 +947,9 @@ def test_per_command_behaviors(
     env: dict[str, Any] = {f"FAKE_CS_BEHAVIOR_{command.upper()}": behavior}
     result = fake.run(*argv, **env)
     assert result.returncode == returncode
+    if command == "stop" and behavior == "fail":  # exit 12 is the real stop object
+        assert result.json["ended"] is False
+        return
     if stdout_json == "empty":
         assert result.stdout == ""
     elif stdout_json:
@@ -882,8 +1070,12 @@ def test_the_log_names_the_environment_without_its_values(fake: FakeSession) -> 
 def test_concurrent_calls_do_not_interleave_log_lines(fake: FakeSession) -> None:
     info = started(fake)
     procs = [fake.popen("status", info["csession_id"], "--json") for _ in range(8)]
-    for proc in procs:
-        proc.communicate(timeout=30)
+    try:
+        for proc in procs:
+            proc.communicate(timeout=30)
+    finally:
+        for proc in procs:
+            stop_process(proc)
     lines = fake.log.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2 + 16  # start (call + exit) and 8 x (call + exit)
     assert all(isinstance(json.loads(line), dict) for line in lines)
@@ -901,15 +1093,204 @@ def test_without_a_log_variable_nothing_is_recorded(fake: FakeSession) -> None:
     assert not fake.log.exists()
 
 
-def test_version_flag_names_the_pinned_version() -> None:
-    done = subprocess.run(  # noqa: S603
-        [str(FAKE), "--version"], capture_output=True, text=True, timeout=30
-    )
+@pytest.mark.parametrize(
+    "argv",
+    [["--version"], ["start", "--version"], ["status", "--version"], ["list", "--version"]]
+    + [["exec", "--version"], ["stop", "--version"], ["forget", "--version"]],
+)
+def test_version_flag_is_plain_and_accepted_on_every_command(
+    fake: FakeSession, argv: list[str]
+) -> None:
+    done = fake.run(*argv)
     assert done.returncode == 0
-    assert pinned.PINNED_VERSION in done.stdout
+    assert done.stdout == f"claude-session {pinned.PINNED_VERSION}\n"
+    assert fake.calls()[0]["fake"] is True  # the fake stays identifiable in its log
 
 
 def test_the_fake_is_executable_and_has_a_python_shebang() -> None:
     assert os.access(FAKE, os.X_OK)
     assert FAKE.read_text(encoding="utf-8").startswith("#!/usr/bin/env python3\n")
     assert pinned.PINNED_VERSION in FAKE.read_text(encoding="utf-8").split('"""')[1]
+
+
+# review round 1
+
+
+def test_prompt_and_input_with_the_same_basename_are_both_kept(
+    fake: FakeSession, tmp_path: Path
+) -> None:
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    clash = other / "input.json"
+    clash.write_text("prompt text, nonce " + NONCE + "\n", encoding="utf-8")
+    info = started(fake, "--prompt-file", str(clash))
+    staged = sorted(p for p in (fake.state / "private").rglob("input.json"))
+    assert {p.read_text(encoding="utf-8") for p in staged} == {
+        "{}\n",
+        "prompt text, nonce " + NONCE + "\n",
+    }
+    assert status(fake, info)["run"]["input_files"] == ["input.json"]
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"FAKE_CS_CONFIDENCE": "not json"},
+        {"FAKE_CS_REASONS": "[unterminated"},
+    ],
+)
+def test_malformed_verdict_environment_is_refused_before_adoption(
+    fake: FakeSession, env: dict[str, Any]
+) -> None:
+    info = started(fake)
+    result = fake.run(*fake.exec_args(info), **env)
+    assert (result.returncode, result.json["error"]["code"]) == (1, "internal")
+    assert "Traceback" not in result.stderr
+    assert status(fake, info)["pending"] is True  # still adoptable
+    assert fake.run(*fake.exec_args(info)).returncode == 0
+
+
+def test_unknown_scenario_at_exec_is_refused_before_adoption(fake: FakeSession) -> None:
+    info = started(fake)
+    result = fake.run(*fake.exec_args(info), FAKE_CS_SCENARIO="no_such_scenario")
+    assert (result.returncode, result.json["error"]["code"]) == (1, "internal")
+    assert status(fake, info)["pending"] is True
+    assert fake.run(*fake.exec_args(info)).returncode == 0
+
+
+def test_an_unwritable_log_is_a_clear_internal_error(fake: FakeSession, tmp_path: Path) -> None:
+    result = fake.run("list", "--json", FAKE_CS_LOG=str(tmp_path))  # a directory
+    assert result.returncode == 1
+    assert "FAKE_CS_LOG" in result.stderr and "Traceback" not in result.stderr
+    assert result.json["error"]["code"] == "internal"
+
+
+def test_config_cannot_be_used_with_session_id(fake: FakeSession) -> None:
+    info = started(fake)
+    result = fake.run(*fake.exec_args(info, "--config", "x.yaml"))
+    assert result.returncode == 2
+    assert "--config cannot be used with --session-id" in result.json["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["list", "--state", "bogus"],
+        ["list", "--report-status", "bogus"],
+        ["forget", "cs-aaaaaaaa", "--state", "bogus"],
+    ],
+)
+def test_state_and_report_status_values_are_checked(fake: FakeSession, argv: list[str]) -> None:
+    result = fake.run(*argv, "--json")
+    assert (result.returncode, result.json["error"]["code"]) == (2, "usage")
+
+
+@pytest.mark.parametrize("value", ["done", "blocked", "failed", "needs-input", "none"])
+def test_report_status_accepts_the_documented_values(fake: FakeSession, value: str) -> None:
+    assert fake.run("list", "--report-status", value, "--json").returncode == 0
+
+
+def test_a_run_timeout_shortens_the_hang_and_ends_it_timeout(fake: FakeSession) -> None:
+    fake.scenario = "hang"
+    info = started(fake, "--timeout", "300ms")
+    begun = time.monotonic()
+    result = fake.run(*fake.exec_args(info), timeout=10)  # FAKE_CS_HANG_MAX stays at 120
+    assert time.monotonic() - begun < 5
+    assert (result.returncode, result.json["end_reason"]) == (16, "timeout")
+
+
+def test_stop_of_a_pending_run_says_so_and_writes_the_stored_outcome_file(
+    fake: FakeSession,
+) -> None:
+    outfile = fake.root / "stored-outcome.json"
+    info = started(fake, "--outcome-file", str(outfile))
+    stopped = fake.run("stop", info["csession_id"], "--json")
+    assert stopped.returncode == 0
+    message = "the pending run was canceled by stop"
+    assert status(fake, info)["run"]["message"] == message
+    written = json.loads(outfile.read_text(encoding="utf-8"))
+    assert pinned.errors("exec", written) == []
+    assert (written["outcome"], written["end_reason"], written["message"]) == (
+        "not-started",
+        "canceled",
+        message,
+    )
+
+
+def test_error_envelopes_are_written_to_the_outcome_file_of_the_command_line(
+    fake: FakeSession,
+) -> None:
+    info = started(fake)
+    outfile = fake.root / "refusal.json"
+    refused = fake.run(*fake.exec_args(info, "--run", "2", "--outcome-file", str(outfile)))
+    assert refused.returncode == 20
+    assert json.loads(outfile.read_text(encoding="utf-8")) == refused.json
+    usage = fake.root / "usage.json"
+    bad = fake.run("start", "--no-such-flag", "--outcome-file", str(usage), "--json")
+    assert bad.returncode == 2
+    written = json.loads(usage.read_text(encoding="utf-8"))
+    assert pinned.errors("error", written) == []
+    assert written == bad.json
+
+
+# kind -> (env_inherit, implicit_done, permission profile)
+KINDS = {
+    "implement": (True, True, "default"),
+    "draft-ticket": (True, True, "default"),
+    "audit": (True, True, "default"),
+    "improve": (True, True, "default"),
+    "rank": (False, False, "readonly"),
+    "review": (False, True, "review"),
+    "gate-check": (False, False, "review"),
+    "respond": (False, True, "respond"),
+    "some-custom-kind": (False, False, "review"),  # unknown kinds are treated as isolated
+}
+
+
+@pytest.mark.parametrize("kind", sorted(KINDS))
+def test_kind_decides_env_inherit_implicit_done_and_profile(fake: FakeSession, kind: str) -> None:
+    env_inherit, implicit_done, profile = KINDS[kind]
+    result = fake.run("start", "--kind", kind, "--mode", "headless", "--skill", "s", "--json")
+    assert result.returncode == 0, result.stderr
+    assert pinned.errors("start", result.json) == []
+    assert result.json["env_inherit"] is env_inherit
+    run = status(fake, result.json)["run"]
+    assert (run["implicit_done"], run["permission_profile"]) == (implicit_done, profile)
+
+
+@pytest.mark.parametrize(
+    ("scenario", "has_result"),
+    [
+        ("valid", True),
+        ("unreported", True),
+        ("failed", True),
+        ("killed", False),
+        ("lost", False),
+        ("timeout", False),
+        ("unreported_no_result", False),
+    ],
+)
+def test_cost_turns_and_claude_session_id_only_with_a_result(
+    fake: FakeSession, scenario: str, has_result: bool
+) -> None:
+    fake.scenario = scenario
+    info, result = ran(fake)
+    run = status(fake, info)
+    for obj in (result.json, run["run"]):
+        assert (obj["cost_usd"] is not None) is has_result
+        assert (obj["num_turns"] is not None) is has_result
+    assert (result.json["claude_session_id"] is not None) is has_result
+    assert (run["claude_session_id"] is not None) is has_result
+
+
+def test_the_fake_imports_only_the_standard_library() -> None:
+    tree = ast.parse(FAKE.read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            assert node.level == 0 and node.module
+            names.add(node.module.split(".")[0])
+    assert names <= set(sys.stdlib_module_names)
+    assert "claude_session" not in names and "gatectl" not in names
