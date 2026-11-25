@@ -1103,7 +1103,9 @@ def test_a_hostile_state_db_is_ignored_not_trusted(env: Env) -> None:
     state.mkdir(parents=True)
     (state / "state.db").write_bytes(b"not a database" * 100)
     code, payload = env.run(env.base())
-    assert code == 0 and payload["warnings"] == []
+    # not trusted (no orphan is read from it) and, as `check` refuses it, a problem
+    assert code == 2 and payload["warnings"] == []
+    assert found(payload, "problems") == {("state_db_missing", "state.db")}
 
 
 def test_state_db_values_that_are_not_policy_names_are_never_printed(env: Env) -> None:
@@ -1169,7 +1171,10 @@ def test_a_state_db_without_a_schema_version_row_is_state_db_missing(env: Env, k
 
 
 @pytest.mark.parametrize("kind", ["unrelated-table", "no-schema-row", "garbage"])
-def test_a_schema_less_state_db_is_no_problem_without_an_audit_history(env: Env, kind: str) -> None:
+def test_a_schema_less_state_db_is_a_problem_even_without_an_audit_history(
+    env: Env, kind: str
+) -> None:
+    """`check` refuses a foreign or junk database over no history too (exit 1): so does validate."""
     state = _state_dir()
     state.mkdir(parents=True, exist_ok=True)
     (state / "audit.jsonl").write_text("")
@@ -1181,7 +1186,8 @@ def test_a_schema_less_state_db_is_no_problem_without_an_audit_history(env: Env,
         db.commit()
         db.close()
     code, payload = env.run(env.base())
-    assert code == 0 and payload["problems"] == []
+    assert code == 2
+    assert found(payload, "problems") == {("state_db_missing", "state.db")}
 
 
 def test_a_state_db_with_a_schema_version_row_stays_valid_next_to_a_history(env: Env) -> None:

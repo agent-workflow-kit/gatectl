@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from gatectl import audit, ids
+from gatectl import audit, ids, store
 from gatectl.config import (
     ConfigProblem,
     LoadedConfig,
@@ -209,6 +209,9 @@ def _wal_has_content(path: Path) -> bool:
     return _non_empty_file(path.with_name(path.name + "-wal"), header=32)
 
 
+_LIVE_WAL: Any = object()  # a sentinel version: the database was not read (see _read_db)
+
+
 class _CannotReadSafely(Exception):
     """The database cannot be read without writing next to it: it is skipped, not judged."""
 
@@ -266,22 +269,31 @@ def _connect(path: Path) -> tuple[sqlite3.Connection, int | None] | None:
         return None
 
 
-def _db_policies(path: Path) -> set[str] | None:
-    """Policy names stored in ``state.db`` (read-only), or ``None`` when it is not usable.
+@dataclass(frozen=True)
+class _StoredDb:
+    """What a read-only look at ``state.db`` found: the schema version in the store's terms
+    (``None``: no file, an empty file, or one that cannot be read; ``False``: tables but no usable
+    ``meta.schema_version`` row, or not SQLite's; else the number) and the policy names."""
+
+    version: int | None | bool
+    names: frozenset[str] = frozenset()
+
+
+def _read_db(path: Path) -> _StoredDb:
+    """Look at ``state.db`` (read-only, never blocking, never writing next to it).
 
     The ``meta(key TEXT PRIMARY KEY, value TEXT)`` columns, ``policy_state.policy`` and
-    ``decisions.policy`` are those of the state store; issue #12's schema must match these names.
-    Usable means a database with a ``meta.schema_version`` row, the same test ``check`` applies
-    (interface.md, Exit codes). Only names that follow the policy-name grammar are returned;
-    anything else in a tampered database is ignored and never printed. The read is bounded in
-    rows and in work.
+    ``decisions.policy`` are those of the state store. The version is read as the store reads it
+    (``store._read_version``), and the verdict on it is the store's (``store.db_verdict``). Only
+    names that follow the policy-name grammar are returned; anything else in a tampered database
+    is ignored and never printed. The read is bounded in rows and in work.
     """
     try:
         opened = _connect(path)
     except _CannotReadSafely:
-        return set()  # a live WAL without its -shm: nothing is learned, nothing is judged
+        return _StoredDb(_LIVE_WAL)  # a live WAL without its -shm: nothing is learned or judged
     if opened is None:
-        return None
+        return _StoredDb(None)
     db, fd = opened
     names: set[str] = set()
     steps = 0
@@ -295,11 +307,16 @@ def _db_policies(path: Path) -> set[str] | None:
         db.set_progress_handler(busy, 1000)
         db.execute("PRAGMA trusted_schema=OFF")
         try:
-            has_schema = db.execute("SELECT 1 FROM meta WHERE key = 'schema_version'").fetchone()
-        except sqlite3.Error:
-            return None
-        if has_schema is None:
-            return None
+            if db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone() is None:
+                return _StoredDb(None)  # an empty file: no tables
+            row = db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+        except sqlite3.Error as exc:
+            if store.is_not_a_database(exc) or "no such table" in str(exc):
+                return _StoredDb(False)  # junk, or tables of another program
+            return _StoredDb(None)  # damaged or busy: unreadable, not judged from content
+        version = None if row is None else store.parse_schema_version(row[0])
+        if version is None:
+            return _StoredDb(False)  # no row, or an unusable value: the store refuses it
         for table in ("policy_state", "decisions"):
             try:
                 rows = db.execute(f"SELECT DISTINCT policy FROM {table} LIMIT 5000").fetchall()  # noqa: S608
@@ -309,28 +326,46 @@ def _db_policies(path: Path) -> set[str] | None:
                 if isinstance(value, str) and ids.is_policy_name(value):
                     names.add(value)
     except sqlite3.Error:
-        return None
+        return _StoredDb(None)
     finally:
         db.close()
         if fd is not None:
             os.close(fd)
-    return names
+    return _StoredDb(version, frozenset(names))
+
+
+def _state_dir_is_real(state: Path) -> bool:
+    try:
+        return stat.S_ISDIR(os.lstat(state).st_mode)
+    except OSError:
+        return False
 
 
 def _check_state(loaded: LoadedConfig, state: Path, out: _Out) -> None:
-    stored = _db_policies(state / "state.db")
-    if stored is None:
-        # A fresh install has no state.db until the first check: not a problem. With an audit
-        # history next to it, a database that is missing, empty or without a schema is the
-        # unknown state every other command refuses (design.md, Error handling).
-        if _non_empty_file(state / "audit.jsonl"):
-            out.problem(
-                "state_db_missing",
-                "state.db",
-                "state.db is missing, empty or has no schema_version but audit.jsonl has records",
-            )
+    # A fresh install has no state directory, and no state.db until the first check: not a
+    # problem. Otherwise the verdict is the store's (design.md, state store): the same history
+    # test and the same judgment of the database that `check` applies, so the two agree.
+    if not _state_dir_is_real(state):
         return
-    for name in sorted(stored - set(loaded.policies)):
+    found = _read_db(state / "state.db")
+    if found.version is _LIVE_WAL:
+        return
+    verdict = store.db_verdict(store.has_history(state), found.version)
+    if verdict == "state_db_missing":
+        out.problem(
+            "state_db_missing",
+            "state.db",
+            "state.db is missing, empty or has no schema_version but audit.jsonl has records",
+        )
+        return
+    if verdict == "not_gatectl":
+        out.problem(
+            "state_db_missing",
+            "state.db",
+            "state.db is not a gatectl database (it has no schema_version)",
+        )
+        return
+    for name in sorted(found.names - set(loaded.policies)):
         out.warning(
             "orphan_state", ("policies", name), "policy is in state.db but not in the config"
         )

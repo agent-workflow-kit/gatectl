@@ -708,16 +708,17 @@ def test_validate_queries_work_against_a_real_store(sdir: Path) -> None:
             (TS, FP),
         )
     # open store (data possibly still only in the WAL) and a closed one both read the same names
-    assert validate._db_policies(sdir / "state.db") == {"alpha", "beta", "gamma"}
+    assert validate._read_db(sdir / "state.db").names == {"alpha", "beta", "gamma"}
     s.close()
-    assert validate._db_policies(sdir / "state.db") == {"alpha", "beta", "gamma"}
-    assert validate._db_policies(sdir / "state.db") is not None  # schema_version row is found
+    assert validate._read_db(sdir / "state.db").names == {"alpha", "beta", "gamma"}
+    assert validate._read_db(sdir / "state.db").version == 1  # schema_version row is found
 
 
 def test_fresh_store_is_usable_for_validate_and_has_no_orphans(sdir: Path) -> None:
     opened(sdir).close()
     audit_line(sdir)
-    assert validate._db_policies(sdir / "state.db") == set()
+    found = validate._read_db(sdir / "state.db")
+    assert found.names == set() and found.version == 1
 
 
 # --- real processes ------------------------------------------------------------------------------

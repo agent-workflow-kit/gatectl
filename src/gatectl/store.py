@@ -261,8 +261,12 @@ def _vet_sidecars(db: Path) -> None:
         _vet_file(db.with_name(db.name + suffix))
 
 
-def _has_history(directory: Path) -> bool:
-    """Whether ``audit.jsonl`` holds anything. Anything but an empty regular file counts."""
+def has_history(directory: Path) -> bool:
+    """Whether ``audit.jsonl`` holds anything. Anything but an empty regular file counts.
+
+    Judged with ``lstat`` and never opened, so a FIFO cannot hang it; ``validate`` uses this same
+    function, so the two commands cannot disagree about the history.
+    """
     try:
         info = os.lstat(directory / "audit.jsonl")
     except FileNotFoundError:
@@ -324,8 +328,8 @@ def _read_version(con: sqlite3.Connection) -> int | None | bool:
         raise  # busy past the bound, corrupt, not a database: the caller decides
     if row is None:
         return False
-    number = _parse_int(row[0])
-    if number is None or number < 1:
+    number = parse_schema_version(row[0])
+    if number is None:
         raise _fail("state.db has an unusable schema_version")
     return number
 
@@ -349,7 +353,7 @@ def _peek(path: Path) -> int | None | bool:
         con.execute("PRAGMA trusted_schema=OFF")
         return _read_version(con)
     except sqlite3.Error as exc:
-        if _primary(exc) == _SQLITE_NOTADB:
+        if is_not_a_database(exc):
             return False  # "not a database" (bad header): no schema_version row
         raise _translate(exc) from None
     finally:
@@ -625,8 +629,32 @@ def _ensure_wal(con: sqlite3.Connection, busy_timeout: float) -> None:
         time.sleep(min(0.005 * attempt, 0.05))
 
 
-def _refuse_missing(history: bool) -> None:
+def is_not_a_database(exc: sqlite3.Error) -> bool:
+    """Whether SQLite reported ``file is not a database`` (an invalid or damaged header)."""
+    return _primary(exc) == _SQLITE_NOTADB
+
+
+def parse_schema_version(value: object) -> int | None:
+    """The stored ``schema_version`` as a number, or None when it is not a usable one (< 1)."""
+    number = _parse_int(value)
+    return number if number is not None and number >= 1 else None
+
+
+def db_verdict(history: bool, version: int | None | bool) -> str | None:
+    """How the store judges a ``state.db`` whose schema version is ``version`` (``None`` for a
+    missing or empty file, ``False`` for one with no ``meta.schema_version`` row or not SQLite's)
+    next to an audit history: ``"state_db_missing"`` (a history and no usable schema),
+    ``"not_gatectl"`` (a foreign or damaged file, history or not), or None (nothing to refuse
+    here). ``open_store`` and ``validate`` both decide through this function."""
+    if isinstance(version, int) and not isinstance(version, bool):
+        return None
     if history:
+        return "state_db_missing"
+    return "not_gatectl" if version is False else None
+
+
+def _refuse_missing(history: bool) -> None:
+    if db_verdict(history, None) == "state_db_missing":
         raise _fail(
             "state.db is missing, empty or has no schema, but audit.jsonl has records",
             "state_db_missing",
@@ -651,7 +679,7 @@ def open_store(
     if not _vet_dir(base, create):
         return None
     path = base / "state.db"
-    history = _has_history(base)
+    history = has_history(base)
     ident = _vet_file(path)
     if ident is None:
         _refuse_missing(history)
