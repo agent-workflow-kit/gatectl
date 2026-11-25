@@ -11,8 +11,10 @@ import json
 import os
 import signal
 import sys
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -119,6 +121,48 @@ def test_spec_rejects_non_string_env() -> None:
         spec(("x",), env={"A": "a\x00"})
 
 
+def test_spec_env_is_read_only_and_hashable() -> None:
+    env = {"A": "1"}
+    s = spec(("x",), env=env)
+    env["B"] = "2"  # the caller's dict is not shared with the spec
+    assert dict(s.env or {}) == {"A": "1"}
+    with pytest.raises(TypeError):
+        s.env["C"] = "3"  # type: ignore[index]
+    assert hash(s) == hash(spec(("x",), env={"A": "1"}))
+    assert s == spec(("x",), env={"A": "1"})
+    assert s != spec(("x",), env={"A": "2"})
+    assert isinstance(hash(spec(("x",))), int)
+
+
+def test_spec_repr_does_not_leak_env_values() -> None:
+    assert "hunter2" not in repr(spec(("x",), env={"TOKEN": "hunter2"}))
+
+
+@pytest.mark.parametrize("bad", [None, 0, 1, "yes"])
+def test_spec_rejects_non_bool_own_group(bad: object) -> None:
+    with pytest.raises(ValueError, match="own_group"):
+        spec(("x",), own_group=bad)
+
+
+@pytest.mark.parametrize("bad", [3, b"/tmp", Path("/tmp"), "a\x00b"])
+def test_spec_rejects_bad_cwd(bad: object) -> None:
+    with pytest.raises(ValueError, match="cwd"):
+        spec(("x",), cwd=bad)
+
+
+@pytest.mark.parametrize("bad", ["A=1", ["A"], 3, ("A", "1")])
+def test_spec_rejects_non_mapping_env(bad: object) -> None:
+    with pytest.raises(ValueError, match="env"):
+        spec(("x",), env=bad)
+
+
+def test_spec_fields_match_init_parameters() -> None:
+    import inspect
+
+    params = set(inspect.signature(ChildSpec.__init__).parameters) - {"self"}
+    assert {f.name for f in fields(ChildSpec)} == params
+
+
 # --- the real gateway -----------------------------------------------------------------------
 
 
@@ -220,6 +264,12 @@ def test_env_is_exactly_the_one_given_and_cwd_is_applied(tmp_path: Path) -> None
     assert cwd == str(tmp_path.resolve())
 
 
+def test_empty_env_gives_the_child_no_home() -> None:
+    code = "import os; print(os.environ.get('HOME'))"
+    with started(SubprocessGateway(), spec(py(code), env={})) as child:
+        assert output(child).strip() == b"None"
+
+
 def test_env_none_inherits_the_callers_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GATECTL_TEST_MARK", "yes")
     code = "import os; print(os.environ.get('GATECTL_TEST_MARK'))"
@@ -256,6 +306,17 @@ def test_signal_group_refuses_when_the_child_is_not_a_group_leader() -> None:
         assert child.poll() is None  # and nothing was signaled
 
 
+def _gone(pgid: int, deadline: float = 5.0) -> bool:
+    end = time.monotonic() + deadline
+    while time.monotonic() < end:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.02)
+    return False
+
+
 def test_signal_group_kills_a_grandchild_that_ignores_sigterm() -> None:
     code = (
         "import subprocess, sys, signal, time\n"
@@ -272,11 +333,48 @@ def test_signal_group_kills_a_grandchild_that_ignores_sigterm() -> None:
         grandchild = int(child.stdout.readline())
         assert os.getpgid(grandchild) == child.pid
         child.signal_group(signal.SIGTERM)
+        time.sleep(0.2)
         assert child.poll() is None  # the leader ignores SIGTERM
+        os.kill(grandchild, 0)  # and so does the grandchild: still alive
         child.signal_group(signal.SIGKILL)
-        # Both processes held the stdout pipe: EOF means the whole group is gone.
-        assert read_capped(child.stdout, 10).data == b""
         assert child.wait(timeout=10) == -signal.SIGKILL
+        assert _gone(child.pid), "the grandchild survived SIGKILL of the group"
+
+
+def test_wait_exited_then_signal_group_sweeps_stragglers_before_reaping() -> None:
+    code = (
+        "import subprocess, sys\n"
+        "g = subprocess.Popen([sys.executable, '-c',\n"
+        "    'import signal, time;"
+        " signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'],\n"
+        "    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)\n"
+        "print(g.pid, flush=True)\n"
+    )
+    with started(SubprocessGateway(), spec(py(code), own_group=True)) as child:
+        assert child.stdout is not None
+        grandchild = int(child.stdout.readline())
+        assert child.wait_exited(timeout=10) is True
+        # Exited but not reaped: still a zombie the kernel can report on.
+        assert os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        os.kill(grandchild, 0)  # the straggler is alive
+        child.signal_group(signal.SIGKILL)  # works: the leader was not reaped
+        assert child.wait(timeout=10) == 0
+        assert _gone(child.pid), "the straggler survived"
+
+
+def test_wait_exited_is_true_after_reaping_and_false_while_running() -> None:
+    with started(SubprocessGateway(), spec(py("import time; time.sleep(30)"))) as child:
+        assert child.wait_exited(timeout=0.05) is False
+        assert child.poll() is None
+    with started(SubprocessGateway(), spec(py("pass"))) as child:
+        assert child.wait(timeout=10) == 0
+        assert child.wait_exited(timeout=0) is True
+
+
+def test_wait_exited_without_timeout_blocks_until_exit() -> None:
+    with started(SubprocessGateway(), spec(py("import time; time.sleep(0.2)"))) as child:
+        assert child.wait_exited() is True
+        assert child.wait(timeout=10) == 0
 
 
 def test_signal_group_after_the_leader_was_reaped_is_a_no_op() -> None:

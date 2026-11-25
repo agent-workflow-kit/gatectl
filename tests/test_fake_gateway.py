@@ -46,12 +46,6 @@ def test_script_sees_each_spec_and_calls_keep_order() -> None:
     assert len({c.pid for c in gw.children}) == 3
 
 
-def test_fake_refuses_what_the_real_gateway_would_refuse() -> None:
-    with pytest.raises(ValueError, match="stdin"):
-        ChildSpec(("x",), stdin=None, stdout=Stdio.PIPE, stderr=Stdio.DEVNULL)  # type: ignore[arg-type]
-    assert FakeGateway().calls == []
-
-
 def test_fake_child_group_signals_are_recorded_and_kill_ends_it() -> None:
     gw = FakeGateway(script=lambda spec: FakeResult(running=True))
     child = gw.start(
@@ -74,3 +68,32 @@ def test_fake_child_refuses_group_signal_without_own_group() -> None:
     )
     with pytest.raises(ValueError, match="own process group"):
         child.signal_group(signal.SIGTERM)
+
+
+def _own_group() -> ChildSpec:
+    return ChildSpec(
+        ("x",), stdin=Stdio.DEVNULL, stdout=Stdio.DEVNULL, stderr=Stdio.DEVNULL, own_group=True
+    )
+
+
+def test_fake_wait_exited_does_not_reap_and_still_accepts_signals() -> None:
+    gw = FakeGateway(script=lambda spec: FakeResult(returncode=0))
+    child = gw.start(_own_group())
+    assert child.wait_exited(timeout=1) is True
+    assert not gw.children[0].reaped
+    child.signal_group(signal.SIGKILL)
+    assert gw.children[0].signals == [signal.SIGKILL]
+    assert child.wait() == 0
+
+
+def test_fake_signal_group_after_reaping_is_a_no_op() -> None:
+    gw = FakeGateway()
+    child = gw.start(_own_group())
+    assert child.poll() == 0
+    child.signal_group(signal.SIGKILL)
+    assert gw.children[0].signals == []
+
+
+def test_fake_wait_exited_is_false_while_running() -> None:
+    gw = FakeGateway(script=lambda spec: FakeResult(running=True))
+    assert gw.start(_own_group()).wait_exited(timeout=0.01) is False

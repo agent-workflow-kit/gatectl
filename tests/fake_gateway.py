@@ -39,27 +39,36 @@ class FakeChild:
             io.BytesIO(result.stderr) if spec.stderr is Stdio.PIPE else None
         )
         self.signals: list[int] = []
-        self._returncode: int | None = None if result.running else result.returncode
-        self._final = result.returncode
+        self._exit_code: int | None = None if result.running else result.returncode
+        self.reaped = False  # set by poll()/wait(); a reaped child no longer takes signals
 
     def poll(self) -> int | None:
-        return self._returncode
+        if self._exit_code is not None:
+            self.reaped = True
+        return self._exit_code
 
     def wait(self, timeout: float | None = None) -> int:
-        if self._returncode is None:
-            if self.signals:
-                self._returncode = -self.signals[-1]
-            else:
+        """Reap the child. A running one that was never signalled raises ``TimeoutError``
+        at once (the fake never blocks), whatever ``timeout`` is."""
+        if self._exit_code is None:
+            if not self.signals:
                 raise TimeoutError(f"fake child {self.pid} still running")
-        return self._returncode
+            self._exit_code = -self.signals[-1]
+        self.reaped = True
+        return self._exit_code
+
+    def wait_exited(self, timeout: float | None = None) -> bool:
+        """True once the child exited (without reaping it); False while it is running."""
+        return self._exit_code is not None
 
     def signal_group(self, sig: int) -> None:
         if not self.own_group:
             raise ValueError("child is not in its own process group")
-        if self._returncode is None:
-            self.signals.append(sig)
-            if sig == signal.SIGKILL:
-                self._returncode = -sig
+        if self.reaped:
+            return
+        self.signals.append(sig)
+        if self._exit_code is None and sig == signal.SIGKILL:
+            self._exit_code = -sig
 
 
 Script = Callable[[ChildSpec], FakeResult]
