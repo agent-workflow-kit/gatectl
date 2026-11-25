@@ -223,8 +223,13 @@ def _glob_subjects(value: Any) -> list[str] | str:
     return value
 
 
+_OPS = ("eq", "ne", "in", "not_in", "glob", "lt", "le", "gt", "ge", "exists", "absent")
+
+
 def _one(condition: Condition, obj: Any) -> Evaluation:
     op, path = condition.op, condition.path
+    if not any(op == known for known in _OPS):  # a Condition built without validation
+        return _error(path, "type")
     found = _lookup(obj, path)
     if op == "exists":
         return _FALSE if found is _MISSING else _TRUE
@@ -241,6 +246,8 @@ def _one(condition: Condition, obj: Any) -> Evaluation:
         return _TRUE if equal == (op == "eq") else _FALSE
 
     if op == "in" or op == "not_in":
+        if type(expected) is not list:  # a Condition built without validation
+            return _error(path, "type")
         if found is None:
             if None not in expected:
                 return _error(path, "null")
@@ -263,6 +270,8 @@ def _one(condition: Condition, obj: Any) -> Evaluation:
         return _TRUE if any(matcher.matches(s) for s in subjects) else _FALSE
 
     # lt, le, gt, ge
+    if not _is_real_number(expected):  # a Condition built without validation
+        return _error(path, "type")
     if found is None:
         return _error(path, "null")
     if not _is_real_number(found):

@@ -449,6 +449,45 @@ def test_an_unusable_glob_value_on_an_unvalidated_condition_escalates(value: Any
     assert run([built], {"k": "abc"}) == ("error", "k: type")
 
 
+@pytest.mark.parametrize("op", ["in", "not_in"])
+@pytest.mark.parametrize("value", [None, "abc", 5, True, {"a": 1}])
+@pytest.mark.parametrize("found", ["abc", 5, None])
+def test_in_with_a_non_list_value_on_an_unvalidated_condition_escalates(
+    op: str, value: Any, found: Any
+) -> None:
+    built = Condition.model_construct(path="k", op=op, value=value)
+    assert run([built], {"k": found}) == ("error", "k: type")
+
+
+@pytest.mark.parametrize("op", ["in", "not_in"])
+def test_in_with_non_scalar_list_elements_does_not_raise(op: str) -> None:
+    built = Condition.model_construct(path="k", op=op, value=[{"a": 1}, [1], "x"])
+    assert run([built], {"k": "x"})[0] == ("true" if op == "in" else "false")
+    assert run([built], {"k": "y"})[0] == ("false" if op == "in" else "true")
+
+
+@pytest.mark.parametrize("op", ["lt", "le", "gt", "ge"])
+@pytest.mark.parametrize("value", [None, "a", [1], {"a": 1}, True])
+def test_ordering_with_a_non_number_value_on_an_unvalidated_condition_escalates(
+    op: str, value: Any
+) -> None:
+    built = Condition.model_construct(path="k", op=op, value=value)
+    assert run([built], {"k": 3}) == ("error", "k: type")
+
+
+@pytest.mark.parametrize("op", ["eq", "ne"])
+@pytest.mark.parametrize("value", [None, "a", [1], {"a": 1}, object()])
+def test_equality_on_an_unvalidated_condition_never_raises(op: str, value: Any) -> None:
+    built = Condition.model_construct(path="k", op=op, value=value)
+    assert run([built], {"k": 3})[0] in ("true", "false", "error")
+
+
+@pytest.mark.parametrize("op", ["bogus", "", None, 5])
+def test_an_unknown_op_on_an_unvalidated_condition_escalates(op: Any) -> None:
+    built = Condition.model_construct(path="k", op=op, value=1)
+    assert run([built], {"k": 3}) == ("error", "k: type")
+
+
 def test_deeply_nested_equality_does_not_recurse() -> None:
     deep_a: Any = "leaf"
     deep_b: Any = "leaf"
