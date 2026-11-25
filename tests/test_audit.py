@@ -694,6 +694,179 @@ class TestRecordsValidateAgainstSchemas:
         assert rec["ts"] == "2030-05-06T07:08:09.000010Z"
 
 
+def _short_once(monkeypatch: pytest.MonkeyPatch, keep: int) -> None:
+    real_write = os.write
+    monkeypatch.setattr(audit, "_write", lambda fd, data: real_write(fd, bytes(data)[:keep]))
+
+
+class TestPartialLine:
+    """A short write leaves a line without its newline; the next record must not fuse onto it."""
+
+    @pytest.mark.parametrize("name", ["audit", "log"])
+    def test_next_record_after_a_short_write_is_intact(
+        self, sdir: Path, monkeypatch: pytest.MonkeyPatch, name: str
+    ) -> None:
+        def write(rec: dict[str, Any]) -> None:
+            if name == "audit":
+                audit.append_audit(rec, state_dir=sdir)
+            else:
+                audit.append_log(rec, state_dir=sdir)
+
+        rec = decision_record() if name == "audit" else audit.log_record(level="info", event="cron")
+        write(rec)
+        path = sdir / f"{name}.jsonl"
+        good = path.read_bytes()
+        _short_once(monkeypatch, 10)
+        with pytest.raises(audit.ShortWriteError):
+            write(rec)
+        monkeypatch.undo()
+        partial = path.read_bytes()[len(good) :]
+        assert len(partial) == 10 and not partial.endswith(b"\n")
+        write(rec)
+        raw = path.read_bytes()
+        assert raw.startswith(good + partial)  # nothing truncated
+        assert raw.endswith(b"\n")
+        physical = raw.split(b"\n")[:-1]
+        assert len(physical) == 3
+        assert json.loads(physical[0]) == json.loads(physical[2])  # the new line is intact
+        assert physical[1] == partial  # the partial line is a line of its own
+        with pytest.raises(ValueError):
+            json.loads(physical[1])
+
+    def test_no_prefix_on_an_empty_file(self, sdir: Path) -> None:
+        sdir.mkdir(parents=True)
+        (sdir / "log.jsonl").write_bytes(b"")
+        audit.append_log(audit.log_record(level="info", event="cron"), state_dir=sdir)
+        assert not (sdir / "log.jsonl").read_bytes().startswith(b"\n")
+
+    def test_no_prefix_on_a_new_file(self, sdir: Path) -> None:
+        audit.append_log(audit.log_record(level="info", event="cron"), state_dir=sdir)
+        assert not (sdir / "log.jsonl").read_bytes().startswith(b"\n")
+
+    def test_no_prefix_after_a_newline_ending_file(self, sdir: Path) -> None:
+        for _ in range(3):
+            audit.append_audit(decision_record(), state_dir=sdir)
+        raw = (sdir / "audit.jsonl").read_bytes()
+        assert b"\n\n" not in raw
+        assert len(read_lines(sdir / "audit.jsonl")) == 3
+
+    def test_prefix_and_record_are_one_write(
+        self, sdir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sdir.mkdir(parents=True)
+        (sdir / "audit.jsonl").write_bytes(b'{"partial":')
+        calls: list[bytes] = []
+        real_write = os.write
+
+        def spy(fd: int, data: Any) -> int:
+            calls.append(bytes(data))
+            return real_write(fd, data)
+
+        monkeypatch.setattr(audit, "_write", spy)
+        rec = decision_record(ts="2030-01-01T00:00:00.000000Z")
+        audit.append_audit(rec, state_dir=sdir)
+        assert len(calls) == 1
+        assert calls[0] == b"\n" + audit.encode_line(rec)
+
+    def test_record_at_the_cap_keeps_its_cap_with_the_prefix(self, sdir: Path) -> None:
+        sdir.mkdir(parents=True)
+        (sdir / "log.jsonl").write_bytes(b'{"partial":')
+        rec = audit.log_record(level="info", event="warning", message="")
+        rec["data"] = {"pad": ""}
+        base = len(audit.encode_line(rec, sanitize_text=False))
+        rec["data"] = {"pad": "p" * (CAP - base)}
+        line = audit.encode_line(rec, sanitize_text=False)
+        assert len(line) == CAP  # exactly at the cap: not shortened
+        audit.append_log(rec, state_dir=sdir, sanitize_text=False)
+        raw = (sdir / "log.jsonl").read_bytes()
+        assert len(raw) == len(b'{"partial":') + 1 + CAP  # one write: prefix + the full line
+        first, second = raw.split(b"\n")[0], raw.split(b"\n")[1]
+        assert first == b'{"partial":'
+        assert len(second) + 1 == CAP
+        assert json.loads(second)["data"]["pad"] == "p" * (CAP - base)
+
+    def test_over_cap_record_is_shortened_to_the_cap_with_the_prefix(self, sdir: Path) -> None:
+        sdir.mkdir(parents=True)
+        (sdir / "log.jsonl").write_bytes(b'{"partial":')
+        rec = audit.log_record(level="info", event="warning", data={"a": "x" * (CAP + 10)})
+        audit.append_log(rec, state_dir=sdir, sanitize_text=False)
+        physical = (sdir / "log.jsonl").read_bytes().split(b"\n")
+        assert physical[0] == b'{"partial":'
+        assert len(physical[1]) + 1 <= CAP
+        json.loads(physical[1])
+
+    def test_short_write_with_prefix_is_still_not_truncated(
+        self, sdir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sdir.mkdir(parents=True)
+        (sdir / "audit.jsonl").write_bytes(b'{"partial":')
+        _short_once(monkeypatch, 5)
+        with pytest.raises(audit.ShortWriteError):
+            audit.append_audit(decision_record(), state_dir=sdir)
+        assert (sdir / "audit.jsonl").read_bytes().startswith(b'{"partial":\n')
+        assert (sdir / "audit.jsonl").stat().st_size == len(b'{"partial":') + 5
+
+    def test_a_file_of_only_a_partial_line_gets_the_prefix(self, sdir: Path) -> None:
+        sdir.mkdir(parents=True)
+        (sdir / "audit.jsonl").write_bytes(b"x")
+        audit.append_audit(decision_record(), state_dir=sdir)
+        assert (sdir / "audit.jsonl").read_bytes().startswith(b"x\n{")
+
+    def test_the_check_does_not_follow_a_symlink(self, sdir: Path, tmp_path: Path) -> None:
+        sdir.mkdir(parents=True)
+        target = tmp_path / "elsewhere"
+        target.write_bytes(b"no newline")
+        (sdir / "audit.jsonl").symlink_to(target)
+        with pytest.raises(OSError):
+            audit.append_audit(decision_record(), state_dir=sdir)
+        assert target.read_bytes() == b"no newline"
+
+    def test_the_check_does_not_block_on_a_fifo(self, sdir: Path) -> None:
+        sdir.mkdir(parents=True)
+        os.mkfifo(sdir / "audit.jsonl", 0o600)
+        with hang_guard(), pytest.raises(OSError, match="not a regular file"):
+            audit.append_audit(decision_record(), state_dir=sdir)
+
+    def test_append_many_gets_one_prefix_for_all_its_lines(self, sdir: Path) -> None:
+        sdir.mkdir(parents=True)
+        (sdir / "audit.jsonl").write_bytes(b'{"partial":')
+        audit.append_audit_many([decision_record(), decision_record()], state_dir=sdir)
+        physical = (sdir / "audit.jsonl").read_bytes().split(b"\n")
+        assert physical[0] == b'{"partial":'
+        assert [json.loads(x)["action"] for x in physical[1:3]] == ["decision", "decision"]
+        assert physical[3] == b""
+
+    def test_concurrent_writers_after_a_partial_line_never_tear(self, sdir: Path) -> None:
+        sdir.mkdir(parents=True)
+        (sdir / "log.jsonl").write_bytes(b'{"partial":')
+        ctx = multiprocessing.get_context("fork")
+        workers, count = 8, 25
+        procs = [
+            ctx.Process(target=_hammer, args=(str(sdir), w, count, 30_000)) for w in range(workers)
+        ]
+        for p in procs:
+            p.start()
+        try:
+            for p in procs:
+                p.join(timeout=120)
+        finally:
+            for p in procs:
+                if p.is_alive():
+                    p.kill()  # this exact child, started above
+                    p.join(timeout=10)
+        assert all(p.exitcode == 0 for p in procs)
+        raw = (sdir / "log.jsonl").read_bytes()
+        assert raw.startswith(b'{"partial":\n')
+        lines = raw.split(b"\n")
+        assert lines.pop() == b""
+        assert lines[0] == b'{"partial":'
+        # The writers' flock makes the check and the write atomic among them: exactly one prefix,
+        # so no blank line, torn or fused record.
+        assert all(lines[1:])
+        records = [json.loads(x) for x in lines[1:]]
+        assert len({(r["data"]["worker"], r["data"]["i"]) for r in records}) == workers * count
+
+
 def _hammer(path: str, worker: int, count: int, size: int) -> None:
     sd = Path(path)
     for i in range(count):

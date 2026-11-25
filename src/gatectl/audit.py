@@ -4,8 +4,11 @@ Every line is written with a single ``write`` on a descriptor opened with ``O_AP
 concurrent writers (threads or processes) never interleave. A line is capped at 64 KiB
 (newline included) by shortening its free-text fields before it is written. A short or failed
 write is never truncated back: another writer's line may already follow it, so the partial line
-stays and the caller fails (a consumer skips a line that does not parse). Files are created
-with mode 0600, set explicitly rather than through the umask.
+stays and the caller fails (a consumer skips a line that does not parse). A later writer that
+finds a non-empty file not ending in a newline puts one newline in front of its own bytes, in the
+same write, so its record is never fused onto the partial line (``_needs_prefix``). That newline
+ends the *previous* line, so it is not counted against the new line's 64 KiB cap. Files are
+created with mode 0600, set explicitly rather than through the umask.
 
 Lines are ASCII JSON (``ensure_ascii``): no raw U+2028, NEL or other separator can ever split a
 line in a reader that splits on more than ``\\n``, and sizes are measured on the bytes written.
@@ -14,6 +17,7 @@ line in a reader that splits on more than ``\\n``, and sizes are measured on the
 from __future__ import annotations
 
 import errno
+import fcntl
 import json
 import os
 import stat
@@ -50,6 +54,7 @@ LOG_EVENTS = frozenset(
 # Seams the tests replace (the module ``os`` itself is never patched).
 _open = os.open
 _write = os.write
+_pread = os.pread
 _geteuid = os.geteuid
 
 
@@ -102,7 +107,9 @@ def _vet(fd: int, path: Path) -> None:
 
 def _open_append(path: Path) -> int:
     # O_NONBLOCK so that opening a FIFO never waits for a reader; cleared again in ``_vet``.
-    flags = os.O_WRONLY | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    # O_RDWR (not O_WRONLY) only so that ``_needs_prefix`` can read the last byte through the
+    # vetted descriptor; every write is still an O_APPEND write.
+    flags = os.O_RDWR | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
     for _ in range(3):
         try:
             fd = _open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
@@ -118,6 +125,29 @@ def _open_append(path: Path) -> int:
             raise
         return fd
     raise FileNotFoundError(f"cannot open {path.name} for append")
+
+
+def _needs_prefix(fd: int) -> bool:
+    """True when the (vetted, regular) file is non-empty and its last byte is not a newline.
+
+    The check reads through the descriptor that is about to be written, so it cannot follow a
+    symlink or wait on a FIFO. The caller holds ``flock`` (``_locked``) across this read and its
+    write: without it, a reader can see the size of a multi-page append still being copied and
+    mistake its middle for a partial line."""
+    size = os.fstat(fd).st_size
+    if size == 0:
+        return False
+    return _pread(fd, 1, size - 1) != b"\n"
+
+
+def _locked(fd: int) -> None:
+    """Take an exclusive advisory lock on ``fd`` (released when it is closed), so that the
+    last-byte check and the write of gatectl writers do not interleave. Best effort: a
+    filesystem without ``flock`` support is written without it (interface.md, Residual risks)."""
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError:
+        pass
 
 
 # --- encoding ----------------------------------------------------------------------------
@@ -263,6 +293,9 @@ def _append_lines(name: str, lines: list[bytes], directory: Path | None) -> None
     _ensure_dir(target)
     fd = _open_append(target / name)
     try:
+        _locked(fd)
+        if _needs_prefix(fd):
+            line = b"\n" + line
         written = _write(fd, line)
     finally:
         os.close(fd)

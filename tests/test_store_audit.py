@@ -764,16 +764,12 @@ def test_a_nested_transact_is_refused_not_retried_and_the_outer_one_rolls_back(
     s.close()
 
 
-def test_the_line_after_a_partial_line_is_concatenated_onto_it_known_behavior(
+def test_the_line_after_a_partial_line_is_intact_and_parses(
     sdir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Documented known behavior pending a maintainer decision on audit line framing.
-
-    A short write leaves a partial line without a newline; the next writer appends with
-    ``O_APPEND`` right after it, so that decision's line is fused onto the partial one and is lost
-    to a reader together with it. Earlier lines stay parseable and nothing is truncated. This test
-    pins the current behavior; it does not endorse it.
-    """
+    """A short write leaves a partial line without a newline; the next writer terminates it with a
+    leading newline in its own single write, so that decision's line is a line of its own and
+    parses. Earlier lines stay parseable and nothing is truncated."""
     s = opened(sdir)
     first, failed, third = (ids.new_decision_id() for _ in range(3))
     decide(s, first)
@@ -791,12 +787,13 @@ def test_the_line_after_a_partial_line_is_concatenated_onto_it_known_behavior(
     assert partial and not partial.endswith(b"\n")
     decide(s, third)
     raw = lines(sdir)
-    assert len(raw) == 2  # the third decision's line shares a physical line with the partial one
-    assert (sdir / "audit.jsonl").read_bytes().startswith(good + partial)  # nothing truncated
+    assert len(raw) == 3  # first, the partial line on its own, then the third decision
+    assert (sdir / "audit.jsonl").read_bytes().startswith(good + partial + b"\n")  # no truncation
     assert json.loads(raw[0])["decision_id"] == first
     with pytest.raises(ValueError):
         json.loads(raw[1])
-    assert row_ids(sdir) == sorted([first, third])  # the decision itself committed
+    assert json.loads(raw[2])["decision_id"] == third
+    assert row_ids(sdir) == sorted([first, third])
     s.close()
 
 
