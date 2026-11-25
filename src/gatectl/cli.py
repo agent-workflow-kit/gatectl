@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from dataclasses import replace
 from typing import Any, NoReturn
 
 from gatectl import __version__, commands, errors, ids, scope
@@ -139,8 +141,9 @@ def render_json(payload: Mapping[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n"
 
 
-def _write(stream: Any, text: str) -> None:
+def _write(stream: Any, text: str) -> Exception | None:
     """Write and flush; a closed, broken or full stream is ignored so the exit code survives.
+    Returns the error when the write failed (a streaming command decides what it means).
 
     After a failed write the stream's file descriptor is pointed at ``/dev/null`` so the flush of
     the interpreter's shutdown stays quiet and cannot turn the exit code into 120.
@@ -148,8 +151,10 @@ def _write(stream: Any, text: str) -> None:
     try:
         stream.write(text)
         stream.flush()
-    except (OSError, ValueError, AttributeError):  # AttributeError: the stream is None (closed fd)
+    except (OSError, ValueError, AttributeError) as exc:  # AttributeError: no stream (closed fd)
         _silence(stream)
+        return exc
+    return None
 
 
 def _silence(stream: Any) -> None:
@@ -261,16 +266,47 @@ def main(argv: list[str] | None = None) -> int:
     try:
         ctx = _context(ns)
         result = commands.dispatch(ctx)
+        return _emit(result, json_mode=ctx.json or is_check)
     except Exception as exc:  # the envelope hides the text of anything that is not ours
         return _error_exit(exc, json_mode=ns.json, is_check=is_check, policy=policy)
-    return _emit(result, json_mode=ctx.json or is_check)
+
+
+def _stdout_failed(exc: Exception) -> bool:
+    """Whether a failed stdout write is an error to report: a closed descriptor or pipe (EPIPE,
+    EBADF, a closed file) ends a stream quietly, anything else (a full disk) does not."""
+    if isinstance(exc, BrokenPipeError | ValueError | AttributeError):
+        return False
+    return isinstance(exc, OSError) and exc.errno not in (errno.EPIPE, errno.EBADF)
+
+
+def _stream(chunks: Iterator[str]) -> bool:
+    """Write a streamed result chunk by chunk; stop (and close the source) at a failed write.
+    False when the write failed for a reason that must be reported (``_stdout_failed``).
+    An error the source raises propagates: what was written stays, the envelope follows."""
+    try:
+        for chunk in chunks:
+            failure = _write(sys.stdout, chunk)
+            if failure is not None:
+                return not _stdout_failed(failure)
+        return True
+    finally:
+        close = getattr(chunks, "close", None)
+        if close is not None:
+            close()
 
 
 def _emit(result: Result, *, json_mode: bool) -> int:
-    if result.payload is not None and (json_mode or result.text is None):
+    exit_code = result.exit_code
+    if result.stream is not None:
+        if not _stream(result.stream):
+            _write(sys.stderr, _stderr_line("gatectl: internal: cannot write to stdout"))
+            exit_code = 1
+        if result.stderr_after is not None:
+            result = replace(result, stderr=result.stderr_after() or result.stderr)
+    elif result.payload is not None and (json_mode or result.text is None):
         _write(sys.stdout, render_json(result.payload))
     elif result.text is not None:
         _write(sys.stdout, result.text + "\n")
     if result.stderr is not None:
         _write(sys.stderr, _stderr_line(result.stderr))
-    return result.exit_code
+    return exit_code
