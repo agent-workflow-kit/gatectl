@@ -15,7 +15,7 @@ import argparse
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from gatectl import validate
+from gatectl import dryrun, policies, validate
 from gatectl.context import Context, Result
 from gatectl.errors import InternalError
 
@@ -118,9 +118,13 @@ SPECS: tuple[CommandSpec, ...] = (
 )
 
 # Command name -> handler. A command with no entry fails with "command not implemented".
-# TODO(#11, #14, #15, #18, #28, #29, #32, #33, #34): each implementing issue registers its
+# TODO(#14, #15, #18, #28, #29, #32, #33, #34): each implementing issue registers its
 # handler here, one line per command.
-HANDLERS: dict[str, Handler] = {"validate": validate.handle}
+HANDLERS: dict[str, Handler] = {
+    "check": dryrun.handle,  # TODO(#18): the full check; only --dry-run is implemented
+    "policies": policies.handle,
+    "validate": validate.handle,
+}
 
 
 def dispatch(ctx: Context) -> Result:
