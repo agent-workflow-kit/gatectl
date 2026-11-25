@@ -114,11 +114,16 @@ Still to verify: a live sandbox containment attack, the lifeline watchdog handsh
 | `store.py` | SQLite in WAL mode, additive-only migrations, decisions, outcomes, state rows with revisions, case keys, cache, slot leases and the maintenance leases of `reconcile` and `prune` |
 | `stats.py` | counts, the effective-outcome rule, the Clopper-Pearson bound by bisection |
 | `audit.py` | appends to `audit.jsonl` and `log.jsonl` |
+| `sanitize.py` | the untrusted-text sanitizer (marker replacement, length caps); the `Cn` (unassigned) category depends on the interpreter's Unicode database (Python 3.12 has 15.0, 3.13 has 15.1), a difference accepted for newly assigned code points |
+| `ids.py` | identifier grammars, decision-id generation and prefix parsing, actors, durations |
+| `clock.py` | fixed-width UTC timestamps and `--since` parsing |
+| `inputhash.py` | canonical input serialization and `input_sha256` |
+| `errors.py` | errors that carry an exit code (usage 2, not found 10, ambiguous 21) |
 | `hooks.py` | the three post hooks, started detached by a supervisor process |
 | `gateway.py` | every subprocess call, so tests substitute fakes |
 | `plugin/` (package data) | the bundled plugin: `.claude-plugin/plugin.json`, `skills/gate-check/SKILL.md`, the placeholder files, the permission profile file (a copy of claude-session's built-in `review` profile, added in the plan's agent stage, with a test that fails when it drifts from a pinned copy of the built-in) |
 
-Dependencies: `pyyaml` (the stdlib cannot read YAML) and `pydantic` (config validation, as in every awkit tool). The Clopper-Pearson bound is a bisection on the binomial distribution in the stdlib, so no numeric library is needed; JSON handling is the stdlib's.
+Dependencies: `pyyaml` (the stdlib cannot read YAML) and `pydantic` (config validation, as in every awkit tool). The Clopper-Pearson bound is a bisection on the binomial distribution in the stdlib, so no numeric library is needed; JSON handling is the stdlib's. `jsonschema` is a development dependency only: tests validate every audit and log record against `schemas/` with it; nothing imports it at run time.
 
 ## Data model
 
