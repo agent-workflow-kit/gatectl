@@ -5,19 +5,25 @@ parses it as strict JSON, validates the policy's declaration against it and capt
 declared fields and identity strings for recording. Nothing here echoes input: every
 ``InputInvalid`` carries a closed ``kind`` and a fixed message, and a declared key name (which
 comes from the config, not from the input) only in ``key``. The caller maps ``InputInvalid`` to
-the reason ``input_invalid`` and a ``UsageError`` to exit 2.
+the reason ``input_invalid`` and a ``UsageError`` to exit 2. A ``UsageError`` is raised only for
+a terminal stdin with no ``--input`` and for a problem with a ``--input`` file; any stdin that
+cannot be read (closed, a directory, not open for reading, a read error) is an unusable input
+(``RawInput`` status ``unreadable``), never a usage error.
 
 Judgment calls (conservative readings of the interface):
 
 * Nesting: the top-level object is depth 1; depth 64 is accepted, 65 is refused.
-* Numbers: a number literal longer than ``MAX_NUMBER_CHARS`` is refused whatever the
-  interpreter's integer-digit limit is set to (640 is the lowest value that limit can take).
+* Numbers: an integer literal longer than ``MAX_NUMBER_CHARS`` is refused whatever the
+  interpreter's integer-digit limit is set to (640 is the lowest value that limit can take);
+  a float is refused only when it is not finite (``float()`` has no digit limit).
 * A UTF-8 byte order mark is refused, not skipped.
-* A stdin that is a terminal is refused for ``-`` as well as for no ``--input``.
+* A stdin that is a terminal is a usage error only when ``--input`` is absent; ``-`` reads it
+  like any stdin (polled, bound by the deadline).
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import math
 import os
@@ -77,24 +83,29 @@ class RawInput:
     """Bytes read (at most ``max_bytes + 1``) and how the read ended.
 
     ``complete``: end of file within the cap. ``too_large``: more than ``max_bytes`` exist.
-    ``timeout``: the read budget ran out first. ``data`` is what was read in every case; its
-    SHA-256 is the ``input_sha256`` of an input that was not parsed.
+    ``timeout``: the read budget ran out first. ``unreadable``: stdin is closed, a directory,
+    not open for reading, or a read failed. ``data`` is what was read in every case (empty
+    when nothing was); its SHA-256 is the ``input_sha256`` of an input that was not parsed.
     """
 
     data: bytes
-    status: Literal["complete", "too_large", "timeout"]
+    status: Literal["complete", "too_large", "timeout", "unreadable"]
 
 
-def _stdin_fd_ok(fd: int) -> None:
+def _stdin_readable(fd: int) -> bool:
     try:
         mode = os.fstat(fd).st_mode
-        tty = os.isatty(fd)
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
     except OSError:
-        raise UsageError("stdin is not readable") from None
-    if tty:
-        raise UsageError("stdin is a terminal: pass --input or pipe the input")
-    if stat.S_ISDIR(mode):
-        raise UsageError("stdin is not readable")
+        return False
+    return not stat.S_ISDIR(mode) and (flags & os.O_ACCMODE) != os.O_WRONLY
+
+
+def _is_tty(fd: int) -> bool:
+    try:
+        return os.isatty(fd)
+    except OSError:
+        return False
 
 
 def _open_regular(path: str) -> int:
@@ -102,7 +113,7 @@ def _open_regular(path: str) -> int:
     if path and "\x00" not in path:
         try:
             fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
-        except OSError:
+        except (OSError, ValueError):
             fd = -1
     if fd < 0:
         raise UsageError("the input file is missing or unreadable") from None
@@ -132,13 +143,17 @@ def read_input(
     reserve is left for recording. A file must be regular and is opened without blocking; a
     FIFO or device is never read. stdin is polled and never switched to non-blocking mode
     (the open file description is shared with whoever started us). A missing or unreadable
-    file, a non-regular file and a terminal or unreadable stdin raise ``UsageError`` (exit 2).
+    file and a non-regular file raise ``UsageError`` (exit 2), as does a terminal stdin when
+    ``source`` is None. Any other stdin that cannot be read returns status ``unreadable``.
     """
     if max_bytes < 1:
         raise ValueError("max_bytes must be at least 1")
     stdin = source is None or source == "-"
     if stdin:
-        _stdin_fd_ok(stdin_fd)
+        if source is None and _is_tty(stdin_fd):
+            raise UsageError("stdin is a terminal: pass --input or pipe the input")
+        if not _stdin_readable(stdin_fd):
+            return RawInput(b"", "unreadable")
         fd = stdin_fd
     else:
         assert source is not None
@@ -177,9 +192,7 @@ def _drain(
         except BlockingIOError:
             continue
         except OSError:
-            chunk = None
-        if chunk is None:
-            raise UsageError("the input cannot be read") from None
+            return RawInput(bytes(buf), "unreadable")
         if not chunk:
             return RawInput(bytes(buf), "complete")
         buf += chunk
@@ -250,8 +263,6 @@ def _int(text: str) -> int:
 
 
 def _float(text: str) -> float:
-    if len(text) > MAX_NUMBER_CHARS:
-        raise _Reject("number")
     value = float(text)
     if not math.isfinite(value):
         raise _Reject("number")
@@ -304,12 +315,10 @@ def parse_input(data: bytes) -> dict[str, Any]:
     """Parse ``data`` as one strict JSON object or raise ``InputInvalid``.
 
     UTF-8 without a byte order mark; nesting at most 64 (a non-recursive pre-scan before the
-    decoder runs); no ``NaN``/``Infinity``; every number finite and at most 640 characters; no
-    duplicate key at any depth; no unpaired surrogate; no trailing data; an object at the top.
+    decoder runs); no ``NaN``/``Infinity``; every number finite and every integer literal at
+    most 640 characters; no duplicate key at any depth; no unpaired surrogate; no trailing
+    data; an object at the top.
     """
-    if not isinstance(data, bytes | bytearray | memoryview):
-        raise TypeError("parse_input takes bytes")
-    data = bytes(data)
     kind: str | None = None
     value: Any = None
     if data.startswith(b"\xef\xbb\xbf"):
@@ -391,8 +400,6 @@ def _ensure_recordable(value: Any) -> None:
             bad = _SURROGATE.search(node) is not None
         elif isinstance(node, float):
             bad = not math.isfinite(node)
-        elif isinstance(node, dict):
-            bad = not all(isinstance(k, str) for k in node)
         if bad:
             raise InputInvalid("unrecordable") from None
 

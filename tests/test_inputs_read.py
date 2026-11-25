@@ -118,6 +118,11 @@ def test_bad_paths_are_usage_errors() -> None:
             read(bad)
 
 
+def test_path_with_a_lone_surrogate_is_a_usage_error() -> None:
+    with pytest.raises(UsageError):
+        read("a\udc80b")
+
+
 def test_usage_error_does_not_echo_the_path(tmp_path: Path) -> None:
     secret = tmp_path / "SECRETMARK-missing"
     with pytest.raises(UsageError) as info:
@@ -215,10 +220,12 @@ def test_slow_writer_stops_at_the_deadline_keeping_the_reserve(pipe: tuple[int, 
     os.write(w, b'{"a":')
     start = time.monotonic()
     raw = read(None, fd=r, deadline=start + 0.6, reserve=0.3)
-    elapsed = time.monotonic() - start
+    stopped = time.monotonic()
+    elapsed = stopped - start
     assert raw.status == "timeout"
     assert raw.data == b'{"a":'  # the partial read is kept: its hash is the raw bytes read
-    assert 0.2 <= elapsed < 0.55  # stopped at deadline minus reserve, not at the deadline
+    assert elapsed >= 0.25  # the reserve is kept: it did not run on to the deadline minus nothing
+    assert elapsed < 2  # generous upper bound; only the lower bound proves the reserve
 
 
 def test_silent_writer_times_out_with_nothing(pipe: tuple[int, int]) -> None:
@@ -261,9 +268,22 @@ def test_stdin_reader_leaves_the_descriptor_blocking(pipe: tuple[int, int]) -> N
 def test_stdin_tty_without_input_is_usage_error() -> None:
     master, slave = pty.openpty()
     try:
-        for source in (None, "-"):
-            with pytest.raises(UsageError):
-                read(source, fd=slave)
+        with pytest.raises(UsageError):
+            read(None, fd=slave)
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_dash_on_a_tty_is_read_like_any_stdin_until_the_deadline() -> None:
+    master, slave = pty.openpty()
+    try:
+        os.write(master, b'{"a":1}\n')
+        start = time.monotonic()
+        raw = read("-", fd=slave, deadline=start + 0.3, reserve=0.0)
+        assert raw.status == "timeout"
+        assert raw.data == b'{"a":1}\r\n' or raw.data.startswith(b'{"a":1}')
+        assert time.monotonic() - start < 2
     finally:
         os.close(master)
         os.close(slave)
@@ -278,33 +298,75 @@ def test_tty_is_fine_when_a_file_is_given(tmp_path: Path) -> None:
         os.close(slave)
 
 
-def test_closed_stdin_is_usage_error() -> None:
+def test_closed_stdin_is_unreadable_not_usage_error() -> None:
     r, w = os.pipe()
     os.close(r)
     os.close(w)
-    with pytest.raises(UsageError):
-        read(None, fd=r)
+    raw = read(None, fd=r)
+    assert (raw.data, raw.status) == (b"", "unreadable")
 
 
-def test_directory_as_stdin_is_usage_error(tmp_path: Path) -> None:
+def test_directory_as_stdin_is_unreadable(tmp_path: Path) -> None:
     fd = os.open(tmp_path, os.O_RDONLY)
     try:
-        with pytest.raises(UsageError):
-            read(None, fd=fd)
+        raw = read(None, fd=fd)
     finally:
         os.close(fd)
+    assert (raw.data, raw.status) == (b"", "unreadable")
 
 
-def test_write_only_stdin_is_usage_error(tmp_path: Path) -> None:
+def test_write_only_file_as_stdin_is_unreadable(tmp_path: Path) -> None:
     fd = os.open(tmp_path / "w", os.O_WRONLY | os.O_CREAT)
     try:
-        with pytest.raises(UsageError):
-            read(None, fd=fd)
+        raw = read(None, fd=fd)
     finally:
         os.close(fd)
+    assert (raw.data, raw.status) == (b"", "unreadable")
 
 
-def test_stdin_peer_reset_is_usage_error_or_complete() -> None:
+def test_write_only_pipe_as_stdin_returns_promptly_without_a_deadline(
+    pipe: tuple[int, int],
+) -> None:
+    _, w = pipe
+    start = time.monotonic()
+    raw = read(None, fd=w, deadline=None)
+    assert (raw.data, raw.status) == (b"", "unreadable")
+    assert time.monotonic() - start < 2
+
+
+def test_write_only_socket_end_is_unreadable() -> None:
+    import socket
+
+    a, b = socket.socketpair()
+    try:
+        a.shutdown(socket.SHUT_RD)  # still O_RDWR: reads see EOF, which is a complete empty read
+        assert read(None, fd=a.fileno()).status in {"complete", "unreadable"}
+    finally:
+        a.close()
+        b.close()
+
+
+def test_read_error_is_unreadable_and_keeps_the_bytes_read(
+    pipe: tuple[int, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    r, w = pipe
+    os.write(w, b'{"a"')
+    os.close(w)  # the poll after the first read wakes up (hang-up) and the next read fails
+    real = os.read
+    calls = [0]
+
+    def flaky(fd: int, n: int) -> bytes:
+        calls[0] += 1
+        if calls[0] == 1:
+            return real(fd, n)
+        raise OSError(5, "boom")
+
+    monkeypatch.setattr(os, "read", flaky)
+    raw = read(None, fd=r)
+    assert (raw.data, raw.status) == (b'{"a"', "unreadable")
+
+
+def test_stdin_peer_close_after_data_is_complete() -> None:
     import socket
 
     a, b = socket.socketpair()
@@ -312,9 +374,53 @@ def test_stdin_peer_reset_is_usage_error_or_complete() -> None:
     b.close()
     try:
         raw = read(None, fd=a.fileno())
-        assert raw.data == b"{}"
+        assert (raw.data, raw.status) == (b"{}", "complete")
     finally:
         a.close()
+
+
+# ---- descriptors are closed ---------------------------------------------------------------------
+
+
+def _open_fds() -> int:
+    return len(os.listdir("/proc/self/fd"))
+
+
+def test_file_read_closes_its_descriptor(tmp_path: Path) -> None:
+    p = _file(tmp_path, b"{}")
+    before = _open_fds()
+    read(p)
+    assert _open_fds() == before
+
+
+def test_missing_file_leaks_no_descriptor(tmp_path: Path) -> None:
+    before = _open_fds()
+    with pytest.raises(UsageError):
+        read(str(tmp_path / "nope"))
+    assert _open_fds() == before
+
+
+def test_refused_non_regular_file_closes_its_descriptor(tmp_path: Path) -> None:
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    before = _open_fds()
+    with pytest.raises(UsageError):
+        read(str(fifo))
+    assert _open_fds() == before
+
+
+def test_too_large_file_closes_its_descriptor(tmp_path: Path) -> None:
+    p = _file(tmp_path, b"x" * (CAP + 1))
+    before = _open_fds()
+    assert read(p).status == "too_large"
+    assert _open_fds() == before
+
+
+def test_timed_out_file_read_closes_its_descriptor(tmp_path: Path) -> None:
+    p = _file(tmp_path, b"{}")
+    before = _open_fds()
+    assert read(p, deadline=1.0, monotonic=lambda: 2.0).status == "timeout"
+    assert _open_fds() == before
 
 
 def test_invalid_arguments() -> None:

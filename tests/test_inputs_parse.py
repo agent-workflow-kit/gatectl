@@ -78,7 +78,8 @@ def test_bad_utf8(data: bytes) -> None:
 
 
 def test_utf16_is_not_utf8() -> None:
-    assert parse_kind('{"a":1}'.encode("utf-16")) in {"not_utf8", "bom"}
+    assert parse_kind('{"a":1}'.encode("utf-16")) == "not_utf8"  # FF FE: not UTF-8 at all
+    assert parse_kind('{"a":1}'.encode("utf-16-be")) == "syntax"  # NULs, but valid UTF-8
     assert parse_kind('{"a":1}'.encode("utf-16-le")) == "syntax"  # NULs, but valid UTF-8
 
 
@@ -108,8 +109,14 @@ def test_overflowing_float(data: bytes) -> None:
 def test_integer_digit_limit() -> None:
     assert inputs.parse_input(b'{"a":' + b"9" * inputs.MAX_NUMBER_CHARS + b"}")["a"] > 0
     assert parse_kind(b'{"a":' + b"9" * (inputs.MAX_NUMBER_CHARS + 1) + b"}") == "number"
+    assert parse_kind(b'{"a":-' + b"9" * inputs.MAX_NUMBER_CHARS + b"}") == "number"
     assert parse_kind(b'{"a":' + b"9" * 5000 + b"}") == "number"
     assert parse_kind(b'{"a":-' + b"9" * 5000 + b"}") == "number"
+
+
+def test_long_finite_float_is_accepted() -> None:
+    body = b'{"a":0.' + b"1" * 700 + b"}"
+    assert inputs.parse_input(body)["a"] == pytest.approx(0.1111111111)
 
 
 def test_huge_integer_does_not_depend_on_interpreter_limit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -123,9 +130,13 @@ def test_huge_integer_does_not_depend_on_interpreter_limit(monkeypatch: pytest.M
         sys.set_int_max_str_digits(old)
 
 
-def test_long_float_literal() -> None:
-    assert parse_kind(b'{"a":0.' + b"0" * 5000 + b"1}") == "number"
-    assert parse_kind(b'{"a":1e' + b"0" * 5000 + b"1}") == "number"
+def test_long_finite_float_literal_is_accepted() -> None:
+    assert inputs.parse_input(b'{"a":0.' + b"0" * 5000 + b"1}")["a"] == 0.0
+    assert inputs.parse_input(b'{"a":1e' + b"0" * 5000 + b"1}")["a"] == 10.0
+
+
+def test_long_float_that_overflows_is_refused() -> None:
+    assert parse_kind(b'{"a":1' + b"0" * 5000 + b".5}") == "number"
 
 
 @pytest.mark.parametrize(
@@ -310,11 +321,6 @@ def test_error_does_not_echo_input(data: bytes) -> None:
     assert exc.__suppress_context__
     assert MARK not in exc.kind
     assert exc.key is None
-
-
-def test_non_bytes_is_a_type_error() -> None:
-    with pytest.raises(TypeError):
-        inputs.parse_input('{"a":1}')  # type: ignore[arg-type]
 
 
 def test_every_invalid_parse_is_input_invalid_never_another_exception() -> None:

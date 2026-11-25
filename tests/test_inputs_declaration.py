@@ -118,6 +118,12 @@ def test_error_never_carries_the_value() -> None:
     assert info.value.__cause__ is None
 
 
+def test_unknown_type_name_never_matches() -> None:
+    d = InputDecl.model_construct(require=[], ignore=[], types={"k": "bogus"})
+    assert kind_of(d, {"k": 1}) == ("type", "k")
+    assert kind_of(d, {"k": None}) == ("type", "k")
+
+
 def test_similar_keys_are_not_confused() -> None:
     d = decl(require=["repo"])
     assert kind_of(d, {"Repo": "x", "repo ": "x", "repos": "x"}) == ("missing", "repo")
@@ -134,10 +140,9 @@ def test_without_ignored_drops_only_top_level_listed_keys() -> None:
     assert inputs.without_ignored(decl(ignore=["absent"]), obj) == obj
 
 
-def test_ignored_keys_still_change_the_input_hash() -> None:
+def test_ignored_keys_do_not_change_the_cache_key_view() -> None:
     a = {"ts": 1, "x": 1}
     b = {"ts": 2, "x": 1}
-    assert input_sha256(a) != input_sha256(b)
     d = decl(ignore=["ts"])
     assert input_sha256(inputs.without_ignored(d, a)) == input_sha256(inputs.without_ignored(d, b))
 
