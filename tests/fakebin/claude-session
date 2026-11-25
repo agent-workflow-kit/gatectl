@@ -1,0 +1,1597 @@
+#!/usr/bin/env python3
+"""Fake ``claude-session`` for gatectl's tests. Test fixture only: nothing in src/ uses it.
+
+Pinned to claude-session v0.45.2 (commit c42491578a5309421c1fa67afbdd9f9650fd615b): the
+argument grammar, the JSON shapes (checked against ``tests/pinned/claude-session-0.45.2/``),
+the exit codes and the error envelope mirror that version's documented interface. It runs no
+model and no sandbox; every outcome is scripted by a scenario.
+
+Scenarios ``hang`` (the wrapper itself hangs), ``hang_ignore_term`` (observed live: ``exec``
+spawns a child that ignores SIGTERM; ``stop`` SIGKILLs the child and ``exec`` then finalizes
+``killed``/``stopped``) and ``hang_ignore_term_wrapper`` (the documented fallback after a further
+``kill_grace``: ``exec`` itself ignores SIGTERM and ``stop`` SIGKILLs it and records the run).
+The call log marks every call with ``"fake": true``; ``--version`` prints the plain version line.
+
+Implemented: ``start`` (new session only), ``exec --session-id``, ``status``, ``list``,
+``stop`` and ``forget`` (single id). Any other command, or a flag outside the documented
+grammar of these, exits 2 like an unknown flag. Python 3 standard library only.
+
+Environment (all read on every call):
+
+``FAKE_CS_STATE``            directory holding the fake's sessions (required).
+``FAKE_CS_LOG``              file receiving one JSON line per call and one per exit (optional).
+``FAKE_CS_SCENARIO``         scenario name (default ``valid``); ``<launch scenario>@exec`` makes a
+                             launch failure happen at adoption instead of at ``start``.
+``FAKE_CS_BEHAVIOR_<CMD>``   per-command override for START, EXEC, STATUS, LIST, STOP, FORGET:
+                             ``fail[:<exit>]``, ``hang``, ``hang_ignore_term``, ``garbage``
+                             (unparseable stdout), ``json_wrong`` (valid JSON of the wrong shape),
+                             ``empty``, for START ``hang_after_allocate``, and for STOP
+                             ``ended_false`` (the real stop object with ``ended: false``, exit 12;
+                             ``fail:12`` on STOP prints the same object, not an error envelope).
+``FAKE_CS_NONCE``            nonce to echo (default: the 32-hex nonce found in the staged prompt).
+``FAKE_CS_DECISION``, ``FAKE_CS_CONFIDENCE``, ``FAKE_CS_REASONS`` (JSON list)
+                             content of the valid verdict artifact (allow, 0.95, ["fake reason"]).
+``FAKE_CS_DELAY_EXEC``       seconds ``exec`` stays live before it ends (interruptible).
+``FAKE_CS_HANG_MAX``         longest a hang lasts, in seconds (default 120); a run's ``--timeout``
+                             shortens it (the hang then ends ``timeout``, exit 16).
+``FAKE_CS_KILL_GRACE``       ``stop``'s default ``--grace`` and the extra time the wrapper gets
+                             after the child's SIGKILL (default 10: claude-session's kill_grace).
+``FAKE_CS_NO_PROC``          ``1``: behave as a platform with no ``/proc`` and no ``ps`` (a process
+                             start cannot be recorded, so ``stop`` never signals the wrapper).
+``FAKE_CS_SIGKILL_LOST``     ``1``: ``stop``'s SIGKILLs are dropped, to test its bounded wait.
+``FAKE_CS_SANDBOX_ACTIVE``   ``0`` or ``1``: what ``status`` reports as ``sandbox_active``.
+``FAKE_CS_EXIT0_OUTCOME``    outcome printed with exit 0 by the ``exit0_not_done`` scenario.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+import re
+import secrets
+import signal
+import subprocess
+import sys
+import time
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+from typing import NoReturn
+
+VERSION = "0.45.2"
+ARTIFACT_NAME = "verdict.json"
+FROZEN_ARTIFACT_SEQ = 1
+SESSION_ID = re.compile(r"cs-[a-z2-7]{8}")
+# Always used with ``fullmatch``: ``$`` alone would accept a trailing newline.
+LABEL = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}=[A-Za-z0-9._:/#@+=,-]{0,256}")
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+KIND_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+SKILL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}")
+ARTIFACT_FILE = re.compile(r"[A-Za-z0-9._-]{1,128}")
+DURATION = re.compile(r"[0-9]+(\.[0-9]+)?(ms|s|m|h|d)?")
+DEFAULT_KILL_GRACE = 10.0
+STATES = (
+    "starting",
+    "working",
+    "idle",
+    "needs-input",
+    "reported",
+    "exited",
+    "exited-unreported",
+    "killed",
+    "timeout",
+    "lost",
+    "not-started",
+)
+REPORT_STATUSES = ("done", "blocked", "failed", "needs-input")
+# Built-in kinds as claude-session v0.45.2 resolves them (its defaults table): env_inherit,
+# implicit_done, permission profile, reads_third_party and the default sandbox. A kind outside
+# the table is treated as the most isolated one (fail safe), like the third-party-reading kinds.
+KIND_TABLE = {
+    "implement": (True, True, "default", False, "off"),
+    "draft-ticket": (True, True, "default", False, "off"),
+    "audit": (True, True, "default", False, "off"),
+    "improve": (True, True, "default", False, "off"),
+    "rank": (False, False, "readonly", False, "preferred"),
+    "review": (False, True, "review", True, "required"),
+    "gate-check": (False, False, "review", True, "required"),
+    "respond": (False, True, "respond", True, "required"),
+}
+ISOLATED_KIND = (False, False, "review", True, "required")
+FINAL_STATES = ("exited", "exited-unreported", "killed", "timeout", "lost", "not-started")
+CLAUDE_SESSION_UUID = "00000000-0000-4000-8000-000000000001"
+
+# Launch-validation failures: end_reason -> (message, hint), as claude-session v0.45.2 words them.
+LAUNCH_FAILURES = {
+    "sandbox_unavailable": (
+        "sandbox unavailable: bwrap not found",
+        "install bubblewrap and socat (for example: sudo apt install bubblewrap socat)",
+    ),
+    "claude_not_found": (
+        "claude not found: 'claude'",
+        "install Claude Code, or set claude_bin in the config to its path",
+    ),
+    "unsafe_setting_sources": (
+        "third-party-reading runs load no setting sources (setting_sources must be empty), "
+        "got: user",
+        None,
+    ),
+}
+
+# Session-phase scenarios: name -> (outcome, end_reason, exit_code, report status, artifact kind).
+# artifact kind: valid | nonce_mismatch | wrong_schema | garbage | implicit | None
+SESSION_SCENARIOS = {
+    "valid": ("done", "normal", 0, "done", "valid"),
+    "nonce_mismatch": ("done", "normal", 0, "done", "nonce_mismatch"),
+    "wrong_schema": ("done", "normal", 0, "done", "wrong_schema"),
+    "no_artifact": ("done", "normal", 0, "done", None),
+    # The shape of a missing skill's run is unverified against a live claude-session (it stays on
+    # the unverified-live list); the fake models it as a done run whose artifact is not JSON.
+    "missing_skill": ("done", "normal", 0, "done", "garbage"),
+    "implicit_done": ("done", "normal", 0, "done", "implicit"),
+    "done_timeout_end": ("done", "timeout", 0, "done", "valid"),
+    # The one deliberately off-schema scenario (exit 0 with an outcome other than done).
+    "exit0_not_done": ("blocked", "normal", 0, "blocked", None),
+    "unreported": ("exited-unreported", "no_report", 14, None, None),
+    "unreported_no_result": ("exited-unreported", "no_result", 14, None, None),
+    "timeout": ("timeout", "timeout", 16, None, None),
+    "needs_input": ("needs-input", "normal", 13, "needs-input", None),
+    "blocked": ("blocked", "normal", 13, "blocked", None),
+    "failed": ("failed", "normal", 18, "failed", None),
+    "killed": ("killed", "signal_kill", 15, None, None),
+    "lost": ("lost", "lost", 17, None, None),
+    # Same run as ``valid``; ``status`` then reports a different artifact name, size or hash.
+    "status_sha_mismatch": ("done", "normal", 0, "done", "valid"),
+    "status_size_mismatch": ("done", "normal", 0, "done", "valid"),
+    "status_name_mismatch": ("done", "normal", 0, "done", "valid"),
+}
+HANG_SCENARIOS = ("hang", "hang_ignore_term", "hang_ignore_term_wrapper")
+SCENARIOS = (*SESSION_SCENARIOS, *HANG_SCENARIOS, *LAUNCH_FAILURES)
+BEHAVIORS = (
+    "hang",
+    "hang_ignore_term",
+    "hang_ignore_term_wrapper",
+    "garbage",
+    "json_wrong",
+    "empty",
+    "hang_after_allocate",
+    "ended_false",
+)
+COMMANDS = ("exec", "start", "stop", "status", "list", "forget")
+UNIMPLEMENTED = (
+    "resume",
+    "wait",
+    "report",
+    "kinds",
+    "label",
+    "transcript",
+    "reconcile",
+    "export",
+    "cron",
+    "verify-secret",
+)
+
+
+class Exit(Exception):
+    """Leave with ``code``; ``envelope`` (if any) is printed as the error envelope."""
+
+    def __init__(self, status: int, message: str = "", **envelope: object) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+        self.envelope = envelope
+
+
+class Signalled(Exception):
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+# Output and log
+
+
+def emit(obj: object) -> None:
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def log_line(record: dict[str, object]) -> None:
+    path = os.environ.get("FAKE_CS_LOG")
+    if not path:
+        return
+    data = (json.dumps(record) + "\n").encode()
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(fd, data)  # one O_APPEND write: concurrent calls never interleave
+    finally:
+        os.close(fd)
+
+
+def now() -> datetime:
+    return datetime.now(UTC)
+
+
+def stamp(moment: datetime | None = None) -> str:
+    return (moment or now()).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+# Argument grammar (mirrors claude-session's argparse tree, allow_abbrev=False)
+
+
+class UsageError(Exception):
+    pass
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise UsageError(message)
+
+
+class VersionRequested(Exception):
+    pass
+
+
+class VersionAction(argparse.Action):
+    def __init__(self, option_strings: list[str], dest: str, **kwargs: object) -> None:
+        super().__init__(option_strings, dest, nargs=0, default=argparse.SUPPRESS)
+
+    def __call__(self, *_args: object, **_kwargs: object) -> None:
+        raise VersionRequested
+
+
+def add_globals(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--version", action=VersionAction)
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--config")
+    p.add_argument("--verbose", action="store_true")
+    p.add_argument("--quiet", action="store_true")
+    p.add_argument("--yes", action="store_true")
+
+
+def add_launch_flags(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--kind")
+    p.add_argument("--mode", choices=("interactive", "headless"))
+    p.add_argument("--skill")
+    p.add_argument("--prompt-file")
+    p.add_argument("--input-file", action="append")
+    p.add_argument("--plugin-dir", action="append")
+    p.add_argument("--repo")
+    p.add_argument("--label", action="append")
+    p.add_argument("--hook", action="append")
+    p.add_argument("--hook-timeout", action="append")
+    p.add_argument("--cwd")
+    p.add_argument("--timeout")
+    p.add_argument("--max-turns", type=int)
+    p.add_argument("--model")
+    p.add_argument("--permission-profile")
+    p.add_argument("--sandbox", choices=("required", "preferred", "off"))
+    p.add_argument("--setting-sources")
+    p.add_argument("--reads-third-party", action="store_true", default=None)
+    p.add_argument("--auto-exit", action=argparse.BooleanOptionalAction)
+    p.add_argument("--implicit-done", action=argparse.BooleanOptionalAction)
+    p.add_argument("--tools", action="extend", nargs="+")
+    p.add_argument("--env-allow", action="append")
+    p.add_argument("--env-allowlist-only", action="append")
+    p.add_argument("--outcome-file")
+    p.add_argument("--actor")
+    p.add_argument("--decision-id", action="append")
+    p.add_argument("--dry-run", action="store_true")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = Parser(prog="claude-session", allow_abbrev=False)
+    parser.add_argument("--version", action=VersionAction)
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    def leaf(name: str) -> argparse.ArgumentParser:
+        p = commands.add_parser(name, allow_abbrev=False)
+        add_globals(p)
+        return p
+
+    p = leaf("exec")
+    add_launch_flags(p)
+    p.add_argument("--session-id")
+    p.add_argument("--run", type=int)
+    p = leaf("start")
+    add_launch_flags(p)
+    p.add_argument("--fork", action="store_true")
+    p.add_argument("--reset", action="append")
+    p.add_argument("--allow-tainted", action="store_true")
+    p.add_argument("--override-escalation", action="store_true")
+    p.add_argument("--resume")
+    p = leaf("stop")
+    p.add_argument("id")
+    p.add_argument("--grace")
+    p.add_argument("--actor")
+    p.add_argument("--decision-id", action="append")
+    p.add_argument("--dry-run", action="store_true")
+    p = leaf("status")
+    p.add_argument("id")
+    p.add_argument("--run", type=int)
+    p = leaf("list")
+    p.add_argument("--label", action="append")
+    p.add_argument("--state", action="append", choices=STATES)
+    p.add_argument("--kind")
+    p.add_argument("--launch-kind")
+    p.add_argument("--run-kind")
+    p.add_argument("--mode", choices=("interactive", "headless"))
+    p.add_argument("--needs-input", action="store_true")
+    p.add_argument("--pending", action="store_true")
+    p.add_argument("--repo")
+    p.add_argument("--since")
+    p.add_argument("--limit", type=int)
+    p.add_argument("--forked-from")
+    p.add_argument("--report-status", action="append", choices=(*REPORT_STATUSES, "none"))
+    p.add_argument("--live", action="store_true")
+    p.add_argument("--tainted", action="store_true")
+    p = leaf("forget")
+    p.add_argument("id", nargs="?")
+    p.add_argument("--older-than")
+    p.add_argument("--state", action="append", choices=STATES)
+    p.add_argument("--kind")
+    p.add_argument("--label", action="append")
+    p.add_argument("--purge", action="store_true")
+    p.add_argument("--actor")
+    p.add_argument("--decision-id", action="append")
+    p.add_argument("--dry-run", action="store_true")
+    return parser
+
+
+def seconds_of(text: str, flag: str) -> float:
+    if not DURATION.fullmatch(text):
+        raise UsageError(f"{flag}: invalid duration {text!r}")
+    for suffix, factor in (("ms", 0.001), ("s", 1), ("m", 60), ("h", 3600), ("d", 86400)):
+        if text.endswith(suffix) and not text[-1].isdigit():
+            return float(text[: -len(suffix)]) * factor
+    return float(text)
+
+
+# State (one JSON file per session, guarded by one flock)
+
+
+def state_dir() -> str:
+    path = os.environ.get("FAKE_CS_STATE")
+    if not path:
+        raise Exit(1, "FAKE_CS_STATE is not set", code="internal")
+    return path
+
+
+@contextlib.contextmanager
+def locked() -> Iterator[None]:
+    root = state_dir()
+    os.makedirs(os.path.join(root, "sessions"), exist_ok=True)
+    fd = os.open(os.path.join(root, "lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # closing the descriptor releases the lock
+
+
+def session_path(session_id: str) -> str:
+    return os.path.join(state_dir(), "sessions", session_id + ".json")
+
+
+def load(session_id: str) -> dict:
+    with open(session_path(session_id), encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def save(rec: dict) -> None:
+    rec["updated_at"] = stamp()
+    path = session_path(rec["id"])
+    tmp = path + f".tmp{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(rec, handle)
+    os.replace(tmp, path)
+
+
+def all_ids() -> list[str]:
+    folder = os.path.join(state_dir(), "sessions")
+    if not os.path.isdir(folder):
+        return []
+    return sorted(
+        n[:-5] for n in os.listdir(folder) if SESSION_ID.fullmatch(n[:-5]) and n.endswith(".json")
+    )
+
+
+def resolve(text: str) -> dict:
+    """Session id input: case-insensitive, ``cs-`` optional, a unique prefix of 4+ characters."""
+    key = text.lower()
+    body = key[3:] if key.startswith("cs-") else key
+    if len(body) < 4:
+        raise UsageError(f"session id too short: {text!r}")
+    matches = [i for i in all_ids() if i[3:].startswith(body) and not load(i)["forgotten"]]
+    if not matches:
+        raise Exit(10, f"unknown session: {'cs-' + body}", code="not_found")
+    if len(matches) > 1:
+        raise Exit(21, f"ambiguous session id {text!r}", code="ambiguous", matches=matches)
+    return load(matches[0])
+
+
+def new_id() -> str:
+    while True:
+        body = base64.b32encode(secrets.token_bytes(5)).decode().lower()
+        if not os.path.exists(session_path("cs-" + body)):
+            return "cs-" + body
+
+
+def proc_info(pid: int) -> tuple[str, str | None] | None:
+    """(state letter, start token) of a process, or None when it is gone.
+
+    The token is None where no start time can be read (``FAKE_CS_NO_PROC=1`` models that):
+    the process is then known to exist but cannot be identified.
+    """
+    if os.environ.get("FAKE_CS_NO_PROC") != "1":
+        try:
+            with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
+                text = handle.read()
+            fields = text.rsplit(")", 1)[1].split()
+            return fields[0], fields[19]  # field 22: start time, after the last ")"
+        except OSError:
+            if os.path.isdir("/proc/self"):
+                return None
+        try:  # no /proc (macOS): ps gives the state and the start time
+            done = subprocess.run(  # noqa: S603
+                ["ps", "-o", "stat=,lstart=", "-p", str(pid)],  # noqa: S607
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env={"LC_ALL": "C", "PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            )
+            parts = done.stdout.split()
+            if done.returncode != 0 or len(parts) < 2:
+                return None
+            return parts[0][0], " ".join(parts[1:])
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        os.kill(pid, 0)  # existence only
+    except ProcessLookupError:
+        return None
+    except OSError:
+        pass
+    return "?", None
+
+
+def proc_start(pid: int) -> str | None:
+    info = proc_info(pid)
+    return info[1] if info else None
+
+
+def proc_alive(pid: int, start: str | None) -> bool:
+    """Alive means: exists, not a zombie, and (where a start time is known) the same process."""
+    info = proc_info(pid)
+    return info is not None and info[0] != "Z" and (start is None or info[1] == start)
+
+
+def add_event(rec: dict, to_state: str, cause: str, final: bool = False) -> None:
+    events = rec["events"]
+    events.append(
+        {
+            "event_id": len(events) + 1,
+            "event_ts": stamp(),
+            "run": rec["run"],
+            "from_state": rec["state"],
+            "to_state": to_state,
+            "from_activity": rec["activity"],
+            "to_activity": "working" if to_state == "working" else None,
+            "needs_input_reason": None,
+            "cause": cause,
+            "final": final,
+            "delivered": True,
+        }
+    )
+    rec["state"] = to_state
+    rec["activity"] = "working" if to_state == "working" else None
+
+
+def finalize(
+    rec: dict,
+    outcome: str | None,
+    end_reason: str,
+    exit_code: int,
+    report: dict | None,
+    cause: str,
+    phase: str = "session",
+    message: str | None = None,
+    state: str | None = None,
+) -> None:
+    """Make the run final (the caller holds the lock and saves)."""
+    final_state = state or (
+        {
+            "done": "exited",
+            "blocked": "exited",
+            "needs-input": "exited",
+            "failed": "exited",
+            "not-started": "not-started",
+        }.get(outcome or "", outcome or "exited")
+    )
+    rec.update(
+        outcome=outcome,
+        end_reason=end_reason,
+        exit_code=exit_code,
+        report=report,
+        phase=phase,
+        message=message,
+        ended_at=stamp(),
+        pending=False,
+        expires_at=None,
+    )
+    add_event(rec, final_state, cause, final=True)
+
+
+def liveness(rec: dict) -> dict:
+    """A run whose wrapper died without finalizing it is lost (claude-session's liveness check)."""
+    pid = rec["wrapper_pid"]
+    if rec["ended_at"] is None and not rec["pending"] and pid is not None:
+        if not proc_alive(pid, rec["wrapper_start"]):
+            finalize(rec, "lost", "lost", 17, None, "liveness")
+            save(rec)
+    elif rec["pending"] and rec["ended_at"] is None and stamp() >= rec["expires_at"]:
+        finalize(
+            rec,
+            "not-started",
+            "never_adopted",
+            12,
+            None,
+            "liveness",
+            phase="launch",
+            state="not-started",
+        )
+        save(rec)
+    return rec
+
+
+# Records, outcome objects, artifacts
+
+
+def new_record(args: argparse.Namespace) -> dict:
+    kind = args.kind or "implement"
+    mode = args.mode or "interactive"
+    labels = sorted({f"kind={kind}", *(args.label or [])})
+    env_inherit, implicit_done, default_profile, third, default_sandbox = KIND_TABLE.get(
+        kind, ISOLATED_KIND
+    )
+    third = third or bool(args.reads_third_party)
+    if args.implicit_done is not None:
+        implicit_done = args.implicit_done
+    sandbox = args.sandbox or ("required" if third else default_sandbox)
+    warnings = []
+    if third and sandbox != "required":
+        warnings.append(
+            f"sandbox_lowered: third-party-reading run with sandbox '{sandbox}' (from flag); "
+            "the baseline is 'required'"
+        )
+        if sandbox == "off":
+            warnings.append(
+                "third-party-reading run without a sandbox: only the evadable permission "
+                "rules isolate it"
+            )
+    profile = args.permission_profile or default_profile
+    if "/" in profile or profile.endswith((".json", ".yaml", ".yml")):
+        try:
+            with open(profile, "rb") as handle:
+                digest = hashlib.sha256(handle.read()).hexdigest()
+        except OSError:
+            digest = hashlib.sha256(profile.encode()).hexdigest()
+        profile = "file:" + digest[:12]
+    created = stamp()
+    timeout = None
+    if args.timeout and args.timeout != "none":
+        timeout = seconds_of(args.timeout, "--timeout")
+    outcome_file = os.path.join(os.getcwd(), args.outcome_file) if args.outcome_file else None
+    return {
+        "id": new_id(),
+        "created_at": created,
+        "updated_at": created,
+        "kind": kind,
+        "mode": mode,
+        "labels": labels,
+        "repo": args.repo,
+        "skill": args.skill,
+        "model": args.model,
+        "sandbox": sandbox,
+        "permission_profile": profile,
+        "reads_third_party": third,
+        "tainted": third,
+        "actor": args.actor,
+        "decision_ids": list(args.decision_id or []),
+        "env_inherit": env_inherit,
+        "implicit_done": implicit_done,
+        "timeout_seconds": timeout,
+        "outcome_file": outcome_file,
+        "has_result": False,
+        "child_pid": None,
+        "child_start": None,
+        "prompt": None,
+        "inputs": [],
+        "run": 1,
+        "pending": True,
+        "expires_at": stamp(now() + timedelta(minutes=10)),
+        "forgotten": False,
+        "forgotten_at": None,
+        "wrapper_pid": None,
+        "wrapper_start": None,
+        "started_at": None,
+        "stop_requested_at": None,
+        "recorded_by_stop": False,
+        "state": None,
+        "activity": None,
+        "phase": "launch",
+        "outcome": None,
+        "end_reason": None,
+        "exit_code": None,
+        "ended_at": None,
+        "message": None,
+        "report": None,
+        "warnings": warnings,
+        "events": [],
+    }
+
+
+def outcome_object(rec: dict) -> dict:
+    session = rec["phase"] == "session"
+    result = session and rec["has_result"]  # a run that ended without a result has no cost
+    return {
+        "csession_id": rec["id"],
+        "run": rec["run"],
+        "forked_from": None,
+        "claude_session_id": CLAUDE_SESSION_UUID if result else None,
+        "phase": rec["phase"],
+        "outcome": rec["outcome"],
+        "end_reason": rec["end_reason"],
+        "exit_code": rec["exit_code"],
+        "state": rec["state"],
+        "report": rec["report"],
+        "session_started_at": rec["started_at"] if session else None,
+        "cost_usd": 0.005 if result else None,
+        "num_turns": 3 if result else None,
+        "message": rec["message"],
+        "warnings": rec["warnings"],
+    }
+
+
+def write_outcome_file(path: str | None, obj: dict) -> None:
+    """A write failure never changes the call's result: it only warns on stderr."""
+    if not path:
+        return
+    tmp = f"{path}.tmp{os.getpid()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(obj, handle)
+        os.replace(tmp, path)
+    except OSError as error:
+        sys.stderr.write(f"claude-session: warning: outcome file not written: {error}\n")
+
+
+def verdict_env() -> tuple[object, object]:
+    """The verdict content the environment asks for; a malformed value is an internal error."""
+    try:
+        confidence = json.loads(os.environ.get("FAKE_CS_CONFIDENCE", "0.95"))
+        reasons = json.loads(os.environ.get("FAKE_CS_REASONS", '["fake reason"]'))
+    except ValueError as error:
+        raise Exit(
+            1, f"malformed FAKE_CS_CONFIDENCE or FAKE_CS_REASONS: {error}", code="internal"
+        ) from error
+    return confidence, reasons
+
+
+def find_nonce(rec: dict) -> str:
+    forced = os.environ.get("FAKE_CS_NONCE")
+    if forced:
+        return forced
+    text = ""
+    if rec["prompt"]:
+        with open(rec["prompt"], encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    found = re.search(r"nonce\W{0,40}?([0-9a-f]{32})\b", text, re.IGNORECASE) or re.search(
+        r"\b([0-9a-f]{32})\b", text
+    )
+    return found.group(1).lower() if found else "0" * 32
+
+
+def artifact_bytes(kind: str, rec: dict) -> bytes:
+    nonce = find_nonce(rec)
+    if kind == "implicit":
+        return b"fake result text\n"
+    if kind == "garbage":
+        return b"Unknown skill: the fake could not find the requested skill.\n"
+    confidence, reasons = verdict_env()
+    verdict: dict = {
+        "schema_version": 1,
+        "nonce": nonce,
+        "decision": os.environ.get("FAKE_CS_DECISION", "allow"),
+        "confidence": confidence,
+        "reasons": reasons,
+    }
+    if kind == "nonce_mismatch":
+        verdict["nonce"] = ("f" if nonce[0] != "f" else "e") * 32
+    elif kind == "wrong_schema":
+        verdict.update(schema_version=2, decision="maybe", confidence=1.5, extra=True)
+    return (json.dumps(verdict, indent=2) + "\n").encode()
+
+
+def freeze_artifact(rec: dict, name: str, data: bytes) -> dict:
+    folder = os.path.join(
+        state_dir(),
+        "private",
+        rec["id"],
+        "runs",
+        str(rec["run"]),
+        "artifact",
+        str(FROZEN_ARTIFACT_SEQ),
+    )
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, name)
+    with open(path, "wb") as handle:
+        handle.write(data)
+    os.chmod(path, 0o444)
+    return {
+        "name": name,
+        "path": path,
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "size": len(data),
+    }
+
+
+def build_report(rec: dict, status: str, artifact_kind: str | None) -> dict:
+    implicit = artifact_kind == "implicit"
+    artifact = None
+    if artifact_kind:
+        name = "result.md" if implicit else ARTIFACT_NAME
+        artifact = freeze_artifact(rec, name, artifact_bytes(artifact_kind, rec))
+    return {
+        "status": status,
+        "implicit": implicit,
+        "summary": None if implicit else f"fake {status} summary",
+        "reason": None if status in ("done",) else f"fake {status} reason",
+        "artifact": artifact,
+        "reported_at": stamp(),
+    }
+
+
+# Hangs
+
+
+def hang_seconds(rec: dict | None = None) -> float:
+    """How long a hang lasts: ``FAKE_CS_HANG_MAX``, shortened by the run's ``--timeout``."""
+    limit = float(os.environ.get("FAKE_CS_HANG_MAX", "120"))
+    timeout = rec.get("timeout_seconds") if rec else None
+    return limit if timeout is None else min(limit, timeout)
+
+
+def hang(ignore_term: bool, seconds: float | None = None) -> None:
+    """Stay until a signal arrives (or the limit), so a leaked process ends itself."""
+    if ignore_term:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    end = time.monotonic() + (hang_seconds() if seconds is None else seconds)
+    while time.monotonic() < end:
+        time.sleep(0.05)
+
+
+CHILD_PROGRAM = (
+    "import signal, sys, time\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "end = time.monotonic() + float(sys.argv[1])\n"
+    "while time.monotonic() < end:\n"
+    "    time.sleep(0.05)\n"
+)
+
+
+class Forwarder:
+    """Signal handler of a wrapper with a child: remember the first signal, pass it on."""
+
+    def __init__(self) -> None:
+        self.child: subprocess.Popen[bytes] | None = None
+        self.signum: int | None = None
+
+    def handle(self, signum: int, _frame: object) -> None:
+        if self.signum is None:
+            self.signum = signum
+        self.forward()
+
+    def forward(self) -> None:
+        if self.child is not None and self.signum is not None and self.child.poll() is None:
+            with contextlib.suppress(OSError):
+                self.child.send_signal(self.signum)  # our own child: an exact handle
+
+
+def behavior(cmd: str) -> str | None:
+    value = os.environ.get(f"FAKE_CS_BEHAVIOR_{cmd.upper()}")
+    if not value:
+        return None
+    if value.split(":")[0] not in ("fail", *BEHAVIORS):
+        raise Exit(1, f"unknown FAKE_CS_BEHAVIOR_{cmd.upper()} value {value!r}", code="internal")
+    return value
+
+
+def apply_behavior(cmd: str, value: str, allocated: bool = False) -> None:
+    """Behaviors that replace the command's whole output."""
+    if value.startswith("fail"):
+        code = int(value.split(":")[1]) if ":" in value else 12
+        names = {1: "internal", 2: "usage", 10: "not_found", 12: "failed"}
+        raise Exit(code, f"fake {cmd} failure", code=names.get(code, "failed"))
+    if value in ("hang", "hang_ignore_term", "hang_ignore_term_wrapper"):
+        hang(value != "hang")
+        raise Exit(1, f"fake {cmd} hang ended", code="internal")
+    if value == "garbage":
+        sys.stdout.write('{"csession_id": "cs-')
+        sys.stdout.flush()
+        raise Exit(0)
+    if value == "json_wrong":
+        emit([])
+        raise Exit(0)
+    if value == "empty":
+        raise Exit(0)
+
+
+# Commands
+
+
+def check_launch_flags(args: argparse.Namespace) -> None:
+    if not args.json:
+        raise UsageError("start requires --json")
+    if args.kind and not KIND_NAME.fullmatch(args.kind):
+        raise UsageError(f"invalid kind name {args.kind!r}")
+    if args.skill and not SKILL_NAME.fullmatch(args.skill):
+        raise UsageError(f"invalid skill name {args.skill!r}")
+    for label in args.label or []:
+        if not LABEL.fullmatch(label):
+            raise UsageError(f"invalid label {label!r}")
+    if args.timeout and args.timeout != "none" and seconds_of(args.timeout, "--timeout") <= 0:
+        raise UsageError("--timeout must be positive (use 'none')")
+    for name in [*(args.env_allow or []), *(n for n in args.env_allowlist_only or [] if n != "")]:
+        if not ENV_NAME.fullmatch(name):
+            raise UsageError(f"invalid environment variable name {name!r}")
+    if args.setting_sources is not None:
+        for part in filter(None, args.setting_sources.split(",")):
+            if part not in ("user", "project", "local"):
+                raise UsageError(f"invalid setting source {part!r}")
+    if (args.mode or "interactive") == "headless" and not args.skill and not args.prompt_file:
+        raise UsageError("a headless new session needs a skill or a prompt")
+    if (args.mode or "interactive") != "headless":
+        raise UsageError("the fake supports headless sessions only")
+    for path in [args.prompt_file, *(args.input_file or [])]:
+        if path and not os.path.isfile(path):
+            raise UsageError(f"not a readable file: {path}")
+    names = [os.path.basename(p) for p in args.input_file or []]
+    if len(set(names)) != len(names) or not all(ARTIFACT_FILE.fullmatch(n) for n in names):
+        raise UsageError("input file basenames must be unique artifact names")
+    for flag in ("fork", "reset", "allow_tainted", "override_escalation", "resume"):
+        if getattr(args, flag):
+            raise UsageError("the fake does not implement resume or fork")
+
+
+def stage_files(rec: dict, args: argparse.Namespace) -> None:
+    folder = os.path.join(state_dir(), "private", rec["id"], "runs", "1", "staged")
+    os.makedirs(folder, exist_ok=True)
+
+    def copy(source: str, where: str) -> str:
+        os.makedirs(where, exist_ok=True)
+        target = os.path.join(where, os.path.basename(source))
+        with open(source, "rb") as src, open(target, "wb") as dst:
+            dst.write(src.read())
+        return target
+
+    if args.prompt_file:  # its own folder: its basename may equal an input's
+        rec["prompt"] = copy(args.prompt_file, os.path.join(folder, "prompt"))
+    rec["inputs"] = [copy(p, os.path.join(folder, "inputs")) for p in args.input_file or []]
+
+
+def settings_failure(rec: dict) -> str | None:
+    """A non-empty setting-sources list on a third-party-reading kind is refused at ``start``."""
+    if rec["reads_third_party"] and rec.get("setting_sources"):
+        return "unsafe_setting_sources"
+    return None
+
+
+def scenario_name() -> tuple[str, str]:
+    """(scenario, phase at which a launch failure happens)."""
+    raw = os.environ.get("FAKE_CS_SCENARIO", "valid")
+    name, _, where = raw.partition("@")
+    if (
+        name not in SCENARIOS
+        or where not in ("", "exec")
+        or (where and name not in LAUNCH_FAILURES)
+    ):
+        raise Exit(1, f"unknown FAKE_CS_SCENARIO {raw!r}", code="internal")
+    return name, where or "start"
+
+
+def fail_launch(rec: dict, reason: str, sources: str = "user") -> None:
+    message, hint = LAUNCH_FAILURES[reason]
+    message = message.replace("got: user", f"got: {sources}")
+    finalize(rec, "not-started", reason, 12, None, "launch", phase="launch", message=message)
+    rec["message"] = message if hint is None else f"{message}; {hint}"
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    check_launch_flags(args)
+    value = behavior("start")
+    if value == "ended_false":
+        raise Exit(1, "ended_false is a stop behavior", code="internal")
+    if value and value != "hang_after_allocate":
+        apply_behavior("start", value)
+    name, where = scenario_name()
+    with locked():
+        rec = new_record(args)
+        rec["setting_sources"] = args.setting_sources or ""
+        rec["input_names"] = [os.path.basename(p) for p in args.input_file or []]
+        add_event(rec, "starting", "launch")
+        stage_files(rec, args)
+        os.makedirs(os.path.join(state_dir(), "sessions", rec["id"]), exist_ok=True)
+        reason = settings_failure(rec)
+        if reason is None and name in LAUNCH_FAILURES and where == "start":
+            reason = name
+        if reason is not None:
+            sources = rec["setting_sources"] or "user"
+            fail_launch(rec, reason, sources)
+            message, hint = LAUNCH_FAILURES[reason]
+            if reason == "unsafe_setting_sources":
+                message = message.replace("got: user", f"got: {sources}")
+            save(rec)
+            write_outcome_file(args.outcome_file, outcome_object(rec))
+            raise Exit(
+                12,
+                message,
+                code="launch_failed",
+                csession_id=rec["id"],
+                run=1,
+                end_reason=reason,
+                hint=hint,
+            )
+        save(rec)
+    if value == "hang_after_allocate":
+        hang(False)
+    emit(
+        {
+            "csession_id": rec["id"],
+            "csession_dir": os.path.join(state_dir(), "sessions", rec["id"]),
+            "argv": [
+                os.path.abspath(sys.argv[0]),
+                "exec",
+                "--session-id",
+                rec["id"],
+                "--run",
+                "1",
+            ],
+            "run": 1,
+            "forked_from": None,
+            "expires_at": rec["expires_at"],
+            "required_env_names": [],
+            "env_inherit": rec["env_inherit"],
+            "warnings": rec["warnings"],
+        }
+    )
+    return 0
+
+
+ADOPTION_FLAGS = {
+    "json",
+    "dry_run",
+    "outcome_file",
+    "verbose",
+    "quiet",
+    "yes",
+    "run",
+    "session_id",
+}
+
+
+def cmd_exec(args: argparse.Namespace) -> int:
+    if not args.session_id:
+        raise UsageError("the fake implements exec --session-id only")
+    given = [
+        k
+        for k, v in vars(args).items()
+        if k not in ADOPTION_FLAGS | {"command"} and v not in (None, False)
+    ]
+    if given:
+        raise UsageError(f"--{given[0].replace('_', '-')} cannot be used with --session-id")
+    if args.run is not None and args.run < 1:
+        raise UsageError("--run must be a positive integer")
+    if args.dry_run:
+        raise UsageError("the fake does not implement exec --dry-run")
+
+    def on_signal(signum: int, _frame: object) -> None:
+        raise Signalled(signum)
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, on_signal)
+    try:
+        return exec_adopted(args)
+    except Signalled as caught:
+        return exec_signalled(args, caught.signum)
+
+
+def exec_signalled(args: argparse.Namespace, signum: int) -> int:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    with locked():
+        rec = resolve(args.session_id)
+        if rec["ended_at"] is not None or rec["wrapper_pid"] != os.getpid():
+            raise Exit(128 + signum)  # before adoption: ended by the signal, no output
+        if rec["phase"] == "launch" and rec["started_at"] is None:
+            reason = "canceled" if rec["stop_requested_at"] else "launch_interrupted"
+            finalize(rec, "not-started", reason, 12, None, "stop", phase="launch")
+        else:
+            names = {signal.SIGTERM: "forwarded_term", signal.SIGHUP: "forwarded_hup"}
+            # only TERM and HUP are what stop sends; a SIGINT after a stop request is still an int
+            stopped = rec["stop_requested_at"] and signum in names
+            reason = "stopped" if stopped else names.get(signum, "forwarded_int")
+            finalize(rec, "killed", reason, 15, None, "stop" if reason == "stopped" else "exit")
+        save(rec)
+    obj = outcome_object(rec)
+    write_outcome_file(outcome_path(rec, args), obj)
+    if args.json:
+        emit(obj)
+    return rec["exit_code"]
+
+
+def cmd_exec_refusal(rec: dict, args: argparse.Namespace) -> None:
+    if args.run is not None and args.run != rec["run"]:
+        raise Exit(20, f"cannot adopt {rec['id']}: expired", code="refused", reason="expired")
+    if rec["ended_at"] is not None:
+        raise Exit(20, f"cannot adopt {rec['id']}: expired", code="refused", reason="expired")
+    if rec["wrapper_pid"] is not None:
+        raise Exit(
+            20,
+            f"cannot adopt {rec['id']}: already_adopted",
+            code="refused",
+            reason="already_adopted",
+        )
+    if stamp() >= rec["expires_at"]:
+        finalize(rec, "not-started", "never_adopted", 12, None, "liveness", phase="launch")
+        save(rec)
+        raise Exit(20, f"cannot adopt {rec['id']}: expired", code="refused", reason="expired")
+
+
+def outcome_path(rec: dict, args: argparse.Namespace) -> str | None:
+    """The outcome file of this call: the one on the command line, else the one stored at start."""
+    given = os.path.join(os.getcwd(), args.outcome_file) if args.outcome_file else None
+    return given or rec.get("outcome_file")
+
+
+def conclude(
+    args: argparse.Namespace,
+    session_id: str,
+    outcome: str | None,
+    end_reason: str,
+    code: int,
+    status: str | None = None,
+    artifact_kind: str | None = None,
+    has_result: bool = False,
+    cause: str = "exit",
+) -> int:
+    """Finalize the adopted run, write the outcome file, print the outcome object."""
+    with locked():
+        rec = load(session_id)
+        report = build_report(rec, status, artifact_kind) if status else None
+        rec["has_result"] = has_result
+        finalize(rec, outcome, end_reason, code, report, cause)
+        save(rec)
+    obj = outcome_object(rec)
+    write_outcome_file(outcome_path(rec, args), obj)
+    if args.json:
+        emit(obj)
+    return code
+
+
+def exec_child_hang(args: argparse.Namespace, session_id: str, seconds: float) -> int:
+    """The observed hang: ``claude`` (a child that ignores SIGTERM) outlives the wrapper's TERM."""
+    forwarder = Forwarder()
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, forwarder.handle)
+    child = subprocess.Popen(  # noqa: S603
+        [sys.executable, "-c", CHILD_PROGRAM, str(seconds)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    forwarder.child = child
+    with locked():
+        rec = load(session_id)
+        rec["child_pid"] = child.pid
+        rec["child_start"] = proc_start(child.pid)
+        save(rec)
+    forwarder.forward()  # a signal that arrived before the child was known
+    while child.poll() is None:
+        time.sleep(0.02)
+    if forwarder.signum is not None:
+        return exec_signalled(args, forwarder.signum)
+    if child.returncode == 0:  # it ran to its limit
+        return conclude(args, session_id, "timeout", "timeout", 16)
+    return conclude(args, session_id, "killed", "signal_kill", 15)
+
+
+def exec_adopted(args: argparse.Namespace) -> int:
+    value = behavior("exec")
+    name, _where = scenario_name()  # everything that can be refused is checked before adoption
+    verdict_env()
+    with locked():
+        rec = resolve(args.session_id)
+        liveness(rec)
+        cmd_exec_refusal(rec, args)
+        rec["pending"] = False
+        rec["wrapper_pid"] = os.getpid()
+        rec["wrapper_start"] = proc_start(os.getpid())
+        save(rec)
+    if value and value not in ("hang", "hang_ignore_term", "hang_ignore_term_wrapper"):
+        apply_behavior("exec", value)  # may leave the run adopted but never finished
+    if value in ("hang", "hang_ignore_term", "hang_ignore_term_wrapper"):
+        name = value
+    if name in LAUNCH_FAILURES:
+        with locked():
+            rec = load(rec["id"])
+            fail_launch(rec, name)
+            save(rec)
+        obj = outcome_object(rec)
+        write_outcome_file(outcome_path(rec, args), obj)
+        if args.json:
+            emit(obj)
+        return 12
+    with locked():
+        rec = load(rec["id"])
+        rec["phase"] = "session"
+        rec["started_at"] = stamp()
+        add_event(rec, "working", "SessionStart")
+        save(rec)
+    if name in HANG_SCENARIOS:
+        seconds = hang_seconds(rec)
+        if name == "hang_ignore_term":
+            return exec_child_hang(args, rec["id"], seconds)
+        hang(name == "hang_ignore_term_wrapper", seconds)
+        return conclude(args, rec["id"], "timeout", "timeout", 16)
+    delay = float(os.environ.get("FAKE_CS_DELAY_EXEC", "0"))
+    end = time.monotonic() + delay
+    while time.monotonic() < end:
+        time.sleep(0.02)
+    outcome, end_reason, code, status, art = SESSION_SCENARIOS[name]
+    if name == "exit0_not_done":
+        outcome = os.environ.get("FAKE_CS_EXIT0_OUTCOME", "blocked")
+        status = outcome if outcome in ("blocked", "failed", "needs-input") else None
+        art = None
+    # a result object exists unless the run was killed, lost, timed out or ended with none
+    has_result = outcome not in ("killed", "lost", "timeout") and end_reason != "no_result"
+    return conclude(args, rec["id"], outcome, end_reason, code, status, art, has_result)
+
+
+def status_object(rec: dict, run: int | None = None) -> dict:
+    name = os.environ.get("FAKE_CS_SCENARIO", "valid").split("@")[0]
+    report = rec["report"]
+    if report and report["artifact"]:
+        art = dict(report["artifact"])
+        if name == "status_sha_mismatch":
+            art["sha256"] = hashlib.sha256(b"tampered").hexdigest()
+        elif name == "status_size_mismatch":
+            art["size"] += 1
+        elif name == "status_name_mismatch":
+            art["name"] = "other.json"
+        report = {**report, "artifact": art}
+    live = rec["ended_at"] is None
+    has_result = rec["phase"] == "session" and not live and rec["has_result"]
+    active = os.environ.get("FAKE_CS_SANDBOX_ACTIVE")
+    sandbox_active = (active == "1") if active in ("0", "1") else rec["sandbox"] != "off"
+    session_dir = os.path.join(state_dir(), "sessions", rec["id"])
+    run_obj = {
+        "run": rec["run"],
+        "run_kind": rec["kind"],
+        "reads_third_party": rec["reads_third_party"],
+        "implicit_done": rec["implicit_done"],
+        "mode": rec["mode"],
+        "cwd": None if rec["started_at"] is None else os.path.join(session_dir, "work"),
+        "repo": rec["repo"],
+        "model": rec["model"],
+        "skill": rec["skill"],
+        "has_prompt": rec["prompt"] is not None,
+        "sandbox": rec["sandbox"],
+        "sandbox_active": sandbox_active and rec["started_at"] is not None,
+        "permission_profile": rec["permission_profile"],
+        "decision_ids": rec["decision_ids"],
+        "input_files": rec["input_names"],
+        "pending": rec["pending"],
+        "expires_at": rec["expires_at"],
+        "started_at": rec["started_at"],
+        "session_started_at": rec["started_at"] if rec["phase"] == "session" else None,
+        "ended_at": rec["ended_at"],
+        "state": rec["state"],
+        "phase": rec["phase"],
+        "message": rec["message"],
+        "stop_requested_at": rec["stop_requested_at"],
+        "warnings": rec["warnings"],
+        "state_since": rec["events"][-1]["event_ts"],
+        "wrapper_pid": rec["wrapper_pid"],
+        "wrapper_alive": bool(live and rec["wrapper_pid"]),
+        "child_pid": rec["child_pid"],
+        "child_alive": bool(
+            live and rec["child_pid"] and proc_alive(rec["child_pid"], rec["child_start"])
+        ),
+        "backstop_used": False,
+        "report": report,
+        "outcome": rec["outcome"],
+        "end_reason": rec["end_reason"],
+        "session_end_reason": None,
+        "exit_code": rec["exit_code"],
+        "result_path": os.path.join(
+            state_dir(), "private", rec["id"], "runs", str(rec["run"]), "result.json"
+        ),
+        "cost_usd": 0.005 if has_result else None,
+        "num_turns": 3 if has_result else None,
+        "is_error": None,
+    }
+    session = list_item(rec)
+    del session["phase"], session["last_outcome"], session["last_end_reason"]
+    del session["exit_code"], session["report_status"]
+    session.update(
+        csession_dir=session_dir,
+        claude_session_id=CLAUDE_SESSION_UUID
+        if has_result or (rec["phase"] == "session" and live)
+        else None,
+        claude_session_ids=[],
+        run=run_obj,
+        runs=1,
+        recent_events=rec["events"][-20:],
+        warnings=[],
+    )
+    return session
+
+
+def list_item(rec: dict) -> dict:
+    live = rec["ended_at"] is None
+    return {
+        "csession_id": rec["id"],
+        "created_at": rec["created_at"],
+        "launch_kind": rec["kind"],
+        "run_kind": rec["kind"],
+        "state": rec["state"],
+        "activity": rec["activity"],
+        "needs_input_reason": None,
+        "live": live,
+        "tainted": rec["tainted"],
+        "tainted_at": rec["created_at"] if rec["tainted"] else None,
+        "tainted_by_run": 1 if rec["tainted"] else None,
+        "forked_from": None,
+        "labels": rec["labels"],
+        "repo": rec["repo"],
+        "mode": rec["mode"],
+        "current_run": rec["run"],
+        "pending": rec["pending"],
+        "expires_at": rec["expires_at"],
+        "updated_at": rec["updated_at"],
+        "phase": rec["phase"],
+        "last_outcome": rec["outcome"],
+        "last_end_reason": rec["end_reason"],
+        "exit_code": rec["exit_code"],
+        "report_status": rec["report"]["status"] if rec["report"] else None,
+    }
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    value = behavior("status")
+    if value:
+        apply_behavior("status", value)
+    with locked():
+        rec = liveness(resolve(args.id))
+    if args.run not in (None, rec["run"]):
+        raise Exit(10, f"unknown run: {args.run}", code="not_found")
+    if args.json:
+        emit(status_object(rec))
+    else:
+        sys.stdout.write(f"{rec['id']} {rec['state']}\n")
+    return 0
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    value = behavior("list")
+    if value:
+        apply_behavior("list", value)
+    if args.since or args.forked_from or args.tainted:
+        raise UsageError("the fake does not implement list --since, --forked-from or --tainted")
+    wanted = []
+    for label in args.label or []:
+        if not LABEL.fullmatch(label):
+            raise UsageError(f"invalid label {label!r}")
+        wanted.append(label)
+    if args.limit is not None and args.limit < 1:
+        raise UsageError("--limit must be at least 1")
+    items = []
+    with locked():
+        for session_id in all_ids():
+            rec = load(session_id)
+            if rec["forgotten"]:
+                continue
+            rec = liveness(rec)
+            item = list_item(rec)
+            keep = (
+                all(w in rec["labels"] for w in wanted)
+                and (not args.state or rec["state"] in args.state)
+                and (not args.kind or args.kind in (rec["kind"],))
+                and (not args.launch_kind or rec["kind"] == args.launch_kind)
+                and (not args.run_kind or rec["kind"] == args.run_kind)
+                and (not args.mode or rec["mode"] == args.mode)
+                and (not args.pending or rec["pending"])
+                and (not args.live or item["live"])
+                and (not args.needs_input or rec["state"] == "needs-input")
+                and (not args.repo or rec["repo"] == args.repo)
+                and (
+                    not args.report_status
+                    or (item["report_status"] or "none") in args.report_status
+                )
+            )
+            if keep:
+                items.append(item)
+    items.sort(key=lambda i: i["updated_at"], reverse=True)
+    if args.limit:
+        items = items[: args.limit]
+    if args.json:
+        emit({"sessions": items})
+    else:
+        for item in items:
+            sys.stdout.write(f"{item['csession_id']} {item['state']}\n")
+    return 0
+
+
+def cmd_forget(args: argparse.Namespace) -> int:
+    value = behavior("forget")
+    if value:
+        apply_behavior("forget", value)
+    bulk = args.older_than or args.state or args.kind or args.label
+    if bulk and args.id:
+        raise UsageError("bulk-only flags need no id")
+    if bulk or not args.id:
+        raise UsageError("the fake implements forget <id> only")
+    with locked():
+        rec = liveness(resolve(args.id))
+        if rec["ended_at"] is None:
+            raise Exit(
+                20,
+                f"{rec['id']} is live or has a pending run; end it with stop first",
+                code="refused",
+                reason="live",
+            )
+        when = now()
+        entry = {
+            "csession_id": rec["id"],
+            "forgotten_at": stamp(when),
+            "delete_after": stamp(when + timedelta(days=30)),
+        }
+        if args.purge:
+            entry["purged"] = not args.dry_run
+        if not args.dry_run:
+            rec["forgotten"] = True
+            rec["forgotten_at"] = entry["forgotten_at"]
+            save(rec)
+    if args.json:
+        emit({"dry_run": args.dry_run, "forgotten": [entry], "skipped": []})
+    return 0
+
+
+def stop_object(rec: dict, **fields: object) -> dict:
+    final = rec["ended_at"] is not None
+    obj = {
+        "csession_id": rec["id"],
+        "run": rec["run"],
+        "already_final": False,
+        "canceled": False,
+        "dry_run": False,
+        "ended": final,
+        "run_exit_code": rec["exit_code"],
+        "signals": [],
+        "state": rec["state"],
+        "outcome": rec["outcome"],
+        "end_reason": rec["end_reason"],
+        "recorded_by_stop": False,
+    }
+    obj.update(fields)
+    return obj
+
+
+def send(pid: int, start: str | None, signum: int) -> bool:
+    """Signal an exact, recorded PID, re-verified just now; False when it was not sent."""
+    if start is None or not proc_alive(pid, start):
+        return False
+    if signum == signal.SIGKILL and os.environ.get("FAKE_CS_SIGKILL_LOST") == "1":
+        return True  # modelled as sent but lost: the process stays
+    try:
+        os.kill(pid, signum)
+    except OSError:
+        return False
+    return True
+
+
+def kill_grace() -> float:
+    return float(os.environ.get("FAKE_CS_KILL_GRACE", str(DEFAULT_KILL_GRACE)))
+
+
+def wait_gone(pid: int, start: str | None, seconds: float) -> bool:
+    """Wait (bounded) until the process is gone; True when it is."""
+    end = time.monotonic() + seconds
+    while proc_alive(pid, start):
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.02)
+    return True
+
+
+def not_ended_object(rec: dict, **fields: object) -> dict:
+    """The stop object of a run that is still live (exit 12)."""
+    return stop_object(
+        rec, ended=False, run_exit_code=None, outcome=None, end_reason=None, **fields
+    )
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    value = behavior("stop")
+    # ``fail:12`` is the real "still live after the wait" exit: it prints the stop object too
+    still_live = value == "ended_false" or (
+        value is not None
+        and value.startswith("fail")
+        and (int(value.split(":")[1]) if ":" in value else 12) == 12
+    )
+    if value and not still_live:
+        apply_behavior("stop", value)
+    grace = seconds_of(args.grace, "--grace") if args.grace else kill_grace()
+    signals: list[dict] = []
+    with locked():
+        rec = liveness(resolve(args.id))
+        if rec["ended_at"] is not None:
+            result = stop_object(rec, already_final=True, dry_run=args.dry_run)
+            return print_stop(args, result)
+        if still_live:
+            return print_stop(args, not_ended_object(rec), 12)
+        if rec["pending"]:
+            if not args.dry_run:
+                finalize(
+                    rec,
+                    "not-started",
+                    "canceled",
+                    12,
+                    None,
+                    "stop",
+                    phase="launch",
+                    message="the pending run was canceled by stop",
+                )
+                save(rec)
+                write_outcome_file(rec["outcome_file"], outcome_object(rec))
+            result = stop_object(rec, canceled=True, dry_run=args.dry_run, ended=True)
+            if args.dry_run:
+                result.update(run_exit_code=12, state="not-started", outcome="not-started")
+                result["end_reason"] = "canceled"
+            return print_stop(args, result)
+        if args.dry_run:
+            return print_stop(args, not_ended_object(rec, dry_run=True))
+        rec["stop_requested_at"] = stamp()
+        save(rec)
+        pid, start = rec["wrapper_pid"], rec["wrapper_start"]
+    # A wrapper that cannot be identified (no start time recorded) is never signalled.
+    if send(pid, start, signal.SIGTERM):
+        signals.append({"pid": pid, "role": "wrapper", "signal": "SIGTERM"})
+        if not wait_gone(pid, start, grace):
+            signals.extend(escalate(rec["id"], pid, start))
+    with locked():
+        rec = load(rec["id"])
+        if rec["ended_at"] is None and (start is None or not proc_alive(pid, start)):
+            finalize(rec, "killed", "stopped", 15, None, "stop")  # stop records it
+            rec["recorded_by_stop"] = True
+            save(rec)
+            write_outcome_file(rec["outcome_file"], outcome_object(rec))
+    if rec["ended_at"] is None:
+        return print_stop(args, not_ended_object(rec, signals=signals), 12)
+    result = stop_object(rec, signals=signals, recorded_by_stop=rec["recorded_by_stop"])
+    return print_stop(args, result)
+
+
+def escalate(session_id: str, pid: int, start: str | None) -> list[dict]:
+    """After the grace: SIGKILL the child, give the wrapper kill_grace, then SIGKILL the wrapper."""
+    sent: list[dict] = []
+    killed_child: int | None = None
+
+    def kill_child() -> None:
+        nonlocal killed_child
+        rec = load(session_id)  # the child may have been recorded meanwhile
+        child = rec["child_pid"]
+        if child and child != killed_child and send(child, rec["child_start"], signal.SIGKILL):
+            sent.append({"pid": child, "role": "child", "signal": "SIGKILL"})
+            killed_child = child
+
+    kill_child()
+    if wait_gone(pid, start, kill_grace()):
+        return sent
+    kill_child()
+    if send(pid, start, signal.SIGKILL):
+        sent.append({"pid": pid, "role": "wrapper", "signal": "SIGKILL"})
+    wait_gone(pid, start, kill_grace())  # bounded: a survivor makes the stop not ended
+    return sent
+
+
+def print_stop(args: argparse.Namespace, result: dict, code: int = 0) -> int:
+    if args.json:
+        emit(result)
+    return code
+
+
+HANDLERS = {
+    "start": cmd_start,
+    "exec": cmd_exec,
+    "status": cmd_status,
+    "list": cmd_list,
+    "forget": cmd_forget,
+    "stop": cmd_stop,
+}
+
+
+def argv_outcome_file(argv: list[str]) -> str | None:
+    """The ``--outcome-file`` named on the command line (found without the parser)."""
+    for index, token in enumerate(argv):
+        if token == "--outcome-file" and index + 1 < len(argv):
+            return os.path.join(os.getcwd(), argv[index + 1])
+        if token.startswith("--outcome-file="):
+            return os.path.join(os.getcwd(), token.split("=", 1)[1])
+    return None
+
+
+def fail(
+    code: int, message: str, as_json: bool, envelope: dict, outcome_file: str | None = None
+) -> int:
+    sys.stderr.write(f"claude-session: error: {message}\n")
+    error = {"code": envelope.pop("code", "failed"), "message": message}
+    error.update(envelope)
+    if as_json:
+        emit({"error": error})
+    if error["code"] != "launch_failed":  # that one's file got the outcome object
+        write_outcome_file(outcome_file, {"error": error})
+    return code
+
+
+def main(argv: list[str]) -> int:
+    as_json = "--json" in argv
+    outcome_file = argv_outcome_file(argv)
+    try:
+        log_line(
+            {
+                "event": "call",
+                "fake": True,
+                "pid": os.getpid(),
+                "ppid": os.getppid(),
+                "argv": argv,
+                "cwd": os.getcwd(),
+                "scenario": os.environ.get("FAKE_CS_SCENARIO", "valid"),
+                "home": os.environ.get("HOME"),
+                "env_names": sorted(os.environ),
+                "time": stamp(),
+            }
+        )
+    except OSError as error:
+        return fail(1, f"cannot write FAKE_CS_LOG: {error}", as_json, {"code": "internal"})
+    code = 1
+    try:
+        if argv[:1] and argv[0] in UNIMPLEMENTED:
+            raise UsageError(f"the fake does not implement {argv[0]}")
+        args = build_parser().parse_args(argv)
+        code = HANDLERS[args.command](args)
+    except VersionRequested:
+        sys.stdout.write(f"claude-session {VERSION}\n")
+        code = 0
+    except UsageError as error:
+        code = fail(2, str(error), as_json, {"code": "usage"}, outcome_file)
+    except Exit as leave:
+        code = leave.status
+        if leave.message:
+            code = fail(leave.status, leave.message, as_json, dict(leave.envelope), outcome_file)
+    finally:
+        try:
+            log_line({"event": "exit", "pid": os.getpid(), "code": code, "time": stamp()})
+        except OSError as error:
+            sys.stderr.write(f"claude-session: warning: cannot write FAKE_CS_LOG: {error}\n")
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

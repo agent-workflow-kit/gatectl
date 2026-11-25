@@ -1,0 +1,20 @@
+{
+  "csession_id": "cs-ts55nepr",
+  "run": 1,
+  "forked_from": null,
+  "claude_session_id": null,
+  "phase": "session",
+  "outcome": "exited-unreported",
+  "end_reason": "no_session_start",
+  "exit_code": 14,
+  "state": "exited-unreported",
+  "report": null,
+  "session_started_at": null,
+  "cost_usd": null,
+  "num_turns": null,
+  "message": null,
+  "warnings": [
+    "sandbox_lowered: third-party-reading run with sandbox 'off' (from flag); the baseline is 'required'",
+    "third-party-reading run without a sandbox: only the evadable permission rules isolate it"
+  ]
+}

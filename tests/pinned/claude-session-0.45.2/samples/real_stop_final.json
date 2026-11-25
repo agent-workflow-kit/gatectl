@@ -1,0 +1,14 @@
+{
+  "csession_id": "cs-i42pzym2",
+  "run": 1,
+  "already_final": true,
+  "canceled": false,
+  "dry_run": false,
+  "ended": true,
+  "run_exit_code": 12,
+  "signals": [],
+  "state": "not-started",
+  "outcome": "not-started",
+  "end_reason": "canceled",
+  "recorded_by_stop": false
+}
