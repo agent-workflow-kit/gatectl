@@ -1,0 +1,11 @@
+{
+  "dry_run": false,
+  "forgotten": [
+    {
+      "csession_id": "cs-i42pzym2",
+      "forgotten_at": "2026-11-25T00:55:06.510730Z",
+      "delete_after": "2026-12-25T00:55:06.510730Z"
+    }
+  ],
+  "skipped": []
+}

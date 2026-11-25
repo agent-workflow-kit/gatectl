@@ -33,6 +33,8 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# The fake claude-session has no .py suffix; lint and format it like the rest.
+extend-include = ["tests/fakebin/claude-session"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

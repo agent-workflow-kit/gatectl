@@ -1,0 +1,10 @@
+{
+  "error": {
+    "code": "launch_failed",
+    "message": "sandbox unavailable: bwrap not found",
+    "csession_id": "cs-3ezwd2qu",
+    "run": 1,
+    "end_reason": "sandbox_unavailable",
+    "hint": "install bubblewrap and socat (for example: sudo apt install bubblewrap socat)"
+  }
+}

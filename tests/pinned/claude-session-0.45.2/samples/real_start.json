@@ -1,0 +1,21 @@
+{
+  "csession_id": "cs-i42pzym2",
+  "csession_dir": "/STATE/sessions/cs-i42pzym2",
+  "argv": [
+    "/INSTALL/claude-session",
+    "exec",
+    "--session-id",
+    "cs-i42pzym2",
+    "--run",
+    "1"
+  ],
+  "run": 1,
+  "forked_from": null,
+  "expires_at": "2026-11-25T01:05:04.471713Z",
+  "required_env_names": [],
+  "env_inherit": false,
+  "warnings": [
+    "sandbox_lowered: third-party-reading run with sandbox 'off' (from flag); the baseline is 'required'",
+    "third-party-reading run without a sandbox: only the evadable permission rules isolate it"
+  ]
+}
