@@ -21,6 +21,7 @@ import fcntl
 import json
 import os
 import stat
+import time
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -56,6 +57,10 @@ _open = os.open
 _write = os.write
 _pread = os.pread
 _geteuid = os.geteuid
+_flock = fcntl.flock
+_LOCK_WAIT = 1.0  # seconds; below the 2 s a caller holds its BEGIN IMMEDIATE (record_reserve)
+_LOCK_POLL = 0.005
+_LOCK_UNSUPPORTED = frozenset({errno.ENOLCK, errno.EOPNOTSUPP, errno.ENOSYS, errno.EINVAL})
 
 
 class ShortWriteError(OSError):
@@ -105,6 +110,15 @@ def _vet(fd: int, path: Path) -> None:
     os.set_blocking(fd, True)
 
 
+def _vet_write_only(path: Path, flags: int) -> None:
+    wronly = (flags & ~os.O_RDWR) | os.O_WRONLY
+    fd = _open(path, wronly)
+    try:
+        _vet(fd, path)
+    finally:
+        os.close(fd)
+
+
 def _open_append(path: Path) -> int:
     # O_NONBLOCK so that opening a FIFO never waits for a reader; cleared again in ``_vet``.
     # O_RDWR (not O_WRONLY) only so that ``_needs_prefix`` can read the last byte through the
@@ -118,6 +132,11 @@ def _open_append(path: Path) -> int:
                 fd = _open(path, flags)
             except FileNotFoundError:
                 continue  # removed between the two opens: try to create it again
+            except PermissionError:
+                # A write-only (0200) file cannot be opened O_RDWR: vet it through an O_WRONLY
+                # descriptor (``_vet`` sets 0600), then open it O_RDWR as usual.
+                _vet_write_only(path, flags)
+                fd = _open(path, flags)
         try:
             _vet(fd, path)
         except BaseException:
@@ -142,12 +161,25 @@ def _needs_prefix(fd: int) -> bool:
 
 def _locked(fd: int) -> None:
     """Take an exclusive advisory lock on ``fd`` (released when it is closed), so that the
-    last-byte check and the write of gatectl writers do not interleave. Best effort: a
-    filesystem without ``flock`` support is written without it (interface.md, Residual risks)."""
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-    except OSError:
-        pass
+    last-byte check and the write of gatectl writers do not interleave.
+
+    The wait is bounded (``_LOCK_WAIT``, under the 2 s the caller may hold its database write
+    lock): on timeout, or on a filesystem without ``flock`` support (ENOLCK, EOPNOTSUPP, ENOSYS,
+    EINVAL), the line is written without the lock (interface.md, Residual risks). Any other error
+    is raised."""
+    deadline = time.monotonic() + _LOCK_WAIT
+    while True:
+        try:
+            _flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(_LOCK_POLL)
+        except OSError as exc:
+            if exc.errno in _LOCK_UNSUPPORTED:
+                return
+            raise
 
 
 # --- encoding ----------------------------------------------------------------------------

@@ -5,11 +5,13 @@ from __future__ import annotations
 import contextlib
 import copy
 import errno
+import fcntl
 import json
 import multiprocessing
 import os
 import signal
 import stat
+import time
 from pathlib import Path
 from typing import Any
 
@@ -1010,3 +1012,78 @@ class TestDecisionIdList:
     def test_ids_outside_the_grammar_are_refused(self, bad: str) -> None:
         with pytest.raises(ValueError):
             self._build(["ok", bad])
+
+
+class TestLockHandling:
+    def test_a_held_lock_delays_an_append_by_at_most_the_deadline(
+        self, sdir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        audit.append_audit(decision_record(), state_dir=sdir)
+        monkeypatch.setattr(audit, "_LOCK_WAIT", 0.2)
+        holder = os.open(sdir / "audit.jsonl", os.O_RDONLY)
+        try:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            started = time.monotonic()
+            audit.append_audit(decision_record(), state_dir=sdir)
+            elapsed = time.monotonic() - started
+        finally:
+            os.close(holder)
+        assert 0.15 <= elapsed < 1.5
+        assert len((sdir / "audit.jsonl").read_bytes().splitlines()) == 2
+
+    def test_a_lock_that_frees_up_is_awaited(
+        self, sdir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        audit.append_audit(decision_record(), state_dir=sdir)
+        real = audit._flock
+        calls: list[int] = []
+
+        def flock(fd: int, op: int) -> None:
+            calls.append(op)
+            if len(calls) < 3:
+                raise BlockingIOError(errno.EWOULDBLOCK, "busy")
+            real(fd, op)
+
+        monkeypatch.setattr(audit, "_flock", flock)
+        audit.append_audit(decision_record(), state_dir=sdir)
+        assert len(calls) == 3
+        assert all(op & fcntl.LOCK_NB for op in calls)
+
+    @pytest.mark.parametrize("code", [errno.ENOLCK, errno.EOPNOTSUPP, errno.ENOSYS, errno.EINVAL])
+    def test_an_unsupported_lock_is_written_without_it(
+        self, sdir: Path, monkeypatch: pytest.MonkeyPatch, code: int
+    ) -> None:
+        def flock(fd: int, op: int) -> None:
+            raise OSError(code, "no locks here")
+
+        monkeypatch.setattr(audit, "_flock", flock)
+        audit.append_audit(decision_record(), state_dir=sdir)
+        assert len((sdir / "audit.jsonl").read_bytes().splitlines()) == 1
+
+    @pytest.mark.parametrize("code", [errno.EBADF, errno.EIO])
+    def test_any_other_lock_error_is_raised(
+        self, sdir: Path, monkeypatch: pytest.MonkeyPatch, code: int
+    ) -> None:
+        def flock(fd: int, op: int) -> None:
+            raise OSError(code, "broken")
+
+        monkeypatch.setattr(audit, "_flock", flock)
+        with pytest.raises(OSError) as info:
+            audit.append_audit(decision_record(), state_dir=sdir)
+        assert info.value.errno == code
+        assert not (sdir / "audit.jsonl").read_bytes()
+
+
+class TestWriteOnlyFile:
+    @pytest.mark.parametrize("name", ["audit", "log"])
+    def test_a_0200_file_is_fixed_and_appended_to(self, sdir: Path, name: str) -> None:
+        sdir.mkdir(parents=True, mode=0o700)
+        path = sdir / f"{name}.jsonl"
+        path.write_bytes(b'{"old":1}\n')
+        os.chmod(path, 0o200)
+        if name == "audit":
+            audit.append_audit(decision_record(), state_dir=sdir)
+        else:
+            audit.append_log(audit.log_record(level="info", event="cron"), state_dir=sdir)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert len(path.read_bytes().splitlines()) == 2

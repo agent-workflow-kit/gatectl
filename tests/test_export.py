@@ -128,13 +128,12 @@ def test_lines_that_do_not_parse_are_skipped_and_reported(
         '{"ts": "yesterday"}',
         f'{{"ts": "{ts(2)}", "n": NaN}}',
         '{"ts": "' + ts(2) + '", "n": 1e999}',
-        "",
         rec(ts(3), n=2),
     )
     code, lines, err = export(capsys)
     assert code == 0
     assert [json.loads(line)["n"] for line in lines] == [1, 2]
-    assert err == "gatectl: warning export: 7 lines skipped (not valid records)\n"
+    assert err == "gatectl: warning export: 6 lines skipped (not valid records)\n"
 
 
 def test_one_skipped_line_is_singular_and_a_clean_file_is_silent(
@@ -348,13 +347,22 @@ def test_an_error_while_streaming_keeps_what_was_written_and_prints_the_envelope
 # --- round 1 ------------------------------------------------------------------------------------
 
 
-def test_an_empty_line_is_counted_as_one_skipped_record(
+def test_blank_lines_are_skipped_silently_and_not_counted(
     capsys: pytest.CaptureFixture[str], state_dir: Path
 ) -> None:
-    write_lines(state_dir / "audit.jsonl", rec(ts(1), n=1), "", rec(ts(2), n=2))
+    write_lines(
+        state_dir / "audit.jsonl", rec(ts(1), n=1), "", "   ", "\t", rec(ts(2), n=2), "not json"
+    )
     code, lines, err = export(capsys)
     assert code == 0 and len(lines) == 2
     assert err == "gatectl: warning export: 1 line skipped (not valid records)\n"
+
+
+def test_a_file_of_only_blank_lines_is_silent(
+    capsys: pytest.CaptureFixture[str], state_dir: Path
+) -> None:
+    write_lines(state_dir / "audit.jsonl", "", "  ", "")
+    assert export(capsys) == (0, [], "")
 
 
 def test_a_write_failure_other_than_a_closed_pipe_exits_1(
