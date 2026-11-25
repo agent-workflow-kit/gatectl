@@ -177,12 +177,12 @@ def _index_plugins(shared_dirs: Sequence[str], bundled: str, out: _Out) -> dict[
 # --- state.db ------------------------------------------------------------------------------------
 
 
-def _non_empty_file(path: Path) -> bool:
+def _non_empty_file(path: Path, header: int = 0) -> bool:
     try:
         info = os.stat(path)
     except OSError:
         return False
-    return stat.S_ISREG(info.st_mode) and info.st_size > 0
+    return stat.S_ISREG(info.st_mode) and info.st_size > header
 
 
 def _open_regular(path: Path) -> int | None:
@@ -205,7 +205,8 @@ def _open_regular(path: Path) -> int | None:
 
 
 def _wal_has_content(path: Path) -> bool:
-    return _non_empty_file(path.with_name(path.name + "-wal"))
+    # a WAL of 32 bytes or fewer is only its header: no frames, so nothing the main file lacks
+    return _non_empty_file(path.with_name(path.name + "-wal"), header=32)
 
 
 class _CannotReadSafely(Exception):

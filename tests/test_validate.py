@@ -1221,6 +1221,17 @@ def test_a_wal_state_db_without_sidecars_is_read_without_creating_any(env: Env) 
     assert state.stat().st_mtime_ns == mtime
 
 
+def test_a_header_only_wal_counts_as_empty_and_orphans_are_still_reported(env: Env) -> None:
+    _closed_wal_db(("gone",))
+    state = _state_dir()
+    (state / "state.db-wal").write_bytes(b"\0" * 32)  # a WAL header and no frames
+    before = _snapshot(state)
+    _, payload = env.run(env.base())
+    assert found(payload, "warnings") == {("orphan_state", "policies.gone")}
+    assert _snapshot(state) == before
+    assert sorted(p.name for p in state.iterdir()) == ["state.db", "state.db-wal"]
+
+
 def test_rows_that_live_only_in_the_wal_are_read(env: Env) -> None:
     writer = _wal_db(("gone",))
     try:
