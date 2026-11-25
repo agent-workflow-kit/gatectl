@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+
+from tests.proc_util import Tracker
 
 
 @pytest.fixture(autouse=True)
@@ -16,3 +19,12 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("XDG_STATE_HOME", str(home / ".local" / "state"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(home / ".cache"))
     return home
+
+
+@pytest.fixture
+def tracker() -> Iterator[Tracker]:
+    """Records every process a test starts; kills exactly those on teardown, fails on a leak."""
+    t = Tracker()
+    yield t
+    leaked = t.teardown()
+    assert not leaked, f"processes outlived the test (killed by their recorded handle): {leaked}"
