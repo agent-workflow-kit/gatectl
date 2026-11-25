@@ -1,0 +1,31 @@
+{
+  "me": {"name": null},
+  "session_cmd": ["claude-session"],
+  "defaults": {
+    "timeout": "60s",
+    "script_timeout": "20s",
+    "record_reserve": "2s",
+    "input_max_bytes": 1048576,
+    "script_env_allow": ["PATH", "HOME", "LANG", "LC_*"],
+    "recommend": {"confidence": 0.95, "max_miss_rate": 0.05}
+  },
+  "agent": {
+    "skill": "gatectl:gate-check",
+    "plugin_dirs": [],
+    "model": null,
+    "permission_profile": null,
+    "sandbox": "required",
+    "setting_sources": [],
+    "env_allowlist": [],
+    "threshold": 0.8,
+    "timeout": "300s",
+    "cache_ttl": "10m",
+    "max_parallel": 3,
+    "min_start_budget": "30s",
+    "input_max_bytes": 65536
+  },
+  "retention": {"older_than": null},
+  "policies": {},
+  "repos": {},
+  "hooks": {"post-decision": [], "post-outcome": [], "post-state-change": []}
+}
