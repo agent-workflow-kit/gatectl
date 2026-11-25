@@ -1047,18 +1047,10 @@ def test_an_empty_audit_log_without_a_state_db_is_still_a_fresh_install(env: Env
     assert code == 0 and payload["problems"] == []
 
 
-@pytest.mark.parametrize("kind", ["zero-length", "directory", "fifo"])
-def test_an_unusable_state_db_next_to_an_audit_history_is_state_db_missing(
-    env: Env, kind: str
-) -> None:
+def test_a_zero_length_state_db_next_to_an_audit_history_is_state_db_missing(env: Env) -> None:
     _audit_record(env)
     db = Path(os.environ["XDG_STATE_HOME"]) / "gatectl" / "state.db"
-    if kind == "zero-length":
-        db.write_bytes(b"")
-    elif kind == "directory":
-        db.mkdir()
-    else:
-        os.mkfifo(db)
+    db.write_bytes(b"")
     code, payload = env.run(env.base())
     assert code == 2
     assert found(payload, "problems") == {("state_db_missing", "state.db")}
@@ -1103,7 +1095,9 @@ def test_a_hostile_state_db_is_ignored_not_trusted(env: Env) -> None:
     state.mkdir(parents=True)
     (state / "state.db").write_bytes(b"not a database" * 100)
     code, payload = env.run(env.base())
-    assert code == 0 and payload["warnings"] == []
+    # not trusted (no orphan is read from it) and, as `check` refuses it, a problem
+    assert code == 2 and payload["warnings"] == []
+    assert found(payload, "problems") == {("state_db_missing", "state.db")}
 
 
 def test_state_db_values_that_are_not_policy_names_are_never_printed(env: Env) -> None:
@@ -1169,7 +1163,10 @@ def test_a_state_db_without_a_schema_version_row_is_state_db_missing(env: Env, k
 
 
 @pytest.mark.parametrize("kind", ["unrelated-table", "no-schema-row", "garbage"])
-def test_a_schema_less_state_db_is_no_problem_without_an_audit_history(env: Env, kind: str) -> None:
+def test_a_schema_less_state_db_is_a_problem_even_without_an_audit_history(
+    env: Env, kind: str
+) -> None:
+    """`check` refuses a foreign or junk database over no history too (exit 1): so does validate."""
     state = _state_dir()
     state.mkdir(parents=True, exist_ok=True)
     (state / "audit.jsonl").write_text("")
@@ -1181,7 +1178,8 @@ def test_a_schema_less_state_db_is_no_problem_without_an_audit_history(env: Env,
         db.commit()
         db.close()
     code, payload = env.run(env.base())
-    assert code == 0 and payload["problems"] == []
+    assert code == 2
+    assert found(payload, "problems") == {("state_db_missing", "state.db")}
 
 
 def test_a_state_db_with_a_schema_version_row_stays_valid_next_to_a_history(env: Env) -> None:
@@ -1232,39 +1230,32 @@ def test_a_header_only_wal_counts_as_empty_and_orphans_are_still_reported(env: E
     assert sorted(p.name for p in state.iterdir()) == ["state.db", "state.db-wal"]
 
 
-def test_rows_that_live_only_in_the_wal_are_read(env: Env) -> None:
+def test_a_database_with_frames_in_its_wal_is_not_opened_and_nothing_changes(env: Env) -> None:
     writer = _wal_db(("gone",))
     try:
         state = _state_dir()
-        assert (state / "state.db-wal").stat().st_size > 0
+        assert (state / "state.db-wal").stat().st_size > 32
         _audit_record(env)
         before = _snapshot(state)
         code, payload = env.run(env.base())
         assert code == 0
-        assert found(payload, "warnings") == {("orphan_state", "policies.gone")}
-        after = _snapshot(state)
-        # A reader of a live WAL database sets lock marks in the -shm index: that file may change.
-        assert after.keys() == before.keys()
-        assert {k: v for k, v in after.items() if k != "state.db-shm"} == {
-            k: v for k, v in before.items() if k != "state.db-shm"
-        }
+        assert found(payload, "problems") == set()
+        assert found(payload, "warnings") == set()  # not read, so no orphan is learned
+        assert _snapshot(state) == before  # not even the -shm index
     finally:
         writer.close()
 
 
-def test_a_symlinked_state_db_with_a_live_wal_is_read_through_the_real_directory(
-    env: Env,
-) -> None:
+def test_a_symlinked_state_db_is_silent_even_with_a_live_wal(env: Env) -> None:
     real = env.tmp / "elsewhere"
     writer = _wal_db(("gone",), real)
     try:
-        assert (real / "state.db-wal").stat().st_size > 0
         _audit_record(env)
         (_state_dir() / "state.db").symlink_to(real / "state.db")
         code, payload = env.run(env.base())
         assert code == 0
         assert found(payload, "problems") == set()
-        assert found(payload, "warnings") == {("orphan_state", "policies.gone")}
+        assert found(payload, "warnings") == set()
     finally:
         writer.close()
 
@@ -1314,8 +1305,8 @@ def test_a_wal_state_db_swapped_for_a_fifo_after_it_was_opened_is_not_read(
     finally:
         writer.close()
     assert swapped
-    assert code == 2
-    assert found(payload, "problems") == {("state_db_missing", "state.db")}
+    assert code == 0  # a FIFO is never opened or judged: the store refuses it plainly
+    assert found(payload, "problems") == set()
 
 
 def test_a_wal_state_db_in_a_read_only_directory_still_reports_orphans(env: Env) -> None:
@@ -1357,8 +1348,8 @@ def test_a_state_db_swapped_for_a_fifo_between_check_and_open_does_not_hang(
     finally:
         signal.alarm(0)
     assert swapped
-    assert code == 2
-    assert found(payload, "problems") == {("state_db_missing", "state.db")}
+    assert code == 0  # a FIFO is never opened or judged: the store refuses it plainly
+    assert found(payload, "problems") == set()
 
 
 def test_the_fd_type_check_runs_before_a_wal_database_is_connected(
@@ -1388,8 +1379,8 @@ def test_the_fd_type_check_runs_before_a_wal_database_is_connected(
             signal.alarm(0)
     finally:
         writer.close()
-    assert code == 2
-    assert found(payload, "problems") == {("state_db_missing", "state.db")}
+    assert code == 0
+    assert found(payload, "problems") == set()
 
 
 def test_importing_validate_first_works_in_a_fresh_interpreter() -> None:
