@@ -25,6 +25,14 @@ them; ``run_script_check`` adds the private working directory and the environmen
 Nothing here decodes with the locale: output is bytes, and text is decoded as UTF-8.
 """
 
+# TODO(#18): the engine calls ``run_script_check`` per script check (numbering ``n``, the
+#   remaining-budget timeout, the ``skipped`` rules), removes ``tmp/<decision_id>/`` when the
+#   whole ``check`` ends and logs a ``warning`` event for ``workdir_left``.
+# TODO(#20): detached hooks reuse ``run_process`` pieces (own group, deadlines, watchdog).
+# TODO(#37): where ``os.waitid`` is missing (some macOS builds), ``Child.wait_exited`` in
+#   gateway.py needs the ``kqueue`` fallback; the watchdog's start-time guard needs a macOS
+#   ``procinfo.start_time``.
+
 from __future__ import annotations
 
 import errno
