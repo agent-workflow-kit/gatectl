@@ -9,8 +9,11 @@ Descriptor rules for every child (interface.md, Hooks): stdin, stdout and stderr
 explicitly as ``/dev/null`` or a private pipe (there is no way to say "inherit"), and
 ``close_fds`` is always on, so a child never holds a descriptor of the caller.
 
-This module only starts children and reads their output with a cap; the selector loop, group
-kill sequence and lifeline watchdog are built on it by the script runner.
+This module only starts children and reads their output with a cap; the selector loop and the
+group kill sequence are built on it by the script runner. The lifeline watchdog program lives
+here too (``WATCHDOG_SOURCE``), because it is the one piece of gatectl that signals a process
+group from outside the gateway's own ``Child`` handles: it runs as a separate child and signals
+only the group it was told about, under the rules in its docstring.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from __future__ import annotations
 import enum
 import os
 import subprocess
+import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -275,3 +279,100 @@ def read_capped(stream: IO[bytes], cap: int) -> CappedRead:
             remaining = 0
             truncated = True
     return CappedRead(b"".join(kept), truncated)
+
+
+# --- the lifeline watchdog ----------------------------------------------------------------
+
+# A tiny stdlib-only program, run as ``python -I -S -c``. Its stdin is the lifeline: gatectl
+# holds the write end, so EOF means gatectl is gone (a pipe, not PR_SET_PDEATHSIG, which kills
+# only the leader and is not available everywhere).
+#
+# Protocol, one line each:  ``G <pgid> <start>``  registers the check's process group and the
+# leader's start time (``-`` when unknown);  ``done``  says the group was swept and the leader
+# is about to be reaped, after which the group id may be reused: the watchdog then exits
+# WITHOUT signalling anything, whatever happens to the pipe next.
+#
+# EOF without ``done`` is gatectl dying: the registered group gets SIGKILL, unless its id now
+# belongs to a different process (the leader's start time changed, so the pid was reused).
+# Nonsense group ids (0, 1, negatives, its own group) are never signalled. It ignores the
+# terminal signals, so only SIGKILL stops it; gatectl starts it in its own process group.
+WATCHDOG_SOURCE = r"""
+import os, signal, sys
+
+for _sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM, signal.SIGQUIT):
+    signal.signal(_sig, signal.SIG_IGN)
+
+
+def start_of(pid):
+    try:
+        with open("/proc/%d/stat" % pid, "rb") as f:
+            data = f.read()
+        return data[data.rindex(b")") + 2:].split()[19].decode()
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def parse(line):
+    parts = line.split(b" ")
+    if len(parts) != 3 or parts[0] != b"G" or not parts[1].isdigit():
+        return None
+    start = parts[2]
+    if start != b"-" and not start.isdigit():
+        return None
+    pgid = int(parts[1])
+    if pgid < 2 or pgid >= 2 ** 31 or pgid == os.getpgrp():
+        return None
+    return pgid, (None if start == b"-" else start.decode())
+
+
+def kill(target):
+    pgid, start = target
+    if start is not None:
+        now = start_of(pgid)
+        if now is not None and now != start:
+            return
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (OSError, OverflowError):
+        pass
+
+
+buf = b""
+target = None
+while True:
+    try:
+        chunk = os.read(0, 4096)
+    except OSError:
+        chunk = b""
+    if not chunk:
+        break
+    buf += chunk
+    while True:
+        i = buf.find(b"\n")
+        if i < 0:
+            break
+        line, buf = buf[:i], buf[i + 1:]
+        if line == b"done":
+            os._exit(0)
+        parsed = parse(line)
+        if parsed is not None:
+            target = parsed
+    if len(buf) > 256:
+        buf = b""
+if target is not None:
+    kill(target)
+os._exit(0)
+"""
+
+
+def watchdog_spec() -> ChildSpec:
+    """The watchdog child: own process group, stdin a pipe (the lifeline), an empty environment."""
+    return ChildSpec(
+        (sys.executable, "-I", "-S", "-c", WATCHDOG_SOURCE),
+        stdin=Stdio.PIPE,
+        stdout=Stdio.DEVNULL,
+        stderr=Stdio.DEVNULL,
+        own_group=True,
+        cwd="/",
+        env={},
+    )
