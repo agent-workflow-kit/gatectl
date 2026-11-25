@@ -707,8 +707,8 @@ def test_validate_queries_work_against_a_real_store(sdir: Path) -> None:
             "'all_passed', 'auto:x')",
             (TS, FP),
         )
-    # open store (data possibly still only in the WAL) and a closed one both read the same names
-    assert validate._read_db(sdir / "state.db").names == {"alpha", "beta", "gamma"}
+    # an open store may hold frames only in the WAL: validate does not read it (never writes)
+    assert validate._read_db(sdir / "state.db").version is validate._SKIP
     s.close()
     assert validate._read_db(sdir / "state.db").names == {"alpha", "beta", "gamma"}
     assert validate._read_db(sdir / "state.db").version == 1  # schema_version row is found
@@ -830,12 +830,16 @@ def _loop_writer(directory: str, seconds: float, out: Any) -> None:
         end = time.monotonic() + seconds
         n = 0
         while time.monotonic() < end:
-            with s.write():
-                s.write_state_row(
-                    "p", f"github.com/o/r{n % 5}", "shadow", set_by="auto:t", set_at=TS,
-                    cause="set", fingerprint=FP,
-                )  # fmt: skip
+            try:
+                with s.write():
+                    s.write_state_row(
+                        "p", f"github.com/o/r{n % 5}", "shadow", set_by="auto:t", set_at=TS,
+                        cause="set", fingerprint=FP,
+                    )  # fmt: skip
+            except store.StoreBusyError:
+                pass  # writers may starve each other under load; only readers must see no error
             n += 1
+            time.sleep(0.001)
         s.close()
     except Exception as exc:  # reported to the parent
         errors.append(f"{type(exc).__name__}: {exc} {getattr(exc, 'reason', None)}")
@@ -1111,3 +1115,11 @@ def test_the_store_judges_an_audit_log_by_lstat_and_fails_closed(
 
 def _iter_unused() -> Iterator[None]:  # keeps the import of Iterator meaningful for pyright
     yield None
+
+
+def test_a_state_directory_under_a_file_is_a_plain_refusal_not_a_traceback(tmp_path: Path) -> None:
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x")
+    with pytest.raises(InternalError, match="not a real directory") as caught:
+        store.open_store(blocker / "gatectl", create=False)
+    assert caught.value.reason is None

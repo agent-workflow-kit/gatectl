@@ -177,22 +177,27 @@ def _index_plugins(shared_dirs: Sequence[str], bundled: str, out: _Out) -> dict[
 # --- state.db ------------------------------------------------------------------------------------
 
 
-def _non_empty_file(path: Path, header: int = 0) -> bool:
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+_SKIP: Any = object()  # a sentinel version: the database is not judged (see _read_db)
+
+
+def _wal_has_content(path: Path) -> bool:
+    # a WAL of 32 bytes or fewer is only its header: no frames, so nothing the main file lacks
     try:
-        info = os.stat(path)
+        return os.lstat(path.with_name(path.name + "-wal")).st_size > 32
     except OSError:
         return False
-    return stat.S_ISREG(info.st_mode) and info.st_size > header
 
 
 def _open_regular(path: Path) -> int | None:
-    """A descriptor for ``path`` when it is a regular file (a link is followed), else ``None``.
+    """A descriptor for ``path`` when it is a regular file (a link is refused), else ``None``.
 
-    The open never blocks (``O_NONBLOCK``), so a FIFO swapped in for the file cannot hang it; the
-    type is read from the descriptor, not from a separate ``stat`` of the path.
+    The open never blocks (``O_NONBLOCK``) and never follows a link, so a FIFO or link swapped in
+    for the file cannot hang or redirect it; the type is read from the descriptor.
     """
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC | os.O_NOFOLLOW
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
+        fd = os.open(path, flags)
     except (OSError, ValueError):
         return None
     try:
@@ -204,97 +209,61 @@ def _open_regular(path: Path) -> int | None:
     return None
 
 
-def _wal_has_content(path: Path) -> bool:
-    # a WAL of 32 bytes or fewer is only its header: no frames, so nothing the main file lacks
-    return _non_empty_file(path.with_name(path.name + "-wal"), header=32)
-
-
-_LIVE_WAL: Any = object()  # a sentinel version: the database was not read (see _read_db)
-
-
-class _CannotReadSafely(Exception):
-    """The database cannot be read without writing next to it: it is skipped, not judged."""
-
-
-def _connect(path: Path) -> tuple[sqlite3.Connection, int | None] | None:
-    """Open ``state.db`` read-only without ever creating a file next to it.
-
-    The path is resolved once (``realpath``): SQLite looks for ``-wal`` and ``-shm`` in the real
-    file's directory, so the sidecar checks and the connect use that same resolved path.
-
-    With a non-empty ``-wal`` the committed rows may live only there, so the database is opened
-    ``mode=ro`` by path; that needs the ``-shm`` too, because without it SQLite would create one.
-    A non-empty ``-wal`` without ``-shm`` cannot be read without writing, so it raises
-    ``_CannotReadSafely`` and the caller reads nothing (no orphan, and no judgement from content).
-    Without a non-empty ``-wal`` nothing can be missing from the main file and it is opened
-    ``immutable=1`` (no locking, no sidecar, works in a read-only directory); on Linux through the
-    already checked descriptor. The returned descriptor (or ``None``) is closed by the caller
-    after the connection.
-
-    Residual window: ``/proc/self/fd/N`` does not pin the descriptor (SQLite resolves the link to
-    a path and opens that), and the ``mode=ro`` branch opens the path itself, so in every branch an
-    attacker who owns the state directory has a few-microsecond window between the checks and the
-    open. It is narrowed by comparing the descriptor with the path (device and inode, regular)
-    right before connecting. The state directory is private (mode 0700), so this needs the user's
-    own account.
-    """
-    try:
-        real = Path(os.path.realpath(path))
-    except (OSError, ValueError):
-        return None
-    fd = _open_regular(real)
-    if fd is None:
-        return None
-    try:
-        wal = _wal_has_content(real)
-        if wal and not real.with_name(real.name + "-shm").exists():
-            raise _CannotReadSafely
-        held, now = os.fstat(fd), os.stat(real)
-        if not (
-            stat.S_ISREG(now.st_mode) and (held.st_dev, held.st_ino) == (now.st_dev, now.st_ino)
-        ):
-            os.close(fd)
-            return None
-        if wal:
-            uri = f"file:{quote(str(real))}?mode=ro"
-            return sqlite3.connect(uri, uri=True, timeout=0), fd
-        proc = f"/proc/self/fd/{fd}"
-        target = proc if os.path.exists(proc) else str(real)
-        return sqlite3.connect(f"file:{quote(target)}?immutable=1", uri=True, timeout=0), fd
-    except _CannotReadSafely:
-        os.close(fd)
-        raise
-    except (OSError, sqlite3.Error, ValueError):
-        os.close(fd)
-        return None
-
-
 @dataclass(frozen=True)
 class _StoredDb:
     """What a read-only look at ``state.db`` found: the schema version in the store's terms
-    (``None``: no file, an empty file, or one that cannot be read; ``False``: tables but no usable
-    ``meta.schema_version`` row, or not SQLite's; else the number) and the policy names."""
+    (``None``: an empty file or one with no tables; ``False``: not SQLite's, or tables but no
+    ``meta.schema_version`` row; ``_SKIP``: not judged; else the number) and the policy names."""
 
     version: int | None | bool
     names: frozenset[str] = frozenset()
 
 
 def _read_db(path: Path) -> _StoredDb:
-    """Look at ``state.db`` (read-only, never blocking, never writing next to it).
+    """Look at a ``state.db`` that is a regular file (read-only, never blocking, never writing).
+
+    The file is read only as far as its first 16 bytes unless it is a SQLite file with an empty or
+    absent WAL. A non-empty file whose header is not SQLite's is junk (``False``) whatever its WAL
+    holds. With frames in the WAL the committed rows may live only there and reading them needs
+    the ``-shm``, which SQLite writes to even for a read; ``validate`` never writes next to the
+    database, so it judges nothing (``_SKIP``). Anything the store refuses without a reason (an
+    unreadable or damaged file, a busy one, a ``schema_version`` that is not a usable number,
+    a ``meta`` table with other columns) is also ``_SKIP``.
 
     The ``meta(key TEXT PRIMARY KEY, value TEXT)`` columns, ``policy_state.policy`` and
     ``decisions.policy`` are those of the state store. The version is read as the store reads it
-    (``store._read_version``), and the verdict on it is the store's (``store.db_verdict``). Only
-    names that follow the policy-name grammar are returned; anything else in a tampered database
-    is ignored and never printed. The read is bounded in rows and in work.
+    (``store.parse_schema_version``), and the verdict on it is the store's (``store.db_verdict``).
+    Only names that follow the policy-name grammar are returned; anything else in a tampered
+    database is ignored and never printed. The read is bounded in rows and in work. It opens the
+    already checked descriptor ``immutable`` (no locking, no sidecar, works in a read-only
+    directory); the state directory is private (0700), so the few-microsecond window between the
+    checks and the open needs the user's own account.
     """
+    fd = _open_regular(path)
+    if fd is None:
+        return _StoredDb(_SKIP)
     try:
-        opened = _connect(path)
-    except _CannotReadSafely:
-        return _StoredDb(_LIVE_WAL)  # a live WAL without its -shm: nothing is learned or judged
-    if opened is None:
-        return _StoredDb(None)
-    db, fd = opened
+        size = os.fstat(fd).st_size
+        if size == 0:
+            return _StoredDb(_SKIP if _wal_has_content(path) else None)
+        if os.pread(fd, len(_SQLITE_MAGIC), 0) != _SQLITE_MAGIC:
+            return _StoredDb(False)
+        if _wal_has_content(path):
+            return _StoredDb(_SKIP)
+        return _query_db(path, fd)
+    except OSError:
+        return _StoredDb(_SKIP)
+    finally:
+        os.close(fd)
+
+
+def _query_db(path: Path, fd: int) -> _StoredDb:
+    proc = f"/proc/self/fd/{fd}"
+    target = proc if os.path.exists(proc) else str(path)
+    try:
+        db = sqlite3.connect(f"file:{quote(target)}?immutable=1", uri=True, timeout=0)
+    except (sqlite3.Error, ValueError):
+        return _StoredDb(_SKIP)
     names: set[str] = set()
     steps = 0
 
@@ -308,15 +277,17 @@ def _read_db(path: Path) -> _StoredDb:
         db.execute("PRAGMA trusted_schema=OFF")
         try:
             if db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone() is None:
-                return _StoredDb(None)  # an empty file: no tables
+                return _StoredDb(None)  # a SQLite file with no tables
             row = db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
         except sqlite3.Error as exc:
-            if store.is_not_a_database(exc) or "no such table" in str(exc):
+            if store.is_not_a_database(exc) or "no such table: meta" in str(exc):
                 return _StoredDb(False)  # junk, or tables of another program
-            return _StoredDb(None)  # damaged or busy: unreadable, not judged from content
-        version = None if row is None else store.parse_schema_version(row[0])
+            return _StoredDb(_SKIP)  # damaged, busy or another meta: the store refuses plainly
+        if row is None:
+            return _StoredDb(False)
+        version = store.parse_schema_version(row[0])
         if version is None:
-            return _StoredDb(False)  # no row, or an unusable value: the store refuses it
+            return _StoredDb(_SKIP)  # an unusable value: the store refuses it plainly
         for table in ("policy_state", "decisions"):
             try:
                 rows = db.execute(f"SELECT DISTINCT policy FROM {table} LIMIT 5000").fetchall()  # noqa: S608
@@ -326,29 +297,60 @@ def _read_db(path: Path) -> _StoredDb:
                 if isinstance(value, str) and ids.is_policy_name(value):
                     names.add(value)
     except sqlite3.Error:
-        return _StoredDb(None)
+        return _StoredDb(_SKIP)
     finally:
         db.close()
-        if fd is not None:
-            os.close(fd)
     return _StoredDb(version, frozenset(names))
 
 
 def _state_dir_is_real(state: Path) -> bool:
+    """Whether ``state`` is a real directory (not a link, not another file type) owned by this
+    user, the store's own test of its directory (``store._vet_dir``). Where the store refuses the
+    directory without a reason, ``validate`` is silent. A missing directory is also ``False``: a
+    fresh install is valid."""
     try:
-        return stat.S_ISDIR(os.lstat(state).st_mode)
-    except OSError:
+        info = os.lstat(state)
+    except OSError:  # missing, a parent that is a file, or not searchable
         return False
+    return stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid()
+
+
+def _sidecars_are_vetted(db: Path) -> bool:
+    """Whether the ``-wal`` and ``-shm`` files are absent or regular files owned by this user
+    (the store's ``_vet_sidecars``: it refuses anything else without a reason)."""
+    for suffix in ("-wal", "-shm"):
+        try:
+            info = os.lstat(db.with_name(db.name + suffix))
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            return False
+    return True
 
 
 def _check_state(loaded: LoadedConfig, state: Path, out: _Out) -> None:
-    # A fresh install has no state directory, and no state.db until the first check: not a
-    # problem. Otherwise the verdict is the store's (design.md, state store): the same history
-    # test and the same judgment of the database that `check` applies, so the two agree.
+    # `state_db_missing` only where the store refuses with that reason (design.md, state store),
+    # plus a foreign or junk database with no history. Where the store refuses without a reason
+    # (a bad state directory, a non-regular or linked state.db, a damaged or unreadable file, a
+    # permission problem) `validate` is silent: it cannot repair a mode, and `check` explains.
     if not _state_dir_is_real(state):
         return
-    found = _read_db(state / "state.db")
-    if found.version is _LIVE_WAL:
+    path = state / "state.db"
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        found = _StoredDb(None)
+    except OSError:  # not searchable, or other: the store would repair or refuse plainly
+        return
+    else:
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            return
+        if not _sidecars_are_vetted(path):
+            return
+        found = _read_db(path)
+    if found.version is _SKIP:
         return
     verdict = store.db_verdict(store.has_history(state), found.version)
     if verdict == "state_db_missing":

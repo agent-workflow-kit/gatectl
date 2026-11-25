@@ -221,6 +221,8 @@ def _vet_dir(path: Path, create: bool) -> bool:
         info = os.lstat(path)
     except FileNotFoundError:
         return False
+    except NotADirectoryError:  # a parent of the state directory is a file
+        raise _fail("the state directory is not a real directory") from None
     if not stat.S_ISDIR(info.st_mode):
         raise _fail("the state directory is not a real directory")
     if info.st_uid != _geteuid():
