@@ -196,7 +196,8 @@ def handle(ctx: Context) -> Result:
     resolved = ids.resolve_actor(
         ctx.actor,
         stdin_tty=ctx.stdin_tty,
-        name=loaded.shared.me.name or _os_user_name(),
+        # An empty configured name is sanitized to ``user``; only an absent one uses the OS name.
+        name=_os_user_name() if loaded.shared.me.name is None else loaded.shared.me.name,
     )
     reason = _read_reason(ctx.args.reason_file)
 

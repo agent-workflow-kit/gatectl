@@ -22,6 +22,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
+    StringConstraints,
     ValidationError,
     field_validator,
     model_validator,
@@ -155,7 +156,6 @@ def _miss_rate(value: float) -> float:
 
 # --- strings -----------------------------------------------------------------------------
 
-_ACTOR_NAME = re.compile(r"[A-Za-z0-9._@-]{1,64}")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ENV_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\*?")
 _SKILL = re.compile(r"[a-z0-9][a-z0-9_-]*:[a-z0-9][a-z0-9_-]*")
@@ -240,15 +240,14 @@ class _Base(BaseModel):
 # --- shared sections ---------------------------------------------------------------------
 
 
+# Any string is a valid me.name (it is sanitized when the actor is derived); the cap only keeps a
+# huge value out of memory and out of the sanitizer.
+ME_NAME_MAX_LEN = 1024
+
+
 class Me(_Base):
     nullable = frozenset({"name"})
-    name: (
-        Annotated[
-            str,
-            AfterValidator(_matching(_ACTOR_NAME, "must match [A-Za-z0-9._@-]{1,64}")),
-        ]
-        | None
-    ) = None
+    name: Annotated[str, StringConstraints(max_length=ME_NAME_MAX_LEN)] | None = None
 
 
 class RecommendCfg(_Base):

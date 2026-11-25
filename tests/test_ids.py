@@ -310,6 +310,37 @@ class TestActor:
                 assert ids.parse_actor(str(r.actor)) == r.actor
 
 
+class TestActorName:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("ann", "ann"),
+            ("a.b_c@d-e", "a.b_c@d-e"),
+            ("a b", "a_b"),
+            ("Dr Who\n", "Dr_Who_"),
+            ("a\x1b[31mb", "a__31mb"),
+            ("a\u202eb\u2066c", "a_b_c"),
+            ("a\x00b", "a_b"),
+            ("\u00e9", "_"),
+            ("x" * 200, "x" * 64),
+            ("\u00e9" * 200, "_" * 64),
+            ("", "user"),
+            (None, "user"),
+            ("   ", "___"),
+        ],
+    )
+    def test_sanitizes(self, raw: str | None, expected: str) -> None:
+        assert ids.actor_name(raw) == expected
+
+    @pytest.mark.parametrize("raw", [5, 1.5, True, ["a"], {"a": 1}, b"x"])
+    def test_a_non_string_becomes_user(self, raw: object) -> None:
+        assert ids.actor_name(raw) == "user"
+
+    def test_every_result_is_a_valid_actor_name(self) -> None:
+        for raw in ["", "\n", "x" * 5000, "\x1b]0;t\x07", "\u202e", "a\x00"]:
+            assert ids.parse_actor(f"human:{ids.actor_name(raw)}").name == ids.actor_name(raw)
+
+
 class TestDuration:
     @pytest.mark.parametrize(
         ("text", "expected"),

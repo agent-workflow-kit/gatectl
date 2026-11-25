@@ -187,3 +187,13 @@ def test_long_env_name_message_is_capped(tmp_path: Path) -> None:
     cfg = load(tmp_path, {}, environ={name: "1"})
     assert cfg.shared_problems
     assert all(len(p.message) <= 2048 for p in cfg.shared_problems)
+
+
+def test_me_name_is_a_bounded_string_and_anything_else_is_refused(tmp_path: Path) -> None:
+    for ok in ["a b", "", "x" * 1024, "\x1b[31m", "\u202e"]:
+        cfg = load(tmp_path, {"me": {"name": ok}})
+        assert cfg.shared_problems == (), repr(ok)
+        assert cfg.shared.me.name == ok
+    for bad in [5, 1.5, True, ["a"], {"a": 1}, "x" * 1025]:
+        cfg = load(tmp_path, {"me": {"name": bad}})
+        assert _codes(cfg.shared_problems) == {("invalid_value", "me.name")}, repr(bad)

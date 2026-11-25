@@ -126,7 +126,23 @@ def _docs() -> list[dict[str, Any]]:
     """Valid and invalid documents; the loader must reject every one the schema rejects."""
     docs: list[dict[str, Any]] = [{}, {"policies": {"p": {"checks": [ONE_RULE]}}}]
     for section, key, values in [
-        ("me", "name", ["a b", 5, "", "x" * 65]),
+        (
+            "me",
+            "name",
+            [
+                5,
+                1.5,
+                True,
+                ["a"],
+                {"a": 1},
+                "x" * 1025,
+                "a b",
+                "",
+                "x" * 65,
+                "x" * 1024,
+                "\x1b[31m\u202e\x00",
+            ],
+        ),
         ("defaults", "timeout", ["x", 5, "1.5s", None, True, ""]),
         ("defaults", "input_max_bytes", [0, 16777217, "1", 1.5]),
         ("defaults", "script_env_allow", [["A", "A"], ["*"], "x"]),
