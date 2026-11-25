@@ -250,7 +250,15 @@ def encode_line(record: Mapping[str, Any], *, sanitize_text: bool = True) -> byt
 
 
 def _append(name: str, record: Mapping[str, Any], directory: Path | None, sanitize_text: bool):
-    line = encode_line(record, sanitize_text=sanitize_text)  # nothing is opened if this fails
+    _append_lines(name, [encode_line(record, sanitize_text=sanitize_text)], directory)
+
+
+def _append_lines(name: str, lines: list[bytes], directory: Path | None) -> None:
+    """Append ``lines`` with one ``write``. The buffer is unbounded, so a short write can leave
+    complete leading lines on disk while the caller (``Store.append_audit_many``) rolls its rows
+    back: a residual window in which audit lines exist for a change that did not happen. The
+    error is raised (exit 1) so the operator sees it; no code compensates."""
+    line = b"".join(lines)  # one write: the lines of one call stay together
     target = directory if directory is not None else state_dir()
     _ensure_dir(target)
     fd = _open_append(target / name)
@@ -260,6 +268,15 @@ def _append(name: str, record: Mapping[str, Any], directory: Path | None, saniti
         os.close(fd)
     if written != len(line):
         raise ShortWriteError(f"short write to {name}: {written} of {len(line)} bytes")
+
+
+def append_audit_many(
+    records: Sequence[Mapping[str, Any]], *, state_dir: Path | None = None
+) -> None:
+    """Append every record to ``audit.jsonl`` with one write, after all of them encode (a record
+    that cannot be encoded raises before anything is opened or written)."""
+    if records:
+        _append_lines("audit.jsonl", [encode_line(r) for r in records], state_dir)
 
 
 def append_audit(

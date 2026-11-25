@@ -8,8 +8,8 @@ import pytest
 from gatectl import commands
 from gatectl.cli import main
 from gatectl.commands import Context, Result
-from gatectl.errors import RefusedError
 from tests import golden
+from tests.command_util import isolate
 from tests.test_cli import MIN_ARGV
 
 SCHEMAS = Path(__file__).resolve().parent.parent / "schemas"
@@ -32,8 +32,7 @@ COMMAND_OF = {
     "show": "show",
     # todo(#29): replace the stub with the real stats output
     "stats": "stats",
-    # todo(#14): replace the stub with the real set output
-    "set": "set",
+    # set is real (#14): see tests/test_set.py::test_set_shadow_prints_the_golden_output
     # policies-static is real (#11): see tests/test_policies.py::test_the_output_is_golden.
     # todo(#15): "policies" (stored rows and records) stays a stub until the stored view lands
     "policies": "policies",
@@ -115,13 +114,12 @@ def test_the_error_envelope_prints_its_golden_file_byte_for_byte(
 
 
 def test_the_refused_envelope_prints_its_golden_file_byte_for_byte(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    def refuse(ctx: Context) -> Result:
-        raise RefusedError("this action needs a human actor")
-
-    monkeypatch.setattr(commands, "HANDLERS", {"set": refuse})
-    assert main([*MIN_ARGV["set"], "--json"]) == 20
+    isolate(monkeypatch, tmp_path)
+    assert (
+        main(["set", "pol", "enforced", "--actor", "auto:t", "--json"]) == 20
+    )  # the real set, no human
     golden.assert_output("error-refused", capsys.readouterr().out)
 
 

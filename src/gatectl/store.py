@@ -456,6 +456,20 @@ class Store:
         except (OSError, audit.RecordTooLargeError, TypeError, ValueError):
             raise AuditWriteError("audit.jsonl cannot be written") from None
 
+    def append_audit_many(self, records: Sequence[Mapping[str, Any]]) -> None:
+        """Like ``append_audit`` for several records, written with one ``write`` after every
+        record encodes. Residual window: a short write of the combined buffer can leave complete
+        leading lines on disk while the caller's transaction rolls back (see
+        ``audit._append_lines``)."""
+        if self.readonly:
+            raise RuntimeError("the store was opened read-only")
+        if not self.con.in_transaction:
+            raise RuntimeError("an audit line is appended inside a write transaction")
+        try:
+            audit.append_audit_many(records, state_dir=self.path.parent)
+        except (OSError, audit.RecordTooLargeError, TypeError, ValueError):
+            raise AuditWriteError("audit.jsonl cannot be written") from None
+
     def transact(self, body: Callable[[], T]) -> T:
         """Run ``body`` in one ``write()`` transaction; if the write lock is not obtained within
         ``busy_timeout``, try the whole transaction once more (worst case 2 x ``busy_timeout``).
@@ -553,10 +567,11 @@ class Store:
         + ", rev FROM policy_state"
     )
 
-    def rows(self, policy: str) -> list[StateRow]:
-        """Every stored row of ``policy`` (configured or not), by scope."""
+    def rows(self, policy: str, *, limit: int = _ROW_LIMIT) -> list[StateRow]:
+        """Stored rows of ``policy`` (configured or not), by scope, at most ``limit`` (default the
+        row cap; a caller that must tell "more than the cap" asks for one more)."""
         return self._select(
-            f"SELECT {self._COLUMNS} WHERE policy = ? ORDER BY scope LIMIT {_ROW_LIMIT}",  # noqa: S608
+            f"SELECT {self._COLUMNS} WHERE policy = ? ORDER BY scope LIMIT {int(limit)}",  # noqa: S608
             (policy,),
         )
 
@@ -566,6 +581,41 @@ class Store:
             (policy, scope),
         )
         return found[0] if found else None
+
+    def has_policy(self, policy: str) -> bool:
+        """Whether ``policy`` has a stored row or a recorded decision (a removed policy is known
+        to ``set`` only through this)."""
+        try:
+            found = self.con.execute(
+                "SELECT 1 FROM policy_state WHERE policy = ? UNION ALL"
+                " SELECT 1 FROM decisions WHERE policy = ? LIMIT 1",
+                (policy, policy),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise _translate(exc) from None
+        return found is not None
+
+    def has_decision(self, policy: str, scope: str) -> bool:
+        """Whether a decision of ``policy`` was recorded for exactly ``scope``."""
+        try:
+            found = self.con.execute(
+                "SELECT 1 FROM decisions WHERE policy = ? AND scope = ? LIMIT 1", (policy, scope)
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise _translate(exc) from None
+        return found is not None
+
+    def meta(self, key: str) -> str | None:
+        """A ``meta`` value as text (cut to the text cap), or None when absent or not text."""
+        try:
+            found = self.con.execute(
+                f"SELECT substr(value, 1, {_TEXT_SQL}) FROM meta"  # noqa: S608
+                " WHERE key = ? AND typeof(value) = 'text'",
+                (key,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise _translate(exc) from None
+        return sanitize(found[0], _TEXT_CAP) if found is not None else None
 
     def effective(
         self, policy: str, scope: str, initial: str, *, indeterminate: bool = False
