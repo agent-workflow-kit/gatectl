@@ -1191,8 +1191,8 @@ def test_a_state_db_with_a_schema_version_row_stays_valid_next_to_a_history(env:
     assert code == 0 and payload["problems"] == []
 
 
-def _wal_db(policies: tuple[str, ...]) -> sqlite3.Connection:
-    state = _state_dir()
+def _wal_db(policies: tuple[str, ...], where: Path | None = None) -> sqlite3.Connection:
+    state = where if where is not None else _state_dir()
     state.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(state / "state.db", isolation_level=None)
     db.execute("PRAGMA journal_mode=WAL")
@@ -1239,6 +1239,72 @@ def test_rows_that_live_only_in_the_wal_are_read(env: Env) -> None:
         }
     finally:
         writer.close()
+
+
+def test_a_symlinked_state_db_with_a_live_wal_is_read_through_the_real_directory(
+    env: Env,
+) -> None:
+    real = env.tmp / "elsewhere"
+    writer = _wal_db(("gone",), real)
+    try:
+        assert (real / "state.db-wal").stat().st_size > 0
+        _audit_record(env)
+        (_state_dir() / "state.db").symlink_to(real / "state.db")
+        code, payload = env.run(env.base())
+        assert code == 0
+        assert found(payload, "problems") == set()
+        assert found(payload, "warnings") == {("orphan_state", "policies.gone")}
+    finally:
+        writer.close()
+
+
+def test_a_non_empty_wal_without_shm_is_not_read_and_nothing_is_created(env: Env) -> None:
+    writer = _wal_db(("gone",))
+    try:
+        state = _state_dir()
+        (state / "state.db-shm").unlink()
+        _audit_record(env)
+        before = _snapshot(state)
+        code, payload = env.run(env.base())
+        assert code == 0
+        assert found(payload, "problems") == set()
+        assert found(payload, "warnings") == set()
+        assert _snapshot(state) == before
+    finally:
+        writer.close()
+
+
+def test_a_wal_state_db_swapped_for_a_fifo_after_it_was_opened_is_not_read(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import signal
+
+    writer = _wal_db(("gone",))
+    try:
+        _audit_record(env)
+        db = _state_dir() / "state.db"
+        real_open = os.open
+        swapped: list[bool] = []
+
+        def swapping_open(path: Any, *args: Any, **kwargs: Any) -> int:
+            fd = real_open(path, *args, **kwargs)
+            if Path(path) == db and not swapped:
+                swapped.append(True)
+                db.unlink()
+                os.mkfifo(db)
+            return fd
+
+        monkeypatch.setattr(validate.os, "open", swapping_open)
+        signal.alarm(20)
+        try:
+            code, payload = env.run(env.base())
+        finally:
+            signal.alarm(0)
+    finally:
+        writer.close()
+    assert swapped
+    assert code == 2
+    assert found(payload, "problems") == {("state_db_missing", "state.db")}
 
 
 def test_a_wal_state_db_in_a_read_only_directory_still_reports_orphans(env: Env) -> None:

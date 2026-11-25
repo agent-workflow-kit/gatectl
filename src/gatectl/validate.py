@@ -208,31 +208,58 @@ def _wal_has_content(path: Path) -> bool:
     return _non_empty_file(path.with_name(path.name + "-wal"))
 
 
+class _CannotReadSafely(Exception):
+    """The database cannot be read without writing next to it: it is skipped, not judged."""
+
+
 def _connect(path: Path) -> tuple[sqlite3.Connection, int | None] | None:
     """Open ``state.db`` read-only without ever creating a file next to it.
 
+    The path is resolved once (``realpath``): SQLite looks for ``-wal`` and ``-shm`` in the real
+    file's directory, so the sidecar checks and the connect use that same resolved path.
+
     With a non-empty ``-wal`` the committed rows may live only there, so the database is opened
-    ``mode=ro`` by path (the sidecars exist, so SQLite creates nothing). Without one, nothing
-    can be missing from the main file and it is opened ``immutable=1`` (no locking, no sidecar,
-    works in a read-only directory); on Linux through the already checked descriptor, so the
-    path is not looked up again. The returned descriptor (or ``None``) is closed by the caller
+    ``mode=ro`` by path; that needs the ``-shm`` too, because without it SQLite would create one.
+    A non-empty ``-wal`` without ``-shm`` cannot be read without writing, so it raises
+    ``_CannotReadSafely`` and the caller reads nothing (no orphan, and no judgement from content).
+    Without a non-empty ``-wal`` nothing can be missing from the main file and it is opened
+    ``immutable=1`` (no locking, no sidecar, works in a read-only directory); on Linux through the
+    already checked descriptor. The returned descriptor (or ``None``) is closed by the caller
     after the connection.
 
-    Residual window: in the ``mode=ro`` case (and where ``/proc/self/fd`` is missing) SQLite
-    opens the path itself after the descriptor was checked; an attacker who owns the state
-    directory could swap in a FIFO inside that few-microsecond window. The state directory is
-    private (mode 0700), so this needs the user's own account.
+    Residual window: ``/proc/self/fd/N`` does not pin the descriptor (SQLite resolves the link to
+    a path and opens that), and the ``mode=ro`` branch opens the path itself, so in every branch an
+    attacker who owns the state directory has a few-microsecond window between the checks and the
+    open. It is narrowed by comparing the descriptor with the path (device and inode, regular)
+    right before connecting. The state directory is private (mode 0700), so this needs the user's
+    own account.
     """
-    fd = _open_regular(path)
+    try:
+        real = Path(os.path.realpath(path))
+    except (OSError, ValueError):
+        return None
+    fd = _open_regular(real)
     if fd is None:
         return None
     try:
-        if _wal_has_content(path):
-            uri = f"file:{quote(str(path))}?mode=ro"
+        wal = _wal_has_content(real)
+        if wal and not real.with_name(real.name + "-shm").exists():
+            raise _CannotReadSafely
+        held, now = os.fstat(fd), os.stat(real)
+        if not (
+            stat.S_ISREG(now.st_mode) and (held.st_dev, held.st_ino) == (now.st_dev, now.st_ino)
+        ):
+            os.close(fd)
+            return None
+        if wal:
+            uri = f"file:{quote(str(real))}?mode=ro"
             return sqlite3.connect(uri, uri=True, timeout=0), fd
         proc = f"/proc/self/fd/{fd}"
-        target = proc if os.path.exists(proc) else str(path)
+        target = proc if os.path.exists(proc) else str(real)
         return sqlite3.connect(f"file:{quote(target)}?immutable=1", uri=True, timeout=0), fd
+    except _CannotReadSafely:
+        os.close(fd)
+        raise
     except (OSError, sqlite3.Error, ValueError):
         os.close(fd)
         return None
@@ -241,12 +268,17 @@ def _connect(path: Path) -> tuple[sqlite3.Connection, int | None] | None:
 def _db_policies(path: Path) -> set[str] | None:
     """Policy names stored in ``state.db`` (read-only), or ``None`` when it is not usable.
 
+    The ``meta(key TEXT PRIMARY KEY, value TEXT)`` columns, ``policy_state.policy`` and
+    ``decisions.policy`` are those of the state store; issue #12's schema must match these names.
     Usable means a database with a ``meta.schema_version`` row, the same test ``check`` applies
     (interface.md, Exit codes). Only names that follow the policy-name grammar are returned;
     anything else in a tampered database is ignored and never printed. The read is bounded in
     rows and in work.
     """
-    opened = _connect(path)
+    try:
+        opened = _connect(path)
+    except _CannotReadSafely:
+        return set()  # a live WAL without its -shm: nothing is learned, nothing is judged
     if opened is None:
         return None
     db, fd = opened
