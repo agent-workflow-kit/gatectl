@@ -776,6 +776,26 @@ class TestKeyCollisions:
         assert all(len(key) <= 256 for key in out)
         assert len(out) == 3
 
+    def test_many_colliding_keys_are_unique_in_linear_time(self) -> None:
+        import time
+
+        data = {"a" * 256 + str(i): i for i in range(8000)}
+        start = time.monotonic()
+        out = audit._clean(data, True)
+        elapsed = time.monotonic() - start
+        assert len(out) == 8000
+        assert all(len(key) <= 256 for key in out)
+        assert sorted(out.values()) == list(range(8000))
+        assert elapsed < 2
+
+    def test_natural_suffixed_key_is_not_overwritten(self) -> None:
+        natural = f"a{MARKER}#2"
+        out = self._data({natural: 0, "a\x00": 1, "a\x01": 2})
+        assert out == {natural: 0, f"a{MARKER}": 1, f"a{MARKER}#3": 2}
+        out = self._data({"a\x00": 1, "a\x01": 2, natural: 0})
+        assert sorted(out.values()) == [0, 1, 2]
+        assert len(out) == 3
+
     def test_unsanitized_keys_are_untouched(self) -> None:
         rec = audit.log_record(level="info", event="warning", data={"a\x00": 1, "a\x01": 2})
         data = json.loads(audit.encode_line(rec, sanitize_text=False))["data"]

@@ -123,17 +123,21 @@ def _open_append(path: Path) -> int:
 # --- encoding ----------------------------------------------------------------------------
 
 
-def _unique_key(base: str, taken: Mapping[str, Any]) -> str:
-    """``base`` if free, else ``base#2``, ``base#3``... cutting ``base`` to stay in 256 chars."""
+def _unique_key(base: str, taken: Mapping[str, Any], next_suffix: dict[str, int]) -> str:
+    """``base`` if free, else ``base#2``, ``base#3``... cutting ``base`` to stay in 256 chars.
+
+    ``next_suffix`` (one per mapping being cleaned) remembers where the search for each base
+    stopped, so N colliding keys cost O(N) rather than O(N^2)."""
     if base not in taken:
         return base
-    n = 2
+    n = next_suffix.get(base, 2)
     while True:
         suffix = f"#{n}"
         candidate = base[: DEFAULT_MAX_LEN - len(suffix)] + suffix
-        if candidate not in taken:
-            return candidate
         n += 1
+        if candidate not in taken:
+            next_suffix[base] = n
+            return candidate
 
 
 def _clean(value: Any, sanitize_text: bool, depth: int = 0) -> Any:
@@ -144,10 +148,11 @@ def _clean(value: Any, sanitize_text: bool, depth: int = 0) -> Any:
         return sanitize(value) if sanitize_text else value
     if isinstance(value, Mapping):
         out: dict[str, Any] = {}
+        next_suffix: dict[str, int] = {}
         for key, item in value.items():
             if not isinstance(key, str):
                 raise TypeError("free-text object keys must be strings")
-            clean_key = _unique_key(sanitize(key), out) if sanitize_text else key
+            clean_key = _unique_key(sanitize(key), out, next_suffix) if sanitize_text else key
             out[clean_key] = _clean(item, sanitize_text, depth + 1)
         return out
     if isinstance(value, list | tuple):
