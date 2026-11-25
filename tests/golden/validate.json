@@ -1,0 +1,1 @@
+{"valid":true,"problems":[],"warnings":[{"code":"agent_only_policy","path":"policies.review","message":"policy has no script or rule check"}],"probe":null}
