@@ -154,10 +154,13 @@ class Case:
     setup: Callable[[Env], None] = lambda env: None
 
 
-def _state_db(env: Env, policies: tuple[str, ...]) -> None:
+def _state_db(env: Env, policies: tuple[str, ...], *, schema: bool = True) -> None:
     state = Path(os.environ["XDG_STATE_HOME"]) / "gatectl"
     state.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(state / "state.db")
+    if schema:
+        db.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        db.execute("INSERT INTO meta VALUES ('schema_version', '1')")
     db.execute("CREATE TABLE policy_state (policy TEXT, scope TEXT, state TEXT)")
     for name in policies:
         db.execute("INSERT INTO policy_state VALUES (?, '*', 'shadow')", (name,))
@@ -1129,6 +1132,223 @@ def test_state_db_is_opened_read_only_and_left_unchanged(env: Env) -> None:
     env.run(env.base())
     assert (state / "state.db").read_bytes() == before
     assert sorted(p.name for p in state.iterdir()) == ["state.db"]
+
+
+def _state_dir() -> Path:
+    return Path(os.environ["XDG_STATE_HOME"]) / "gatectl"
+
+
+def _snapshot(directory: Path) -> dict[str, tuple[int, str]]:
+    import hashlib
+
+    return {
+        p.name: (p.stat().st_size, hashlib.sha256(p.read_bytes()).hexdigest())
+        for p in sorted(directory.iterdir())
+    }
+
+
+@pytest.mark.parametrize("kind", ["unrelated-table", "no-schema-row", "garbage"])
+def test_a_state_db_without_a_schema_version_row_is_state_db_missing(env: Env, kind: str) -> None:
+    _audit_record(env)
+    state = _state_dir()
+    state.mkdir(parents=True, exist_ok=True)
+    if kind == "garbage":
+        (state / "state.db").write_bytes(b"not a database" * 100)
+    else:
+        db = sqlite3.connect(state / "state.db")
+        if kind == "unrelated-table":
+            db.execute("CREATE TABLE other (x)")
+        else:
+            db.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+            db.execute("INSERT INTO meta VALUES ('state_rev', '1')")
+        db.commit()
+        db.close()
+    code, payload = env.run(env.base())
+    assert code == 2
+    assert found(payload, "problems") == {("state_db_missing", "state.db")}
+
+
+@pytest.mark.parametrize("kind", ["unrelated-table", "no-schema-row", "garbage"])
+def test_a_schema_less_state_db_is_no_problem_without_an_audit_history(env: Env, kind: str) -> None:
+    state = _state_dir()
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "audit.jsonl").write_text("")
+    if kind == "garbage":
+        (state / "state.db").write_bytes(b"not a database" * 100)
+    else:
+        db = sqlite3.connect(state / "state.db")
+        db.execute("CREATE TABLE other (x)")
+        db.commit()
+        db.close()
+    code, payload = env.run(env.base())
+    assert code == 0 and payload["problems"] == []
+
+
+def test_a_state_db_with_a_schema_version_row_stays_valid_next_to_a_history(env: Env) -> None:
+    _audit_record(env)
+    _state_db(env, ())
+    code, payload = env.run(env.base())
+    assert code == 0 and payload["problems"] == []
+
+
+def _wal_db(policies: tuple[str, ...]) -> sqlite3.Connection:
+    state = _state_dir()
+    state.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(state / "state.db", isolation_level=None)
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA wal_autocheckpoint=0")
+    db.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    db.execute("INSERT INTO meta VALUES ('schema_version', '1')")
+    db.execute("CREATE TABLE policy_state (policy TEXT, scope TEXT, state TEXT)")
+    for name in policies:
+        db.execute("INSERT INTO policy_state VALUES (?, '*', 'shadow')", (name,))
+    return db
+
+
+def _closed_wal_db(policies: tuple[str, ...]) -> None:
+    _wal_db(policies).close()  # the last close checkpoints and removes -wal and -shm
+
+
+def test_a_wal_state_db_without_sidecars_is_read_without_creating_any(env: Env) -> None:
+    _closed_wal_db(("gone",))
+    state = _state_dir()
+    assert sorted(p.name for p in state.iterdir()) == ["state.db"]
+    before = _snapshot(state)
+    mtime = state.stat().st_mtime_ns
+    _, payload = env.run(env.base())
+    assert found(payload, "warnings") == {("orphan_state", "policies.gone")}
+    assert _snapshot(state) == before
+    assert state.stat().st_mtime_ns == mtime
+
+
+def test_rows_that_live_only_in_the_wal_are_read(env: Env) -> None:
+    writer = _wal_db(("gone",))
+    try:
+        state = _state_dir()
+        assert (state / "state.db-wal").stat().st_size > 0
+        _audit_record(env)
+        before = _snapshot(state)
+        code, payload = env.run(env.base())
+        assert code == 0
+        assert found(payload, "warnings") == {("orphan_state", "policies.gone")}
+        after = _snapshot(state)
+        # A reader of a live WAL database sets lock marks in the -shm index: that file may change.
+        assert after.keys() == before.keys()
+        assert {k: v for k, v in after.items() if k != "state.db-shm"} == {
+            k: v for k, v in before.items() if k != "state.db-shm"
+        }
+    finally:
+        writer.close()
+
+
+def test_a_wal_state_db_in_a_read_only_directory_still_reports_orphans(env: Env) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    _closed_wal_db(("gone",))
+    state = _state_dir()
+    state.chmod(0o555)
+    try:
+        _, payload = env.run(env.base())
+    finally:
+        state.chmod(0o755)
+    assert found(payload, "warnings") == {("orphan_state", "policies.gone")}
+    assert sorted(p.name for p in state.iterdir()) == ["state.db"]
+
+
+def test_a_state_db_swapped_for_a_fifo_between_check_and_open_does_not_hang(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import signal
+
+    _audit_record(env)
+    _state_db(env, ("gone",))
+    db = _state_dir() / "state.db"
+    real_open = os.open
+    swapped: list[bool] = []
+
+    def swapping_open(path: Any, *args: Any, **kwargs: Any) -> int:
+        if Path(path) == db and not swapped:
+            swapped.append(True)
+            db.unlink()
+            os.mkfifo(db)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(validate.os, "open", swapping_open)
+    signal.alarm(20)  # a hang fails the test instead of the run
+    try:
+        code, payload = env.run(env.base())
+    finally:
+        signal.alarm(0)
+    assert swapped
+    assert code == 2
+    assert found(payload, "problems") == {("state_db_missing", "state.db")}
+
+
+def test_the_fd_type_check_runs_before_a_wal_database_is_connected(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import signal
+
+    writer = _wal_db(("gone",))
+    try:
+        _audit_record(env)
+        db = _state_dir() / "state.db"
+        real_open = os.open
+        swapped: list[bool] = []
+
+        def swapping_open(path: Any, *args: Any, **kwargs: Any) -> int:
+            if Path(path) == db and not swapped:
+                swapped.append(True)
+                db.unlink()
+                os.mkfifo(db)
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(validate.os, "open", swapping_open)
+        signal.alarm(20)
+        try:
+            code, payload = env.run(env.base())
+        finally:
+            signal.alarm(0)
+    finally:
+        writer.close()
+    assert code == 2
+    assert found(payload, "problems") == {("state_db_missing", "state.db")}
+
+
+def test_importing_validate_first_works_in_a_fresh_interpreter() -> None:
+    import subprocess
+    import sys
+
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", "import gatectl.validate"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+
+
+def test_text_output_omits_the_session_cmd_line_when_the_config_did_not_parse(
+    env: Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env.path().parent.mkdir(parents=True, exist_ok=True)
+    env.path().write_text("a: [unclosed\n")
+    assert main(["validate", "--config", str(env.path())]) == 2
+    lines = capsys.readouterr().out.splitlines()
+    assert not any(line.startswith("session_cmd:") for line in lines)
+    assert lines[-1] == "invalid"
+
+
+def test_an_invalid_policy_with_an_agent_check_keeps_session_cmd_a_problem(env: Env) -> None:
+    cfg = {
+        "session_cmd": ["/nonexistent/s"],
+        "policies": {"p": {"checks": [agent_check()], "bogus": 1}},
+    }
+    code, payload = env.run(cfg)
+    assert code == 2
+    assert ("session_cmd_unresolved", "session_cmd") in found(payload, "problems")
+    assert ("session_cmd_unresolved", "session_cmd") not in found(payload, "warnings")
 
 
 # --- hostile input and untrusted text ------------------------------------------------------

@@ -25,7 +25,6 @@ from typing import Any
 from urllib.parse import quote
 
 from gatectl import audit, ids
-from gatectl.commands import Context, Result
 from gatectl.config import (
     ConfigProblem,
     LoadedConfig,
@@ -34,6 +33,7 @@ from gatectl.config import (
     resolve_session_cmd,
 )
 from gatectl.config_models import AgentCheck, ScriptCheck
+from gatectl.context import Context, Result
 from gatectl.errors import ConfigInvalidError, InternalError
 from gatectl.fingerprint import INSTRUCTION_CAP, bundled_plugin_dir, plugin_name_of
 from gatectl.sanitize import sanitize
@@ -54,6 +54,7 @@ class Report:
     problems: list[ConfigProblem] = field(default_factory=list)
     warnings: list[ConfigProblem] = field(default_factory=list)
     session_cmd: str | None = None  # the resolved first element, when found
+    session_cmd_known: bool = True  # False when the config did not parse (nothing was resolved)
 
 
 class _Out:
@@ -184,20 +185,71 @@ def _non_empty_file(path: Path) -> bool:
     return stat.S_ISREG(info.st_mode) and info.st_size > 0
 
 
-def _db_policies(path: Path) -> set[str] | None:
-    """Policy names stored in ``state.db`` (read-only), or ``None`` when it cannot be read.
+def _open_regular(path: Path) -> int | None:
+    """A descriptor for ``path`` when it is a regular file (a link is followed), else ``None``.
 
-    Only names that follow the policy-name grammar are returned; anything else in a tampered
-    database is ignored and never printed. The read is bounded in rows and in work.
+    The open never blocks (``O_NONBLOCK``), so a FIFO swapped in for the file cannot hang it; the
+    type is read from the descriptor, not from a separate ``stat`` of the path.
     """
     try:
-        info = os.stat(path)
-        if not stat.S_ISREG(info.st_mode):
-            return None
-        uri = f"file:{quote(str(path))}?mode=ro"
-        db = sqlite3.connect(uri, uri=True, timeout=0)
-    except (OSError, sqlite3.Error, ValueError):
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
+    except (OSError, ValueError):
         return None
+    try:
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            return fd
+    except OSError:
+        pass
+    os.close(fd)
+    return None
+
+
+def _wal_has_content(path: Path) -> bool:
+    return _non_empty_file(path.with_name(path.name + "-wal"))
+
+
+def _connect(path: Path) -> tuple[sqlite3.Connection, int | None] | None:
+    """Open ``state.db`` read-only without ever creating a file next to it.
+
+    With a non-empty ``-wal`` the committed rows may live only there, so the database is opened
+    ``mode=ro`` by path (the sidecars exist, so SQLite creates nothing). Without one, nothing
+    can be missing from the main file and it is opened ``immutable=1`` (no locking, no sidecar,
+    works in a read-only directory); on Linux through the already checked descriptor, so the
+    path is not looked up again. The returned descriptor (or ``None``) is closed by the caller
+    after the connection.
+
+    Residual window: in the ``mode=ro`` case (and where ``/proc/self/fd`` is missing) SQLite
+    opens the path itself after the descriptor was checked; an attacker who owns the state
+    directory could swap in a FIFO inside that few-microsecond window. The state directory is
+    private (mode 0700), so this needs the user's own account.
+    """
+    fd = _open_regular(path)
+    if fd is None:
+        return None
+    try:
+        if _wal_has_content(path):
+            uri = f"file:{quote(str(path))}?mode=ro"
+            return sqlite3.connect(uri, uri=True, timeout=0), fd
+        proc = f"/proc/self/fd/{fd}"
+        target = proc if os.path.exists(proc) else str(path)
+        return sqlite3.connect(f"file:{quote(target)}?immutable=1", uri=True, timeout=0), fd
+    except (OSError, sqlite3.Error, ValueError):
+        os.close(fd)
+        return None
+
+
+def _db_policies(path: Path) -> set[str] | None:
+    """Policy names stored in ``state.db`` (read-only), or ``None`` when it is not usable.
+
+    Usable means a database with a ``meta.schema_version`` row, the same test ``check`` applies
+    (interface.md, Exit codes). Only names that follow the policy-name grammar are returned;
+    anything else in a tampered database is ignored and never printed. The read is bounded in
+    rows and in work.
+    """
+    opened = _connect(path)
+    if opened is None:
+        return None
+    db, fd = opened
     names: set[str] = set()
     steps = 0
 
@@ -209,6 +261,12 @@ def _db_policies(path: Path) -> set[str] | None:
     try:
         db.set_progress_handler(busy, 1000)
         db.execute("PRAGMA trusted_schema=OFF")
+        try:
+            has_schema = db.execute("SELECT 1 FROM meta WHERE key = 'schema_version'").fetchone()
+        except sqlite3.Error:
+            return None
+        if has_schema is None:
+            return None
         for table in ("policy_state", "decisions"):
             try:
                 rows = db.execute(f"SELECT DISTINCT policy FROM {table} LIMIT 5000").fetchall()  # noqa: S608
@@ -221,29 +279,23 @@ def _db_policies(path: Path) -> set[str] | None:
         return None
     finally:
         db.close()
+        if fd is not None:
+            os.close(fd)
     return names
 
 
 def _check_state(loaded: LoadedConfig, state: Path, out: _Out) -> None:
-    db = state / "state.db"
-    try:
-        info = os.stat(db)
-        usable = stat.S_ISREG(info.st_mode) and info.st_size > 0
-    except OSError:
-        usable = False
-    if not usable:
+    stored = _db_policies(state / "state.db")
+    if stored is None:
         # A fresh install has no state.db until the first check: not a problem. With an audit
-        # history next to it, a missing database is the unknown state every other command
-        # refuses (design.md, Error handling), so it is a problem here.
+        # history next to it, a database that is missing, empty or without a schema is the
+        # unknown state every other command refuses (design.md, Error handling).
         if _non_empty_file(state / "audit.jsonl"):
             out.problem(
                 "state_db_missing",
                 "state.db",
-                "state.db is missing or empty but audit.jsonl has records",
+                "state.db is missing, empty or has no schema_version but audit.jsonl has records",
             )
-        return
-    stored = _db_policies(db)
-    if stored is None:
         return
     for name in sorted(stored - set(loaded.policies)):
         out.warning(
@@ -412,12 +464,17 @@ def validate_config(
             )
     _check_deadlines(loaded, out)
 
+    # Taken from the raw config, so a policy that failed to parse still counts: the kind of this
+    # finding must not flip to a warning because of an unrelated mistake in the same policy.
+    any_agent = has_agent or any(
+        e.has_agent_check for e in (*loaded.policies.values(), *loaded.overrides.values())
+    )
     resolved = resolve_session_cmd(loaded.shared.session_cmd, environ=environ)
     if resolved is None:
         message = (
             "session_cmd[0] was not found (an absolute path, or a name in the fixed directories)"
         )
-        if has_agent:
+        if any_agent:
             out.problem("session_cmd_unresolved", "session_cmd", message)
         else:
             out.warning("session_cmd_unresolved", "session_cmd", message)
@@ -434,8 +491,9 @@ def validate_config(
 def _text(report: Report) -> str:
     lines = [f"problem {p.code} {p.path}: {p.message}" for p in report.problems]
     lines += [f"warning {w.code} {w.path}: {w.message}" for w in report.warnings]
-    shown = sanitize(report.session_cmd, 256) if report.session_cmd else "not found"
-    lines.append(f"session_cmd: {shown}")
+    if report.session_cmd_known:
+        shown = sanitize(report.session_cmd, 256) if report.session_cmd else "not found"
+        lines.append(f"session_cmd: {shown}")
     lines.append("invalid" if report.problems else "valid")
     return "\n".join(lines)
 
@@ -445,7 +503,10 @@ def handle(ctx: Context) -> Result:
         loaded = load_config(ctx.config)
     except ConfigInvalidError as exc:
         # The text cannot be parsed: nothing else can be judged, but validate lists it.
-        report = Report(problems=[ConfigProblem("invalid_value", "config", exc.message)])
+        report = Report(
+            problems=[ConfigProblem("invalid_value", "config", exc.message)],
+            session_cmd_known=False,
+        )
     else:
         report = validate_config(loaded, environ=os.environ)
     if getattr(ctx.args, "probe", False) and not report.problems:

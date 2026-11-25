@@ -24,7 +24,7 @@ import pwd
 import re
 import stat
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -593,10 +593,20 @@ class PolicyEntry:
     problems: tuple[ConfigProblem, ...]
     policy: Policy | None = None
     override: PolicyOverride | None = None
+    # Read from the raw body, so it stays true when the entry did not parse (validate uses it
+    # to keep ``session_cmd_unresolved`` a problem whatever else is wrong with the policy).
+    has_agent_check: bool = False
 
 
 def _arith_problem(prefix: tuple[str, ...]) -> ConfigProblem:
     return ConfigProblem("invalid_value", _path(prefix), "invalid value")
+
+
+def _raw_has_agent_check(body: Any) -> bool:
+    checks = body.get("checks") if isinstance(body, dict) else None
+    return isinstance(checks, list) and any(
+        isinstance(c, dict) and c.get("type") == "agent" for c in checks
+    )
 
 
 def _policy_entry(name: str, body: Any, defaults: Defaults) -> PolicyEntry:
@@ -678,7 +688,9 @@ def _build_parts(
     raw_policies = merged.get("policies", {})
     if isinstance(raw_policies, dict):
         for name, body in raw_policies.items():
-            policies[name] = _policy_entry(name, body, defaults)
+            policies[name] = replace(
+                _policy_entry(name, body, defaults), has_agent_check=_raw_has_agent_check(body)
+            )
     else:
         problems.append(_structure_problem(("policies",), "expected a map"))
         raw_policies = {}
@@ -706,7 +718,10 @@ def _build_parts(
             problems.append(_structure_problem(("repos", repo, "policies"), "expected a map"))
             continue
         for name, override_body in by_policy.items():
-            overrides[(repo, name)] = _override_entry(repo, name, override_body, known, defaults)
+            overrides[(repo, name)] = replace(
+                _override_entry(repo, name, override_body, known, defaults),
+                has_agent_check=_raw_has_agent_check(override_body),
+            )
     return policies, overrides, problems
 
 
