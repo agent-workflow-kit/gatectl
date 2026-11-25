@@ -47,6 +47,7 @@ class StuckChild:
         self.signals: list[int] = []
         self.wait_calls = 0
         self.wait_exited_calls = 0
+        self.wait_exited_timeouts: list[float | None] = []
 
     @staticmethod
     def _eof() -> IO[bytes]:
@@ -63,6 +64,7 @@ class StuckChild:
 
     def wait_exited(self, timeout: float | None = None) -> bool:
         self.wait_exited_calls += 1
+        self.wait_exited_timeouts.append(timeout)
         return False
 
     def signal_group(self, sig: int) -> None:
@@ -123,15 +125,19 @@ def test_an_unkillable_leader_is_waited_for_once_not_twice(
     tracker: Tracker, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(runner, "_PARKED", [])
-    monkeypatch.setattr(runner, "_KILL_WAIT", 0.5)
+    monkeypatch.setattr(runner, "_KILL_WAIT", 1.0)
     gw = StuckGateway(tracker)
     t0 = time.monotonic()
     r = run_process(gw, stuck_spec())
     took = time.monotonic() - t0
     assert gw.child is not None and r.leader_unkilled
     assert gw.child.signals == [signal.SIGTERM, signal.SIGKILL]  # no third signal in teardown
-    # timeout 0.2 + grace 0.1 + one kill wait 0.5; a second wait would make it about 1.3
-    assert took < 1.05
+    # Deterministic check: the loop only polls (timeout 0); teardown adds no blocking wait.
+    assert gw.child.wait_exited_calls > 0
+    assert all(not t for t in gw.child.wait_exited_timeouts)
+    # Generous bound: timeout 0.2 + grace 0.1 + one kill wait 1.0 is about 1.3 s; a second
+    # wait would make it about 2.3 s.
+    assert took < 1.8
     tracker.expect_survivor(runner._PARKED[0].pid)
 
 

@@ -5,10 +5,12 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 
 import pytest
 
+from tests import proc_util
 from tests.proc_util import Tracker
 
 PY = sys.executable
@@ -147,3 +149,32 @@ def test_a_pid_recorded_again_for_a_new_process_is_a_separate_record(
     t.expect_survivor(p.pid)
     assert t.teardown() == []
     assert p.wait(timeout=5) == -9
+
+
+def test_a_live_process_with_an_empty_cmdline_is_tracked_and_killed(
+    own: Tracker,
+    bystanders: list[subprocess.Popen[bytes]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    p = sleeper(bystanders)
+    monkeypatch.setattr(proc_util, "_cmdline_of", lambda pid: b"")
+    own.track_pid(p.pid, cmdline_contains=b"tracker-test")
+    assert own.items[0].start is not None  # recorded with an identity, not as dead
+    assert own.alive(p.pid)
+    own.expect_survivor(p.pid)
+    assert own.teardown() == []
+    assert p.wait(timeout=5) == -9
+
+
+def test_a_zombie_with_an_empty_cmdline_is_treated_as_dead(own: Tracker) -> None:
+    p = subprocess.Popen([PY, "-c", "pass"])
+    try:
+        deadline = time.monotonic() + 5
+        while proc_util._state_of(p.pid) != b"Z":  # exited, not yet reaped
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        own.track_pid(p.pid, cmdline_contains=b"anything")
+        assert not own.alive(p.pid)
+        assert own.teardown() == []
+    finally:
+        p.wait()

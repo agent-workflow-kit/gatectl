@@ -47,6 +47,16 @@ def _settled_cmdline(pid: int) -> bytes | None:
     return line
 
 
+def _state_of(pid: int) -> bytes | None:
+    """The one-letter ``/proc`` state (``Z`` for a zombie), or ``None`` when the pid is gone."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            data = f.read()
+    except OSError:
+        return None
+    return data[data.rindex(b")") + 2 :][:1]
+
+
 @dataclass
 class _Tracked:
     pid: int
@@ -94,9 +104,10 @@ class Tracker:
             line = _settled_cmdline(pid)
             if line is not None and line and cmdline_contains not in line:
                 raise AssertionError(f"pid {pid} is not the expected process: {line!r}")
-            if not line:
+            if not line and _state_of(pid) in (None, b"Z"):
                 # Already gone: unreadable, or a zombie (its cmdline reads as empty). Record it
-                # as dead, with no handle to signal.
+                # as dead, with no handle to signal. A live process with an empty cmdline is
+                # recorded normally below, so it is killed and waited for.
                 self.items.append(_Tracked(pid, None, None, False))
                 return
         self._record(pid, False)
