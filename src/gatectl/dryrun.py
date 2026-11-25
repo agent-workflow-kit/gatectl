@@ -31,16 +31,21 @@ from gatectl.scope import resolve_effective, resolve_scope
 
 STDIN_FD = 0
 MAX_TIMEOUT_SECONDS = 86400
-_SECONDS = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+MIN_STDIN_READ_SECONDS = 0.5
+_SECONDS = re.compile(r"(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", re.ASCII)
 
 
 def parse_timeout(text: str | None) -> float | None:
-    """``--timeout``: a plain decimal number of seconds, greater than 0 and at most 86400."""
+    """``--timeout``: an unsigned ASCII decimal (optional fraction and exponent) in (0, 86400]."""
     if text is None:
         return None
-    if _SECONDS.fullmatch(text) is None or not 0 < float(text) <= MAX_TIMEOUT_SECONDS:
-        raise UsageError("invalid --timeout: expected seconds greater than 0 and at most 86400")
-    return float(text)
+    error = UsageError("invalid --timeout: expected seconds greater than 0 and at most 86400")
+    if _SECONDS.fullmatch(text) is None:
+        raise error
+    seconds = float(text)  # an exponent past the float range gives inf, which fails below
+    if not 0 < seconds <= MAX_TIMEOUT_SECONDS:
+        raise error
+    return seconds
 
 
 def applies(conditions: Sequence[Condition], obj: Mapping[str, Any]) -> bool:
@@ -88,10 +93,10 @@ def _plan_check(check: Check, shared: Any, would_run: bool) -> dict[str, Any]:
 
 
 def handle(ctx: Context) -> Result:
+    override = parse_timeout(ctx.args.timeout)
     if not ctx.args.dry_run:
         # TODO(#18): the check engine.
         raise InternalError("command not implemented: check")
-    override = parse_timeout(ctx.args.timeout)
     loaded = load_for_command(ctx.command, ctx.args, ctx.config)
     name: str = ctx.args.policy
     base = loaded.resolve_policy(name)  # unknown or invalid policy: exit 2, before any read
@@ -101,12 +106,20 @@ def handle(ctx: Context) -> Result:
         limit = base.timeout if base.timeout is not None else shared.defaults.timeout
         deadline_s = limit.total_seconds()
 
+    # The deadline bounds only a stdin read (a regular file never blocks), and a short budget
+    # still leaves a usable read window: the record reserve is not a dry run's to spend.
+    reading_stdin = ctx.args.input is None or ctx.args.input == "-"
+    reserve = shared.defaults.record_reserve.total_seconds()
+    read_deadline = (
+        time.monotonic() + max(deadline_s - reserve, MIN_STDIN_READ_SECONDS)
+        if reading_stdin
+        else None
+    )
     raw = inputs.read_input(
         ctx.args.input,
         max_bytes=shared.defaults.input_max_bytes,
         stdin_fd=STDIN_FD,
-        deadline=time.monotonic() + deadline_s,
-        reserve=shared.defaults.record_reserve.total_seconds(),
+        deadline=read_deadline,
     )
     obj: dict[str, Any] | None = None
     if raw.status == "complete":

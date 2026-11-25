@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -455,7 +456,13 @@ def test_warnings_combine_in_a_fixed_order_without_duplicates(
     assert doc["warnings"] == ["repo_mismatch", "config_problem"]
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "abc", "", "86401", "1e999"])
+BAD_TIMEOUTS = [
+    "0", "-1", "nan", "inf", "abc", "", "86401", "1e999", "1_0", "+5", " 5", "5\n", "5 ",
+    "\u0665", "0x5", "1e5", "86400.0000001", ".", "e5", "1e", "NaN", "Infinity", "0.0", "1e-999",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("value", BAD_TIMEOUTS)
 def test_a_bad_timeout_exits_2(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], value: str
 ) -> None:
@@ -476,7 +483,7 @@ def test_a_bad_timeout_exits_2(
     assert code == 2 and payload(out)["error"]["code"] == "usage"
 
 
-@pytest.mark.parametrize("value", ["0.5", "60", "86400"])
+@pytest.mark.parametrize("value", ["0.5", "60", "86400", "5", ".5", "5.", "1e2", "00005", "1E2"])
 def test_a_good_timeout_is_accepted(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], value: str
 ) -> None:
@@ -611,3 +618,113 @@ def test_the_plan_is_golden(
     )
     assert code == 0
     golden.assert_output("check-dry-run", out)
+
+
+def test_a_bad_timeout_without_dry_run_exits_2_before_not_implemented(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = cfg(tmp_path, {"p": MIXED})
+    code, out, _ = run(capsys, ["check", "p", "--config", config, "--timeout", "abc"])
+    assert code == 2 and payload(out)["error"]["code"] == "usage"
+
+
+def test_a_two_second_timeout_still_reads_a_valid_input_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    src = input_file(tmp_path, {"repo": REPO})
+    _, doc, _ = plan(capsys, cfg(tmp_path, {"p": MIXED}), "p", "--timeout", "2", "--input", src)
+    assert doc["input_valid"] is True and doc["scope"] == REPO
+
+
+def test_a_two_second_timeout_still_reads_available_stdin(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    read_end, write_end = os.pipe()
+    os.write(write_end, b'{"repo":"' + REPO.encode() + b'"}')
+    os.close(write_end)
+    monkeypatch.setattr(dryrun, "STDIN_FD", read_end)
+    try:
+        _, doc, _ = plan(capsys, cfg(tmp_path, {"p": MIXED}), "p", "--timeout", "2")
+    finally:
+        os.close(read_end)
+    assert doc["input_valid"] is True and doc["scope"] == REPO
+
+
+def spy_read_input(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    real = dryrun.inputs.read_input
+
+    def spy(source: Any, **kwargs: Any) -> Any:
+        calls.append({"source": source, **kwargs})
+        return real(source, **kwargs)
+
+    monkeypatch.setattr(dryrun.inputs, "read_input", spy)
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("flag", "policy_timeout", "default", "expected"),
+    [
+        ("30", "20s", "10s", 30.0),
+        (None, "20s", "10s", 20.0),
+        (None, None, "10s", 10.0),
+    ],
+)
+def test_the_stdin_deadline_follows_timeout_then_policy_then_default(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    flag: str | None,
+    policy_timeout: str | None,
+    default: str,
+    expected: float,
+) -> None:
+    calls = spy_read_input(monkeypatch)
+    extra = {"timeout": policy_timeout} if policy_timeout else {}
+    config = cfg(tmp_path, {"p": {**MIXED, **extra}}, defaults={"timeout": default})
+    read_end, write_end = os.pipe()
+    os.write(write_end, b"{}")
+    os.close(write_end)
+    monkeypatch.setattr(dryrun, "STDIN_FD", read_end)
+    args = ["--timeout", flag] if flag else []
+    try:
+        plan(capsys, config, "p", *args)
+    finally:
+        os.close(read_end)
+    # The read window is the budget minus the 2 s record reserve.
+    left = calls[0]["deadline"] - time.monotonic()
+    assert expected - 2 - 1 < left <= expected - 2
+
+
+def test_a_file_input_read_has_no_deadline(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = spy_read_input(monkeypatch)
+    src = input_file(tmp_path, {})
+    plan(capsys, cfg(tmp_path, {"p": MIXED}), "p", "--timeout", "1", "--input", src)
+    assert calls[0]["deadline"] is None
+
+
+def test_a_stalled_stdin_with_a_tiny_timeout_is_input_invalid_quickly(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    read_end, write_end = os.pipe()  # the write end stays open: nothing arrives, no EOF
+    monkeypatch.setattr(dryrun, "STDIN_FD", read_end)
+    started = time.monotonic()
+    try:
+        code, doc, _ = plan(capsys, cfg(tmp_path, {"p": MIXED}), "p", "--timeout", "0.01")
+    finally:
+        os.close(read_end)
+        os.close(write_end)
+    assert code == 0 and doc["input_valid"] is False and doc["scope"] == "*"
+    assert time.monotonic() - started < 5
+
+
+def test_an_over_long_argv_element_ends_with_one_ellipsis_within_1024_characters(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = cfg(tmp_path, {"p": {"checks": [script("s", ["/bin/tool", "x" * 5000, "y" * 1024])]}})
+    _, doc, _ = plan(capsys, config, "p", "--input", input_file(tmp_path, {}))
+    long, exact = doc["checks"][0]["argv"][1:]
+    assert len(long) == 1024 and long == "x" * 1023 + "\u2026"
+    assert exact == "y" * 1024

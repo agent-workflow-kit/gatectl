@@ -7,6 +7,7 @@ carry control characters or markup), so every string built here goes through the
 from __future__ import annotations
 
 import json
+import shlex
 from collections.abc import Sequence
 from datetime import timedelta
 
@@ -57,7 +58,14 @@ def agent_skill(check: AgentCheck, shared: SharedConfig) -> str:
 
 def script_argv(check: ScriptCheck) -> list[str]:
     """The argv for display: each element sanitized and cut."""
-    return [sanitize(a, ARGV_ELEMENT_CAP) for a in check.argv]
+    return [_display_element(a) for a in check.argv]
+
+
+def _display_element(element: str) -> str:
+    """Sanitized, and at most ``ARGV_ELEMENT_CAP`` characters with a final ``…`` when cut."""
+    if len(element) <= ARGV_ELEMENT_CAP:
+        return sanitize(element, ARGV_ELEMENT_CAP)
+    return sanitize(element, ARGV_ELEMENT_CAP - 1) + "\u2026"
 
 
 def _condition(condition: Condition) -> str:
@@ -74,7 +82,7 @@ def conditions_summary(conditions: Sequence[Condition]) -> str:
 def summarize(check: Check, shared: SharedConfig) -> str:
     """One line: the argv of a script, the conditions of a rule, or the skill of an agent."""
     if isinstance(check, ScriptCheck):
-        text = " ".join(check.argv)
+        text = " ".join(shlex.quote(a) for a in check.argv)
     elif isinstance(check, RuleCheck):
         text = f"{conditions_summary(check.when)} then {check.then} else {check.else_}"
     else:

@@ -82,7 +82,7 @@ def test_checks_are_summarized_in_execution_order(
         ("ru", "rule"),
         ("ai", "agent"),
     ]
-    assert checks[0]["summary"] == "/bin/tool --flag x y"
+    assert checks[0]["summary"] == "/bin/tool --flag 'x y'"
     assert checks[1]["summary"] == 'ci == "green" then deny else allow'
     assert checks[2]["summary"] == "skill gatectl:gate-check"
 
@@ -328,3 +328,22 @@ def test_the_output_is_golden(
     assert code == 0
     golden.assert_output("policies-static", out)
     assert json.loads(out)["policies"][0]["name"] == "auto-merge"
+
+
+def test_script_summaries_do_not_collide_for_spaced_elements(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = cfg(
+        tmp_path,
+        {
+            "p": {
+                "checks": [
+                    script("one", ["/bin/true", "a b"]),
+                    script("two", ["/bin/true", "a", "b"]),
+                ]
+            }
+        },
+    )
+    _, doc, _ = view(capsys, config)
+    summaries = [c["summary"] for c in doc["policies"][0]["checks"]]
+    assert summaries == ["/bin/true 'a b'", "/bin/true a b"]
