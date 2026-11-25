@@ -249,3 +249,59 @@ def test_env_is_read_from_os_environ_by_default(
     path = write(tmp_path / "c.yaml", {})
     monkeypatch.setenv("GATECTL_DEFAULTS__TIMEOUT", "4s")
     assert load_config(str(path)).shared.defaults.timeout == timedelta(seconds=4)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "GATECTL_HOOKS__POST-DECISION",
+        "GATECTL_AGENT__timeout",
+        "GATECTL_agent__TIMEOUT",
+        "GATECTL_Defaults__Timeout",
+        "GATECTL_AGENT__SAND-BOX",
+        "GATECTL_AGENT__SANDBOX ",
+        "GATECTL_AGENT__TIME.OUT",
+        "GATECTL_AGENT__É",
+        "GATECTL_ME__name",
+        "GATECTL_agent",
+    ],
+)
+def test_unlisted_names_are_flagged_whatever_their_characters(tmp_path: Path, name: str) -> None:
+    c = load(tmp_path, {}, environ={name: "0s"})
+    base = load(tmp_path, {})
+    (problem,) = c.shared_problems
+    assert problem.code == "invalid_value"
+    assert "environment" in problem.message
+    assert c.shared == base.shared  # nothing was applied
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "GATECTL_AGENT-TIMEOUT",
+        "GATECTL_agent_timeout",
+        "GATECTL_AGENTS__timeout",
+        "GATECTL_HOOK-X",
+        "GATECTL_HOOKS-X__Y",
+        "GATECTL_ſ",
+        "GATECTL_KOOKS__X",  # Kelvin sign is not an ASCII K
+        "GATECTL_",
+    ],
+)
+def test_names_with_no_section_stay_ignored(tmp_path: Path, name: str) -> None:
+    c = load(tmp_path, {}, environ={name: "0s"})
+    assert c.shared_problems == ()
+
+
+def test_hostile_names_and_values_never_reach_a_message(tmp_path: Path) -> None:
+    names = [
+        f"GATECTL_HOOKS__{CANARY}-x",
+        f"GATECTL_agent__{CANARY}\n\x1b[31m",
+        f"GATECTL_policies__{CANARY.lower()}‮",
+    ]
+    c = load(tmp_path, {}, environ={n: CANARY for n in names})
+    assert len(c.shared_problems) == 3
+    for p in c.shared_problems:
+        assert CANARY not in p.message and CANARY.lower() not in p.message
+        assert "\x1b" not in p.message and "\n" not in p.message
+        assert "\x1b" not in p.path and "\n" not in p.path and "‮" not in p.path
