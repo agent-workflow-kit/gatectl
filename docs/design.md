@@ -106,7 +106,8 @@ Still to verify: a live sandbox containment attack, the lifeline watchdog handsh
 | Module | Responsibility |
 |---|---|
 | `cli.py` | argparse, exit codes, human and JSON output |
-| `config.py` | file reading and the closed YAML loader, drop-in merge, environment overrides, per-part validation, policy resolution with overrides, `session_cmd` resolution, the fingerprint (later issue) |
+| `config.py` | file reading and the closed YAML loader, drop-in merge, environment overrides, per-part validation, policy resolution with overrides, `session_cmd` resolution |
+| `fingerprint.py` | the normalized effective definition and its fingerprint: file hashing (regular files only, opened without blocking, streamed, capped, the `unreadable` marker), plugin and skill lookup for the hashes |
 | `config_models.py` | the Pydantic models (strict, closed, every default and range of the config table) and the glob tokenizer |
 | `engine.py` | one `check`: input validation, scope and state, ordering, deadline, combination |
 | `runner.py` | the script runner: selector loop, process group, output caps, lifeline watchdog |
