@@ -335,3 +335,36 @@ def test_the_state_directory_is_left_without_tmp_residue(
     do_check(capsys, config, "p", "--input", write_input(tmp_path, {}))
     assert sorted(p.name for p in (sdir / "tmp").iterdir()) == []
     assert os.path.exists(sdir / "state.db")
+
+
+def test_a_leftover_tmp_directory_is_logged_and_never_changes_the_verdict(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gatectl import tmptree
+
+    def refuse(path: object) -> None:
+        raise tmptree.UnsafeTree("refused")
+
+    monkeypatch.setattr(tmptree, "remove_tree", refuse)
+    config = cfg(tmp_path, [sc("s", make_script(tmp_path, "ok", ALLOW))])
+    code, doc, _ = do_check(capsys, config, "p", "--input", write_input(tmp_path, {}))
+    assert code == 0 and doc["decision"] == "allow"
+    events = log_lines(sdir)
+    assert {e["message"] for e in events} == {"workdir_left"}
+    assert all(e["event"] == "warning" and e["decision_id"] == doc["decision_id"] for e in events)
+
+
+def test_a_runner_that_raises_is_an_escalation_with_a_warning_not_a_crash(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gatectl import runner
+
+    def bug(*_: Any, **__: Any) -> None:
+        raise ValueError("bad env_allow")
+
+    monkeypatch.setattr(runner, "run_script_check", bug)
+    config = cfg(tmp_path, [sc("s", make_script(tmp_path, "ok", ALLOW))])
+    code, doc, _ = do_check(capsys, config, "p", "--input", write_input(tmp_path, {}))
+    assert code == 0 and (doc["decision"], doc["reason"]) == ("escalate", "check_error")
+    assert doc["checks"][0]["detail"] == "not started"
+    assert [e["event"] for e in log_lines(sdir)] == ["warning"]
