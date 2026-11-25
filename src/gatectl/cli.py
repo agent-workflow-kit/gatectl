@@ -7,7 +7,8 @@ import json
 import os
 import re
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from dataclasses import replace
 from typing import Any, NoReturn
 
 from gatectl import __version__, commands, errors, ids, scope
@@ -139,8 +140,9 @@ def render_json(payload: Mapping[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n"
 
 
-def _write(stream: Any, text: str) -> None:
+def _write(stream: Any, text: str) -> bool:
     """Write and flush; a closed, broken or full stream is ignored so the exit code survives.
+    False when the write failed.
 
     After a failed write the stream's file descriptor is pointed at ``/dev/null`` so the flush of
     the interpreter's shutdown stays quiet and cannot turn the exit code into 120.
@@ -150,6 +152,8 @@ def _write(stream: Any, text: str) -> None:
         stream.flush()
     except (OSError, ValueError, AttributeError):  # AttributeError: the stream is None (closed fd)
         _silence(stream)
+        return False
+    return True
 
 
 def _silence(stream: Any) -> None:
@@ -261,13 +265,30 @@ def main(argv: list[str] | None = None) -> int:
     try:
         ctx = _context(ns)
         result = commands.dispatch(ctx)
+        return _emit(result, json_mode=ctx.json or is_check)
     except Exception as exc:  # the envelope hides the text of anything that is not ours
         return _error_exit(exc, json_mode=ns.json, is_check=is_check, policy=policy)
-    return _emit(result, json_mode=ctx.json or is_check)
+
+
+def _stream(chunks: Iterator[str]) -> None:
+    """Write a streamed result chunk by chunk; stop (and close the source) at a failed write.
+    An error the source raises propagates: what was written stays, the envelope follows."""
+    try:
+        for chunk in chunks:
+            if not _write(sys.stdout, chunk):
+                break
+    finally:
+        close = getattr(chunks, "close", None)
+        if close is not None:
+            close()
 
 
 def _emit(result: Result, *, json_mode: bool) -> int:
-    if result.payload is not None and (json_mode or result.text is None):
+    if result.stream is not None:
+        _stream(result.stream)
+        if result.stderr_after is not None:
+            result = replace(result, stderr=result.stderr_after() or result.stderr)
+    elif result.payload is not None and (json_mode or result.text is None):
         _write(sys.stdout, render_json(result.payload))
     elif result.text is not None:
         _write(sys.stdout, result.text + "\n")

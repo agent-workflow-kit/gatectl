@@ -582,6 +582,15 @@ class Store:
         )
         return found[0] if found else None
 
+    def query(self, sql: str, args: Sequence[object] = ()) -> list[tuple[Any, ...]]:
+        """Run one read statement and return its rows. For the read-only history commands: the
+        caller passes only fixed SQL text and bound parameters; a SQLite failure is a fixed-text
+        error (never the driver's text, which can echo content)."""
+        try:
+            return self.con.execute(sql, args).fetchall()
+        except sqlite3.Error as exc:
+            raise _translate(exc) from None
+
     def has_policy(self, policy: str) -> bool:
         """Whether ``policy`` has a stored row or a recorded decision (a removed policy is known
         to ``set`` only through this)."""

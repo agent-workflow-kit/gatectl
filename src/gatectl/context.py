@@ -7,7 +7,7 @@ importing the command table (which imports the handler modules).
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -40,3 +40,8 @@ class Result:
     text: str | None = None
     exit_code: int = 0
     stderr: str | None = None
+    # A result too large to hold (``export``): chunks of stdout text, written as they come. The
+    # handler still never prints; the dispatcher writes each chunk and stops at a closed pipe.
+    # ``stderr_after`` runs once the stream ends and may give the one stderr line.
+    stream: Iterator[str] | None = None
+    stderr_after: Callable[[], str | None] | None = None

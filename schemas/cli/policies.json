@@ -40,8 +40,15 @@
                   "$ref": "../defs.json#/$defs/cause"
                 },
                 "fingerprint": {
-                  "$ref": "../defs.json#/$defs/fingerprint",
-                  "description": "The fingerprint of the scope's effective definition when the row was written."
+                  "oneOf": [
+                    {
+                      "$ref": "../defs.json#/$defs/fingerprint"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "The fingerprint of the scope's effective definition when the row was written; null when the row was written for a scope with no computable definition (a removed or invalid policy, off or shadow only)."
                 },
                 "definition_changed": {
                   "type": "boolean",
@@ -69,6 +76,28 @@
           },
           "effective_state": {
             "$ref": "../defs.json#/$defs/state"
+          },
+          "effective_cause": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/cause"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The cause of the stored row that decides effective_state (set, or miss for an automatic drop); null when the state is the policy's initial state."
+          },
+          "effective_set_at": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/ts"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The set_at of that row; null when the state is the policy's initial state."
           },
           "fingerprint": {
             "$ref": "../defs.json#/$defs/fingerprint"
@@ -111,6 +140,8 @@
           "initial_state",
           "scopes",
           "effective_state",
+          "effective_cause",
+          "effective_set_at",
           "fingerprint",
           "checks",
           "records"
