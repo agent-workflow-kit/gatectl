@@ -10,7 +10,7 @@ import sys
 from collections.abc import Mapping
 from typing import Any, NoReturn
 
-from gatectl import __version__, commands, errors, ids
+from gatectl import __version__, commands, errors, ids, scope
 from gatectl.commands import CommandSpec, Context, Result
 from gatectl.sanitize import sanitize
 
@@ -115,6 +115,8 @@ def _context(ns: argparse.Namespace) -> Context:
     )
     if ns.actor is not None:
         ids.parse_actor(ns.actor)
+    if hasattr(ns, "repo"):
+        scope.check_repo_flag(ns.command, ns.repo)
     own = {k: v for k, v in vars(ns).items() if k not in _GLOBAL_DESTS and k != "command"}
     return Context(
         command=ns.command,
