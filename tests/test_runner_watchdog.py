@@ -161,6 +161,7 @@ def decoy_group(tracker: Tracker) -> tuple[int, str]:
         close_fds=True,
     )
     tracker.track_child(p.pid)
+    tracker.expect_survivor(p.pid)  # most tests show it was left alone; teardown kills it
     stat = Path(f"/proc/{p.pid}/stat").read_bytes()
     return p.pid, stat[stat.rindex(b")") + 2 :].split()[19].decode()
 

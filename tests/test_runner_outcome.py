@@ -264,9 +264,9 @@ def test_hostile_early_exit_with_a_big_stdin(tracker: Tracker) -> None:
     "stdout_code",
     [
         "sys.stdout.buffer.write(b'\\xff\\xfe{\"reason\": 1}')",
-        "sys.stdout.write('{\"reason\": \"a\", \"reason\": \"b\"}')",
+        'sys.stdout.write(\'{"reason": "a", "reason": "b"}\')',
         "sys.stdout.write('[' * 100000)",
-        "sys.stdout.write('{\"reason\": \"x\\\\u0000\\\\u001b[0m\"}')",
+        'sys.stdout.write(\'{"reason": "x\\\\u0000\\\\u001b[0m"}\')',
     ],
 )
 def test_hostile_stdout_shapes_still_follow_the_exit_code(
@@ -305,8 +305,10 @@ def test_hostile_grandchild_ignoring_sigterm_escalates_and_leaves_nothing(
 def test_environment_reaches_the_check_exactly(tracker: Tracker) -> None:
     code = (
         "import json, os, sys\n"
-        "print(json.dumps({'reason': json.dumps(sorted(os.environ))}))\n"
+        "names = sorted(k for k in os.environ if k != 'LC_CTYPE')\n"
+        "print(json.dumps({'reason': json.dumps(names)}))\n"
         "sys.exit(11)"
     )
+    # (Python itself adds LC_CTYPE when it coerces a C locale; it is not inherited from us.)
     o = go(tracker, code, env={"ONLY": "this"})
     assert o.detail is not None and json.loads(o.detail) == ["ONLY"]

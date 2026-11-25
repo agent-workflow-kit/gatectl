@@ -42,7 +42,9 @@ def test_a_second_call_reuses_the_directory_and_keeps_the_owner(tmp_path: Path) 
     assert (d / "owner").read_bytes() == before
 
 
-@pytest.mark.parametrize("bad", ["", "..", "../x", "gd-ABC", "gd-abcdefghijk", "x/y", "gd-abcdefghijkl/"])
+@pytest.mark.parametrize(
+    "bad", ["", "..", "../x", "gd-ABC", "gd-abcdefghijk", "x/y", "gd-abcdefghijkl/"]
+)
 def test_a_decision_id_that_is_not_one_is_refused(tmp_path: Path, bad: str) -> None:
     with pytest.raises(ValueError, match="decision id"):
         create_decision_dir(tmp_path, bad)

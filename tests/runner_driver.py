@@ -17,6 +17,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from gatectl.gateway import SubprocessGateway
@@ -49,6 +50,13 @@ def on_phase(phase: str, check_pid: int, watchdog_pid: int) -> None:
     write(f"phase.{phase}", 1)
     if phase != kill_phase:
         return
+    if phase == "started":
+        # Let the check fork its grandchild first, so the test has a pid to watch die.
+        give_up = time.monotonic() + 10
+        while time.monotonic() < give_up and not all(
+            (directory / n).exists() for n in ("gc", "leader")
+        ):
+            time.sleep(0.01)
     if phase in ("swept", "done_sent"):
         decoy = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)", f"decoy{directory}"],

@@ -341,13 +341,17 @@ def test_callers_descriptors_are_never_inherited(tracker: Tracker, tmp_path: Pat
     f = open(tmp_path / "held", "w")  # noqa: SIM115
     os.set_inheritable(f.fileno(), True)
     try:
-        code = "import os; print(sorted(int(x) for x in os.listdir('/proc/self/fd')))"
+        code = (
+            "import json, os\n"
+            "fds = os.listdir('/proc/self/fd')\n"
+            "print(json.dumps({int(f): os.path.realpath('/proc/self/fd/' + f) for f in fds}))"
+        )
         r = run(tracker, spec(code))
     finally:
         f.close()
     fds = json.loads(r.stdout.decode())
-    # 0, 1, 2 and the descriptor listdir itself opened; the held one is not among them.
-    assert len([fd for fd in fds if fd > 2]) <= 1
+    # (Some interpreters keep an fd of their own open, so the test names the file, not a count.)
+    assert os.path.realpath(tmp_path / "held") not in fds.values()
 
 
 def test_environment_is_exactly_what_was_given(tracker: Tracker) -> None:
@@ -405,9 +409,7 @@ def test_executable_without_shebang_or_format_is_tool_missing(
     assert run(tracker, spec("", argv=(str(f),))).status == "tool_missing"
 
 
-def test_shebang_to_a_missing_interpreter_is_tool_missing(
-    tracker: Tracker, tmp_path: Path
-) -> None:
+def test_shebang_to_a_missing_interpreter_is_tool_missing(tracker: Tracker, tmp_path: Path) -> None:
     f = tmp_path / "s"
     f.write_text("#!/nonexistent/interp\n")
     f.chmod(0o755)
@@ -415,9 +417,7 @@ def test_shebang_to_a_missing_interpreter_is_tool_missing(
 
 
 @pytest.mark.parametrize("argv0", ["sh", "./x", "bin/x", ""])
-def test_relative_argv0_is_refused_and_never_searched_on_path(
-    tracker: Tracker, argv0: str
-) -> None:
+def test_relative_argv0_is_refused_and_never_searched_on_path(tracker: Tracker, argv0: str) -> None:
     gw = tracker.gateway()
     with pytest.raises(ValueError, match="absolute"):
         run_process(gw, spec("", argv=(argv0, "a")))

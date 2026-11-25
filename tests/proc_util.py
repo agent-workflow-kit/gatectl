@@ -70,8 +70,12 @@ class Tracker:
         """Record a descendant a hostile script reported. ``cmdline_contains`` guards reuse."""
         if cmdline_contains is not None:
             line = _cmdline_of(pid)
-            if line is None or cmdline_contains not in line:
+            if line is not None and cmdline_contains not in line:
                 raise AssertionError(f"pid {pid} is not the expected process: {line!r}")
+            if line is None:
+                # Already gone (the runner is fast): record it as dead, with no handle to signal.
+                self.items.append(_Tracked(pid, None, None, False))
+                return
         self._record(pid, False)
 
     def expect_survivor(self, pid: int) -> None:
