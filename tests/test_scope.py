@@ -63,6 +63,12 @@ ROWS: list[tuple[str | None, dict[str, Any] | None, str, bool, tuple[str, ...]]]
 ]
 
 
+@pytest.mark.parametrize("payload", [[], [A], "x", A, 5, True, False, 1.5])
+def test_a_non_mapping_payload_is_unusable(payload: Any) -> None:
+    assert resolve_scope(None, payload) == Scope("*", True, ())
+    assert resolve_scope(A, payload) == Scope(A, False, ())
+
+
 @pytest.mark.parametrize(("flag", "payload", "scope", "indeterminate", "warnings"), ROWS)
 def test_scope_rows(
     flag: str | None,
@@ -277,6 +283,13 @@ def test_an_indeterminate_scope_never_applies_a_repo_override(tmp_path: Path) ->
     c = _config(tmp_path)
     got = resolve_effective(c, "p", resolve_scope(None, {"repo": A + "/"}))
     assert got.indeterminate and got.overridden is False
+    assert got.policy == c.resolve_policy("p")
+
+
+def test_a_hand_built_indeterminate_repo_scope_never_applies_an_override(tmp_path: Path) -> None:
+    c = _config(tmp_path)
+    got = resolve_effective(c, "p", Scope(A, True, ()))
+    assert got.overridden is False
     assert got.policy == c.resolve_policy("p")
 
 

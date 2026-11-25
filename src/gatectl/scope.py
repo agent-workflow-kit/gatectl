@@ -53,13 +53,16 @@ class Scope:
     warnings: tuple[str, ...]
 
 
-def resolve_scope(repo_flag: str | None, payload: Mapping[str, Any] | None) -> Scope:
+def resolve_scope(repo_flag: str | None, payload: Any) -> Scope:
     """Resolve the scope from a validated ``--repo`` and the parsed input.
 
-    ``payload`` is the parsed input object, or ``None`` when the input is unusable (over the cap,
-    not a strict JSON object, or not fully read by the deadline). ``repo_flag`` must already have
-    passed ``check_repo_flag`` (a flag of ``*`` never reaches ``check``).
+    ``payload`` is the parsed input object. It is unusable, and treated exactly like ``None``,
+    when it is ``None`` or any non-mapping value (list, string, number, bool), e.g. the input was
+    over the cap, not a strict JSON object, or not fully read by the deadline. ``repo_flag`` must
+    already have passed ``check_repo_flag`` (a flag of ``*`` never reaches ``check``).
     """
+    if not isinstance(payload, Mapping):
+        payload = None
     present = payload is not None and payload.get("repo") is not None
     value = payload.get("repo") if payload is not None else None
     valid = present and isinstance(value, str) and ids.is_repo_id(value)
@@ -103,7 +106,7 @@ def resolve_effective(config: LoadedConfig, name: str, scope: Scope) -> Effectiv
     config error (exit 2). Only this policy and this scope's override are consulted. The
     override is looked up by exact repo id, and never for ``*``.
     """
-    repo = None if scope.scope == STAR else scope.scope
+    repo = None if scope.indeterminate or scope.scope == STAR else scope.scope
     policy = config.resolve_policy(name, repo=repo)
     overridden = repo is not None and (repo, name) in config.overrides
     return Effective(policy, scope.scope, scope.indeterminate, overridden, scope.warnings)
