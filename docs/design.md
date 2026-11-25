@@ -134,7 +134,7 @@ Dependencies: `pyyaml` (the stdlib cannot read YAML; used only through a `SafeLo
 
 | Table | Holds |
 |---|---|
-| `meta` | `meta(key TEXT PRIMARY KEY, value TEXT)`, one row per key: `schema_version`, `probe_ok_at`, `probe_agent_hash`, the `state_rev` counter, the `lease:reconcile` and `lease:prune` rows (holder PID, start time, boot id) |
+| `meta` | `meta(key TEXT PRIMARY KEY, value TEXT)`, one row per key: `schema_version`, `probe_ok_at`, `probe_agent_hash` (`sha256:<hex>` over the canonical JSON of `{agent, session_cmd, version}`, from `agenthash.agent_config_hash`), the `state_rev` counter, the `lease:reconcile` and `lease:prune` rows (holder PID, start time, boot id) |
 | `policy_state` | `(policy, scope)` primary key, `state`, `set_by`, `set_at`, `cause` (`set` or `miss`), `fingerprint` (of the scope's own definition when the row was written), `rev` (from the store-wide counter) |
 | `decisions` | `id`, `time`, `policy`, scope, fingerprint, effective state, decision, reason, `tool`, `hook`, `object_type`, `object_id`, `repo`, `input_sha256`, `case_key` (a hash taken at record time), `state_rev` (the `rev` of the row that gave the decision its state, null for the config's initial state or an indeterminate scope), declared fields (JSON), per-check results (JSON), actor, optional full input |
 | `outcomes` | append-only, with an autoincrement `seq` that orders them: decision id, time, outcome, signal, actor, actor kind, capped reason |

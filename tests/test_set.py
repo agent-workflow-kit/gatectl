@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from gatectl import audit, store
+from gatectl import audit, setcmd, store
 from gatectl.errors import InternalError
 from tests import golden, schema_util
 from tests.command_util import run
@@ -314,7 +316,7 @@ def test_a_failed_audit_line_rolls_back_every_row_of_all(
 
     def flaky(fd: int, data: bytes) -> int:
         calls["n"] += 1
-        if calls["n"] == 2:
+        if calls["n"] == 1:
             raise OSError(28, "no space")
         return real(fd, data)
 
@@ -366,10 +368,12 @@ def test_a_removed_policy_can_be_lowered_but_not_enforced(
     seed(state_dir, "gone", REPO, "enforced")
     code, doc, _ = do_set(capsys, config, "gone", "shadow")
     assert code == 0 and doc["changed"] is True and doc["scopes_changed"] == ["*"]
-    assert row(state_dir, "gone", "*").fingerprint == MARKER  # type: ignore[union-attr]
+    stored = row(state_dir, "gone", "*")
+    assert stored is not None and stored.fingerprint == MARKER
     code, doc, _ = do_set(capsys, config, "gone", "off", "--all")
     assert code == 0 and doc["scopes_changed"] == ["*", REPO]
-    assert row(state_dir, "gone", REPO).fingerprint == MARKER  # type: ignore[union-attr]
+    stored = row(state_dir, "gone", REPO)
+    assert stored is not None and stored.fingerprint == MARKER
     before = rows(state_dir, "gone")
     code, doc, _ = do_set(capsys, config, "gone", "enforced", *HUMAN)
     assert code == 2 and doc["error"]["code"] == "usage"
@@ -414,7 +418,8 @@ def test_an_invalid_policy_can_still_be_lowered_but_not_enforced(
     config = make_config(tmp_path, {"p": {"timeout": "0s", "checks": [RULE_POLICY["checks"][0]]}})
     code, doc, _ = do_set(capsys, config, "p", "off", "--all")
     assert code == 0 and doc["changed"] is True
-    assert row(state_dir, "p", "*").fingerprint == MARKER  # type: ignore[union-attr]
+    stored = row(state_dir, "p", "*")
+    assert stored is not None and stored.fingerprint == MARKER
     code, _, _ = do_set(capsys, config, "p", "enforced", *HUMAN)
     assert code == 2
 
@@ -628,8 +633,6 @@ def test_a_reason_from_stdin_is_read_and_a_stalled_stdin_is_a_usage_error(
 ) -> None:
     import os
 
-    from gatectl import setcmd
-
     config = make_config(tmp_path)
     r, w = os.pipe()
     try:
@@ -649,7 +652,8 @@ def test_a_reason_from_stdin_is_read_and_a_stalled_stdin_is_a_usage_error(
         monkeypatch.setattr(setcmd, "REASON_WAIT_SECONDS", 0.2)
         code, _, _ = do_set(capsys, config, "p", "off", "--reason-file", "-")
         assert code == 2
-        assert row(state_dir, "p", "*").state == "shadow"  # type: ignore[union-attr]
+        stored = row(state_dir, "p", "*")
+        assert stored is not None and stored.state == "shadow"
     finally:
         os.close(r)
         os.close(w)
@@ -678,3 +682,130 @@ def test_the_store_is_a_real_database_after_a_set(
     assert s is not None
     with s:
         assert s.schema_version() == store.latest_version()
+
+
+def test_a_failed_all_leaves_no_audit_line_for_a_rolled_back_row(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_config(tmp_path)
+    seed(state_dir, "p", "*", "enforced")
+    seed(state_dir, "p", REPO, "enforced")
+    real = audit.encode_line
+    calls = {"n": 0}
+
+    def flaky(record: Mapping[str, Any], **kw: bool) -> bytes:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise ValueError("unencodable")
+        return real(record, **kw)
+
+    monkeypatch.setattr(audit, "encode_line", flaky)
+    code, doc, _ = do_set(capsys, config, "p", "off", "--all")
+    assert code == 1 and doc["error"]["code"] == "internal"
+    assert audit_lines(state_dir) == []
+    assert {r.state for r in rows(state_dir, "p").values()} == {"enforced"}
+
+
+def test_the_audit_lines_are_appended_inside_the_transaction(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_config(tmp_path)
+    seen: list[bool] = []
+    real = store.Store.append_audit_many
+
+    def spy(self: store.Store, records: Sequence[Mapping[str, Any]]) -> None:
+        seen.append(self.con.in_transaction)
+        real(self, records)
+
+    monkeypatch.setattr(store.Store, "append_audit_many", spy)
+    code, _, _ = do_set(capsys, config, "p", "shadow")
+    assert code == 0 and seen == [True]
+
+
+def test_the_set_time_is_taken_inside_the_transaction(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_config(tmp_path)
+    events: list[str] = []
+    real_begin = store.Store._begin
+    real_now = setcmd.now_ts
+
+    def begin(self: store.Store) -> None:
+        events.append("begin")
+        real_begin(self)
+
+    def now() -> str:
+        events.append("now")
+        return real_now()
+
+    monkeypatch.setattr(store.Store, "_begin", begin)
+    monkeypatch.setattr(setcmd, "now_ts", now)
+    code, _, _ = do_set(capsys, config, "p", "shadow")
+    assert code == 0
+    assert events.index("now") > events.index("begin")
+
+
+def test_all_refuses_a_partial_set_past_the_row_limit(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_config(tmp_path)
+    seed(state_dir, "p", "*", "enforced")
+    seed(state_dir, "p", REPO, "enforced")
+    seed(state_dir, "p", OTHER, "enforced")
+    monkeypatch.setattr(store, "_ROW_LIMIT", 3)
+    code, doc, _ = do_set(capsys, config, "p", "off", "--all")
+    assert code == 1 and doc["error"]["code"] == "internal"
+    assert {r.state for r in rows(state_dir, "p").values()} == {"enforced"}
+    assert audit_lines(state_dir) == []
+
+
+def test_a_stdin_closed_at_launch_reads_as_empty_and_is_valid_afterwards(
+    tmp_path: Path, state_dir: Path
+) -> None:
+    import os
+    import subprocess
+    import sys
+
+    config = make_config(tmp_path)
+    script = (
+        "import os, sys\n"
+        "from gatectl.cli import main\n"
+        "code = main(sys.argv[1:])\n"
+        "os.fstat(0)\n"  # descriptor 0 must be valid, not free for any later open
+        "sys.exit(code)\n"
+    )
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "XDG_CONFIG_HOME": str(tmp_path / "home" / "config"),
+        "XDG_STATE_HOME": str(tmp_path / "home" / "state"),
+        "PATH": os.environ.get("PATH", ""),
+        "LC_ALL": "C",
+    }
+    argv = [sys.executable, "-I", "-c", script]
+    argv += ["set", "p", "off", "--reason-file", "-", "--config", config, "--json"]
+
+    def close_stdin() -> None:
+        os.close(0)
+
+    proc = subprocess.run(  # noqa: S603
+        argv,
+        capture_output=True,
+        env={**env, "PYTHONPATH": os.pathsep.join(sys.path)},
+        preexec_fn=close_stdin,  # noqa: PLW1509
+        timeout=60,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert audit_lines(state_dir)[0]["result"]["reason"] is None

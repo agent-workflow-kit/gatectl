@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from tests.set_util import audit_lines, isolate, make_config, rows
+from tests.set_util import REPO, audit_lines, isolate, make_config, rows
 
 
 @pytest.fixture(autouse=True)
@@ -57,13 +57,30 @@ def test_opposing_sets_leave_a_consistent_chain(tmp_path: Path, state_dir: Path)
     off = ["set", "p", "off", "--all", "--config", config, "--json"]
     assert race([shadow, off]) == [0, 0]
     lines = audit_lines(state_dir)
-    assert 1 <= len(lines) <= 2
+    assert len(lines) == 2  # whichever runs first, both change something
     # each line's previous_state is the state the line before it left (the first: the initial off)
     expected = "off"
     for line in lines:
         assert line["result"]["previous_state"] == expected
         expected = line["result"]["state"]
     assert rows(state_dir, "p")["*"].state == expected
+
+
+def test_all_racing_a_repo_set_keeps_each_scope_chain_consistent(
+    tmp_path: Path, state_dir: Path
+) -> None:
+    config = make_config(tmp_path)
+    repo = ["set", "p", "shadow", "--repo", REPO, "--config", config, "--json"]
+    off = ["set", "p", "off", "--all", "--config", config, "--json"]
+    assert race([repo, off]) == [0, 0]
+    final = rows(state_dir, "p")
+    for scope, target in ((REPO, f"p@{REPO}"), ("*", "p@*")):
+        chain = [ln["result"] for ln in audit_lines(state_dir) if ln["target"] == target]
+        expected = "off"  # the configured initial state
+        for result in chain:
+            assert result["previous_state"] == expected
+            expected = result["state"]
+        assert final[scope].state == expected
 
 
 def test_a_refused_enforce_racing_a_kill_switch_changes_nothing_but_the_switch(

@@ -456,6 +456,18 @@ class Store:
         except (OSError, audit.RecordTooLargeError, TypeError, ValueError):
             raise AuditWriteError("audit.jsonl cannot be written") from None
 
+    def append_audit_many(self, records: Sequence[Mapping[str, Any]]) -> None:
+        """Like ``append_audit`` for several records, written with one ``write`` after every
+        record encodes, so a record that cannot be written leaves no line of its siblings."""
+        if self.readonly:
+            raise RuntimeError("the store was opened read-only")
+        if not self.con.in_transaction:
+            raise RuntimeError("an audit line is appended inside a write transaction")
+        try:
+            audit.append_audit_many(records, state_dir=self.path.parent)
+        except (OSError, audit.RecordTooLargeError, TypeError, ValueError):
+            raise AuditWriteError("audit.jsonl cannot be written") from None
+
     def transact(self, body: Callable[[], T]) -> T:
         """Run ``body`` in one ``write()`` transaction; if the write lock is not obtained within
         ``busy_timeout``, try the whole transaction once more (worst case 2 x ``busy_timeout``).

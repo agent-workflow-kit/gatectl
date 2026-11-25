@@ -30,7 +30,7 @@ from gatectl.clock import now_ts
 from gatectl.config import LoadedConfig, load_for_command
 from gatectl.config_models import AgentCheck, Policy, RuleCheck, ScriptCheck
 from gatectl.context import Context, Result
-from gatectl.errors import ConfigInvalidError, RefusedError, UsageError
+from gatectl.errors import ConfigInvalidError, InternalError, RefusedError, UsageError
 from gatectl.sanitize import sanitize, sanitize_bytes
 from gatectl.scope import STAR, Scope, resolve_effective
 
@@ -207,8 +207,6 @@ def handle(ctx: Context) -> Result:
         enforce_policy: Policy | None = effective.policy
     else:
         enforce_policy = None
-    if state == "enforced" and not in_config:
-        raise UsageError("unknown policy", details={"kind": "unknown_policy"})
 
     if not in_config:
         probe = store_mod.open_store(create=False)
@@ -222,18 +220,22 @@ def handle(ctx: Context) -> Result:
     fps = _Fingerprints(loaded, name)
 
     initial = _initial_state(loaded, name)
-    when = now_ts()
     reserve = loaded.shared.defaults.record_reserve.total_seconds()
     store = store_mod.open_store(create=True, busy_timeout=reserve)
     assert store is not None
     with store:
 
         def body() -> tuple[str, str, list[str]]:
+            when = now_ts()  # inside the lock: set_at is not older than the rows it replaces
             found = {r.scope: r for r in store.rows(name)}
+            if every and len(found) >= store_mod._ROW_LIMIT:
+                # the read is capped: a partial set would silently miss the rows past the cap
+                raise InternalError("too many rows to set every scope of the policy")
             star = found.get(STAR)
             star_state = star.state if star is not None else initial
             targets = [STAR, *sorted(s for s in found if s != STAR)] if every else [scope]
             changed: list[str] = []
+            records: list[dict[str, Any]] = []
             for target in targets:
                 row = found.get(target)
                 if row is not None:
@@ -255,7 +257,7 @@ def handle(ctx: Context) -> Result:
                     cause="set",
                     fingerprint=fps.of(target),
                 )
-                store.append_audit(
+                records.append(
                     _audit_line(
                         ctx,
                         resolved,
@@ -267,6 +269,8 @@ def handle(ctx: Context) -> Result:
                     )
                 )
                 changed.append(target)
+            # One write for every line, after every row is written: a failure appends none.
+            store.append_audit_many(records)
             row = found.get(STAR if every else scope)
             return (row.state if row is not None else star_state), state, changed
 
