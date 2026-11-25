@@ -27,7 +27,10 @@ def parse_kind(data: bytes) -> str:
     [
         (b"{}", {}),
         (b' \t\r\n{"a": 1}\n ', {"a": 1}),
-        (b'{"a":[1,2.5,true,null,"x"],"b":{"c":{}}}', {"a": [1, 2.5, True, None, "x"], "b": {"c": {}}}),
+        (
+            b'{"a":[1,2.5,true,null,"x"],"b":{"c":{}}}',
+            {"a": [1, 2.5, True, None, "x"], "b": {"c": {}}},
+        ),
         ('{"é":"日本語"}'.encode(), {"é": "日本語"}),
         (b'{"a":"\\ud83d\\ude00"}', {"a": "\U0001f600"}),  # a valid surrogate pair
         (b'{"a":"\\u0000\\n\\"\\\\"}', {"a": '\x00\n"\\'}),
@@ -248,7 +251,7 @@ def test_top_level_must_be_an_object(data: bytes) -> None:
         b'{"a":}',
         b'{"a":1,}',
         b"{'a':1}",
-        b'{a:1}',
+        b"{a:1}",
         b'{"a":1}}',
         b'{"a":1} x',
         b'{"a":1}{"b":2}',
