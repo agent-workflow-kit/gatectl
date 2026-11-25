@@ -254,6 +254,10 @@ def _append(name: str, record: Mapping[str, Any], directory: Path | None, saniti
 
 
 def _append_lines(name: str, lines: list[bytes], directory: Path | None) -> None:
+    """Append ``lines`` with one ``write``. The buffer is unbounded, so a short write can leave
+    complete leading lines on disk while the caller (``Store.append_audit_many``) rolls its rows
+    back: a residual window in which audit lines exist for a change that did not happen. The
+    error is raised (exit 1) so the operator sees it; no code compensates."""
     line = b"".join(lines)  # one write: the lines of one call stay together
     target = directory if directory is not None else state_dir()
     _ensure_dir(target)

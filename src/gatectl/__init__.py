@@ -15,9 +15,8 @@ def _ensure_stdin_fd() -> None:
         pass
     try:
         fd = os.open(os.devnull, os.O_RDONLY)
-        if fd != 0:
-            os.dup2(fd, 0)
-            os.close(fd)
+        if fd == 0:  # the lowest free slot; opened non-inheritable, so children need this
+            os.set_inheritable(0, True)
     except OSError:
         pass
 

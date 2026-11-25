@@ -764,11 +764,28 @@ def test_all_refuses_a_partial_set_past_the_row_limit(
     seed(state_dir, "p", "*", "enforced")
     seed(state_dir, "p", REPO, "enforced")
     seed(state_dir, "p", OTHER, "enforced")
+    seed(state_dir, "p", "github.com/org/third", "enforced")
     monkeypatch.setattr(store, "_ROW_LIMIT", 3)
     code, doc, _ = do_set(capsys, config, "p", "off", "--all")
     assert code == 1 and doc["error"]["code"] == "internal"
     assert {r.state for r in rows(state_dir, "p").values()} == {"enforced"}
     assert audit_lines(state_dir) == []
+
+
+def test_all_accepts_exactly_the_row_limit(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_config(tmp_path)
+    seed(state_dir, "p", "*", "enforced")
+    seed(state_dir, "p", REPO, "enforced")
+    seed(state_dir, "p", OTHER, "enforced")
+    monkeypatch.setattr(store, "_ROW_LIMIT", 3)
+    code, _doc, _ = do_set(capsys, config, "p", "off", "--all")
+    assert code == 0
+    assert {r.state for r in rows(state_dir, "p").values()} == {"off"}
 
 
 def test_a_stdin_closed_at_launch_reads_as_empty_and_is_valid_afterwards(
@@ -784,6 +801,7 @@ def test_a_stdin_closed_at_launch_reads_as_empty_and_is_valid_afterwards(
         "from gatectl.cli import main\n"
         "code = main(sys.argv[1:])\n"
         "os.fstat(0)\n"  # descriptor 0 must be valid, not free for any later open
+        "assert os.get_inheritable(0)\n"  # and survive exec into children
         "sys.exit(code)\n"
     )
     env = {

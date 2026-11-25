@@ -458,7 +458,9 @@ class Store:
 
     def append_audit_many(self, records: Sequence[Mapping[str, Any]]) -> None:
         """Like ``append_audit`` for several records, written with one ``write`` after every
-        record encodes, so a record that cannot be written leaves no line of its siblings."""
+        record encodes. Residual window: a short write of the combined buffer can leave complete
+        leading lines on disk while the caller's transaction rolls back (see
+        ``audit._append_lines``)."""
         if self.readonly:
             raise RuntimeError("the store was opened read-only")
         if not self.con.in_transaction:
@@ -565,10 +567,11 @@ class Store:
         + ", rev FROM policy_state"
     )
 
-    def rows(self, policy: str) -> list[StateRow]:
-        """Every stored row of ``policy`` (configured or not), by scope."""
+    def rows(self, policy: str, *, limit: int = _ROW_LIMIT) -> list[StateRow]:
+        """Stored rows of ``policy`` (configured or not), by scope, at most ``limit`` (default the
+        row cap; a caller that must tell "more than the cap" asks for one more)."""
         return self._select(
-            f"SELECT {self._COLUMNS} WHERE policy = ? ORDER BY scope LIMIT {_ROW_LIMIT}",  # noqa: S608
+            f"SELECT {self._COLUMNS} WHERE policy = ? ORDER BY scope LIMIT {int(limit)}",  # noqa: S608
             (policy,),
         )
 

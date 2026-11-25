@@ -227,8 +227,8 @@ def handle(ctx: Context) -> Result:
 
         def body() -> tuple[str, str, list[str]]:
             when = now_ts()  # inside the lock: set_at is not older than the rows it replaces
-            found = {r.scope: r for r in store.rows(name)}
-            if every and len(found) >= store_mod._ROW_LIMIT:
+            found = {r.scope: r for r in store.rows(name, limit=store_mod._ROW_LIMIT + 1)}
+            if every and len(found) > store_mod._ROW_LIMIT:
                 # the read is capped: a partial set would silently miss the rows past the cap
                 raise InternalError("too many rows to set every scope of the policy")
             star = found.get(STAR)
