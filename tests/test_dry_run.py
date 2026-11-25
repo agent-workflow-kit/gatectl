@@ -728,3 +728,32 @@ def test_an_over_long_argv_element_ends_with_one_ellipsis_within_1024_characters
     long, exact = doc["checks"][0]["argv"][1:]
     assert len(long) == 1024 and long == "x" * 1023 + "\u2026"
     assert exact == "y" * 1024
+
+
+@pytest.mark.parametrize(
+    ("content", "would", "valid"),
+    [
+        ({"tool": "Edit", "z": 1}, False, True),  # a false condition: not applicable, input_valid
+        ({"tool": "Edit"}, False, True),  # not applicable: the invalid declaration is not evaluated
+        ({"tool": "Bash", "z": 1}, True, True),
+        ({"z": 1}, True, True),  # an erroring condition counts as applicable (fail closed)
+        ({"tool": None, "z": 1}, True, True),
+        ({"tool": "Bash"}, False, False),  # applicable, then the declaration fails
+    ],
+)
+def test_applies_when_is_evaluated_by_the_rule_evaluator(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], content: Any, would: bool, valid: bool
+) -> None:
+    config = cfg(
+        tmp_path,
+        {
+            "p": {
+                "applies_when": [{"path": "tool", "op": "eq", "value": "Bash"}],
+                "input": {"require": ["z"]},
+                **MIXED,
+            }
+        },
+    )
+    _, doc, _ = plan(capsys, config, "p", "--input", input_file(tmp_path, content))
+    assert would_run(doc) == [would] * 3
+    assert doc["input_valid"] is valid
