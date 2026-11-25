@@ -106,7 +106,8 @@ Still to verify: a live sandbox containment attack, the lifeline watchdog handsh
 | Module | Responsibility |
 |---|---|
 | `cli.py` | argparse, exit codes, human and JSON output |
-| `config.py` | Pydantic models, drop-in merge, policy resolution with overrides, the fingerprint |
+| `config.py` | file reading and the closed YAML loader, drop-in merge, environment overrides, per-part validation, policy resolution with overrides, `session_cmd` resolution, the fingerprint (later issue) |
+| `config_models.py` | the Pydantic models (strict, closed, every default and range of the config table) and the glob tokenizer |
 | `engine.py` | one `check`: input validation, scope and state, ordering, deadline, combination |
 | `runner.py` | the script runner: selector loop, process group, output caps, lifeline watchdog |
 | `rules.py` | the closed rule evaluator, including the non-backtracking glob matcher and its size caps |
@@ -123,7 +124,7 @@ Still to verify: a live sandbox containment attack, the lifeline watchdog handsh
 | `gateway.py` | every subprocess call, so tests substitute fakes |
 | `plugin/` (package data) | the bundled plugin: `.claude-plugin/plugin.json`, `skills/gate-check/SKILL.md`, the placeholder files, the permission profile file (a copy of claude-session's built-in `review` profile, added in the plan's agent stage, with a test that fails when it drifts from a pinned copy of the built-in) |
 
-Dependencies: `pyyaml` (the stdlib cannot read YAML) and `pydantic` (config validation, as in every awkit tool). The Clopper-Pearson bound is a bisection on the binomial distribution in the stdlib, so no numeric library is needed; JSON handling is the stdlib's. `jsonschema` is a development dependency only: tests validate every audit and log record against `schemas/` with it; nothing imports it at run time. `check-jsonschema` is a development dependency too: `make schemacheck` (part of `make verify`, so CI runs it) validates `config.example.yaml` against `schemas/config.json`. It is the validator that awkit-ci and `docs/plan.md` name for that file, and it reads the YAML directly and checks it with the draft 2020-12 schema, so no conversion step is needed. It is never shipped; its own transitive packages (`requests`, `click`, `ruamel-yaml` and others) are likewise development-only.
+Dependencies: `pyyaml` (the stdlib cannot read YAML; used only through a `SafeLoader` subclass that refuses anchors, aliases, merge keys, duplicate and non-string keys and deep nesting, so no config can build a shared-structure bomb) and `pydantic` (config validation, as in every awkit tool; its messages are never shown, only fixed texts, because they echo input values). The Clopper-Pearson bound is a bisection on the binomial distribution in the stdlib, so no numeric library is needed; JSON handling is the stdlib's. `jsonschema` is a development dependency only: tests validate every audit and log record against `schemas/` with it; nothing imports it at run time. `check-jsonschema` is a development dependency too: `make schemacheck` (part of `make verify`, so CI runs it) validates `config.example.yaml` against `schemas/config.json`. It is the validator that awkit-ci and `docs/plan.md` name for that file, and it reads the YAML directly and checks it with the draft 2020-12 schema, so no conversion step is needed. It is never shipped; its own transitive packages (`requests`, `click`, `ruamel-yaml` and others) are likewise development-only.
 
 ## Data model
 
