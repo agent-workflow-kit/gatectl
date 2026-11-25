@@ -300,7 +300,7 @@ All commands take `--json`, `--config PATH`, `--verbose`, `--quiet`, `--actor` a
 
 ### `policies`
 
-`gatectl policies [--repo ID]`. Every policy with its initial state, its stored scope rows (state, who set it, when, cause, the fingerprint it was set for, its revision `rev`, `definition_changed`), the effective state for the given repo (or `*`), its fingerprint, a summary of each check and the recommendation of each record. With `--repo` it shows that repo's effective definition.
+`gatectl policies [--repo ID]`. Every policy with its initial state, its stored scope rows (state, who set it, when, cause, the fingerprint it was set for, its revision `rev`, `definition_changed`), the effective state for the given repo (or `*`), its fingerprint, a summary of each check and the recommendation of each record. With `--repo` it shows that repo's effective definition. The text form marks a policy defined by that repo's override with `(override)`; the JSON has no such member (the fingerprint and checks differ). A policy, or its override for the scope, that is invalid is left out of the list and one stderr line `gatectl: warning config_problem: ...` says so (`validate` lists the problem); `--quiet` silences that line. A summary is one sanitized line of at most 512 characters: the argv of a script check, the conditions of a rule check (values as JSON), or `skill <plugin>:<skill>` of an agent check. Checks are listed in execution order. Without `state.db` data `scopes` and `records` are empty and `effective_state` is the initial state.
 
 ### `validate`
 

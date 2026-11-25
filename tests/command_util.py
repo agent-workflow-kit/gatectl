@@ -33,9 +33,7 @@ def config_file(tmp_path: Path, data: Mapping[str, Any]) -> str:
     return str(write(tmp_path / "cfg" / "config.yaml", dict(data)))
 
 
-def run(
-    capsys: pytest.CaptureFixture[str], argv: list[str]
-) -> tuple[int, str, str]:
+def run(capsys: pytest.CaptureFixture[str], argv: list[str]) -> tuple[int, str, str]:
     code = main(argv)
     captured = capsys.readouterr()
     return code, captured.out, captured.err

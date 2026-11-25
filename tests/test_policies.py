@@ -48,9 +48,7 @@ def test_lists_only_configured_policies_in_name_order(
 def test_static_fields_are_the_initial_state_and_no_stored_data(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    config = cfg(
-        tmp_path, {"a": {"checks": [rule()]}, "b": {"state": "off", "checks": [rule()]}}
-    )
+    config = cfg(tmp_path, {"a": {"checks": [rule()]}, "b": {"state": "off", "checks": [rule()]}})
     _, doc, _ = view(capsys, config)
     a, b = doc["policies"]
     assert (a["initial_state"], a["effective_state"]) == ("shadow", "shadow")
@@ -65,7 +63,9 @@ def test_fingerprint_is_the_real_fingerprint_of_the_effective_definition(
     config = cfg(tmp_path, {"a": {"checks": [rule(), script()]}})
     _, doc, _ = view(capsys, config)
     loaded = load_config(config, environ={})
-    assert doc["policies"][0]["fingerprint"] == fp.fingerprint_for(loaded, "a", Scope("*", False, ()))
+    assert doc["policies"][0]["fingerprint"] == fp.fingerprint_for(
+        loaded, "a", Scope("*", False, ())
+    )
 
 
 def test_checks_are_summarized_in_execution_order(
@@ -181,9 +181,7 @@ def test_text_form_marks_an_override_definition(
     assert "override" not in plain
 
 
-def test_star_scope_is_the_global_view(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_star_scope_is_the_global_view(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     config = cfg(
         tmp_path,
         {"a": {"checks": [rule("base")]}},
@@ -237,9 +235,7 @@ def test_an_invalid_shared_key_still_lists_with_the_warning(
     assert err == "gatectl: warning config_problem: a shared key is invalid, see gatectl validate\n"
 
 
-def test_an_unparseable_config_exits_2(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_an_unparseable_config_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     bad = tmp_path / "bad.yaml"
     bad.write_text("policies: [unclosed\n")
     code, out, _ = run(capsys, ["policies", "--json", "--config", str(bad)])
@@ -247,9 +243,7 @@ def test_an_unparseable_config_exits_2(
     assert payload(out)["error"]["code"] == "config_invalid"
 
 
-def test_no_policies_is_an_empty_list(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_no_policies_is_an_empty_list(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     code, doc, _ = view(capsys, config_file(tmp_path, {}))
     assert (code, doc) == (0, {"scope": "*", "policies": []})
 
@@ -312,12 +306,20 @@ def test_the_command_runs_nothing_and_writes_nothing(
 def test_the_output_is_golden(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(fp, "fingerprint", lambda name, *a, **k: "sha256:" + name[0] * 64)
+    monkeypatch.setattr(
+        fp,
+        "fingerprint",
+        lambda name, *a, **k: "sha256:" + ("ab" if name == "auto-merge" else "cd") * 32,
+    )
     config = cfg(
         tmp_path,
         {
             "auto-merge": {
-                "checks": [rule("ci-green"), script("lint", ["/nonexistent/lint", "--strict"]), agent("reviewer")]
+                "checks": [
+                    rule("ci-green"),
+                    script("lint", ["/nonexistent/lint", "--strict"]),
+                    agent("reviewer"),
+                ]
             },
             "sleeper": {"state": "off", "checks": [rule()]},
         },

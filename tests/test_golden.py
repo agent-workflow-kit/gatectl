@@ -23,7 +23,7 @@ COMMAND_OF = {
     "check-not-applicable": "check",
     "check-off": "check",
     "check-shadow-error": "check",
-    "check-dry-run": "check",
+    # check-dry-run is real (#11): see tests/test_dry_run.py::test_the_plan_is_golden
     # todo(#28): replace the stub with the real outcome output
     "outcome": "outcome",
     # todo(#15): replace the stub with the real decisions output
@@ -34,7 +34,8 @@ COMMAND_OF = {
     "stats": "stats",
     # todo(#14): replace the stub with the real set output
     "set": "set",
-    # todo(#11): replace the stub with the real policies output
+    # policies-static is real (#11): see tests/test_policies.py::test_the_output_is_golden.
+    # todo(#15): "policies" (stored rows and records) stays a stub until the stored view lands
     "policies": "policies",
     # validate is real (#10): see test_validate_prints_its_golden_files_byte_for_byte
     # todo(#32): replace the stub with the real reconcile output

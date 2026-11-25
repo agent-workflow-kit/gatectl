@@ -32,6 +32,7 @@ SHAPES: dict[str, str] = {
     "stats": "cli/stats",
     "set": "cli/set",
     "policies": "cli/policies",
+    "policies-static": "cli/policies",
     "validate": "cli/validate",
     "validate-invalid": "cli/validate",
     "reconcile": "cli/reconcile",
