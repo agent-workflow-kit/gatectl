@@ -119,6 +119,7 @@ Still to verify: a live sandbox containment attack, the lifeline watchdog handsh
 | `sanitize.py` | the untrusted-text sanitizer (marker replacement, length caps); the `Cn` (unassigned) category depends on the interpreter's Unicode database (Python 3.12 has 15.0, 3.13 has 15.1), a difference accepted for newly assigned code points |
 | `ids.py` | identifier grammars, decision-id generation and prefix parsing, actors, durations |
 | `clock.py` | fixed-width UTC timestamps and `--since` parsing |
+| `inputs.py` | reading the input (regular files only, bounded, polled, deadline-aware), the strict JSON parser wrapper, declaration validation and declared-field and identity capture |
 | `inputhash.py` | canonical input serialization and `input_sha256` |
 | `errors.py` | errors that carry an exit code (usage 2, not found 10, ambiguous 21) |
 | `hooks.py` | the three post hooks, started detached by a supervisor process |
