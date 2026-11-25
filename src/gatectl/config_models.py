@@ -175,6 +175,8 @@ def _matching(rx: re.Pattern[str], message: str) -> Callable[[str], str]:
 def _nonempty(value: str) -> str:
     if not value:
         raise _bad("must not be empty")
+    if "\0" in value:
+        raise _bad("must not contain a NUL character")
     return value
 
 
@@ -365,7 +367,9 @@ Op = Literal["eq", "ne", "in", "not_in", "lt", "le", "gt", "ge", "glob", "exists
 
 
 def _is_number(value: Any) -> bool:
-    return type(value) in (int, float) and math.isfinite(value)
+    if type(value) is int:
+        return True  # an integer is always finite; isfinite(int) overflows on huge ones
+    return type(value) is float and math.isfinite(value)
 
 
 def _is_scalar(value: Any) -> bool:

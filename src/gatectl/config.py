@@ -101,6 +101,9 @@ class ConfigProblem:
     path: str
     message: str
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "message", sanitize(self.message, MESSAGE_CAP))
+
     def as_dict(self) -> dict[str, str]:
         return {"code": self.code, "path": self.path, "message": self.message}
 
@@ -157,6 +160,9 @@ def _in_rule(loc: tuple[str | int, ...]) -> bool:
     return False
 
 
+_MAX_COLLECTED = 200  # per part; only MAX_PROBLEMS_IN_DETAILS are ever reported
+
+
 def _problems(
     exc: ValidationError,
     prefix: tuple[str | int, ...],
@@ -165,7 +171,10 @@ def _problems(
     strip_first: bool = False,
 ) -> list[ConfigProblem]:
     out: list[ConfigProblem] = []
+    seen: set[tuple[str, str, str]] = set()
     for err in exc.errors(include_url=False, include_context=False, include_input=False):
+        if len(out) >= _MAX_COLLECTED:
+            break
         loc = _clean_loc(tuple(err["loc"]))
         if strip_first and loc:
             loc = loc[1:]
@@ -181,7 +190,9 @@ def _problems(
         if code == "invalid_value" and _in_rule(loc):
             code = "invalid_rule"
         problem = ConfigProblem(code, _path((*prefix, *loc)), sanitize(message, MESSAGE_CAP))
-        if problem not in out:
+        key = (problem.code, problem.path, problem.message)
+        if key not in seen:
+            seen.add(key)
             out.append(problem)
     return out
 
@@ -251,8 +262,38 @@ class _Rejected(Exception):
         self.line = None if mark is None else mark.line + 1
 
 
+_BOOL = re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")
+_INT = re.compile(r"^[-+]?(?:0|[1-9][0-9]*)$")
+_FLOAT = re.compile(
+    r"^(?:[-+]?(?:[0-9]+\.[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?|[-+]?[0-9]+[eE][-+]?[0-9]+|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN))$"
+)
+
+
+def _core_resolvers() -> dict[str | None, list[tuple[str, re.Pattern[str]]]]:
+    """The implicit resolvers of SafeLoader without YAML 1.1 booleans, octals and sexagesimals.
+
+    A copy: SafeLoader's own table is never mutated. ``off``, ``no``, ``010``, ``1:30`` and
+    ``1_000`` stay strings; ``true``/``false`` (any of the three spellings) are booleans.
+    """
+    table: dict[str | None, list[tuple[str, re.Pattern[str]]]] = {}
+    for first, entries in yaml.SafeLoader.yaml_implicit_resolvers.items():
+        kept: list[tuple[str, re.Pattern[str]]] = []
+        for tag, regexp in entries:
+            if tag == "tag:yaml.org,2002:bool":
+                regexp = _BOOL
+            elif tag == "tag:yaml.org,2002:int":
+                regexp = _INT
+            elif tag == "tag:yaml.org,2002:float":
+                regexp = _FLOAT
+            kept.append((tag, regexp))
+        table[first] = kept
+    return table
+
+
 class _Loader(yaml.SafeLoader):
     """A SafeLoader with no anchors, aliases, merge keys, duplicate or non-string keys."""
+
+    yaml_implicit_resolvers = _core_resolvers()
 
     def __init__(self, stream: str) -> None:
         super().__init__(stream)
@@ -362,6 +403,17 @@ def _merge(base: Any, over: Any, path: tuple[str, ...] = ()) -> Any:
     return over
 
 
+def _home(environ: Mapping[str, str]) -> Path:
+    """``$HOME`` when absolute, else the passwd home, else ``/``."""
+    home = environ.get("HOME", "")
+    if not (home and os.path.isabs(home)):
+        try:
+            home = pwd.getpwuid(os.getuid()).pw_dir
+        except KeyError:
+            home = "/"
+    return Path(home)
+
+
 def default_config_path(environ: Mapping[str, str]) -> Path:
     """``$XDG_CONFIG_HOME/gatectl/config.yaml``, else ``~/.config/gatectl/config.yaml``.
 
@@ -370,13 +422,7 @@ def default_config_path(environ: Mapping[str, str]) -> Path:
     xdg = environ.get("XDG_CONFIG_HOME", "")
     if xdg and os.path.isabs(xdg):
         return Path(xdg) / "gatectl" / "config.yaml"
-    home = environ.get("HOME", "")
-    if not (home and os.path.isabs(home)):
-        try:
-            home = pwd.getpwuid(os.getuid()).pw_dir
-        except KeyError:
-            home = "/"
-    return Path(home) / ".config" / "gatectl" / "config.yaml"
+    return _home(environ) / ".config" / "gatectl" / "config.yaml"
 
 
 def _dropins(directory: str) -> list[str]:
@@ -544,6 +590,10 @@ class PolicyEntry:
     override: PolicyOverride | None = None
 
 
+def _arith_problem(prefix: tuple[str, ...]) -> ConfigProblem:
+    return ConfigProblem("invalid_value", _path(prefix), "invalid value")
+
+
 def _policy_entry(name: str, body: Any, defaults: Defaults) -> PolicyEntry:
     prefix = ("policies", name)
     if not ids.is_policy_name(name):
@@ -553,6 +603,8 @@ def _policy_entry(name: str, body: Any, defaults: Defaults) -> PolicyEntry:
         policy = Policy.model_validate(body)
     except ValidationError as exc:
         return PolicyEntry(name, None, tuple(_problems(exc, prefix)))
+    except OverflowError:  # arithmetic on hostile numbers is an invalid value, never a crash
+        return PolicyEntry(name, None, (_arith_problem(prefix),))
     policy = policy.model_copy(update={"recommend": _resolve_recommend(policy.recommend, defaults)})
     return PolicyEntry(name, None, (), policy=policy)
 
@@ -573,6 +625,8 @@ def _override_entry(
         override = PolicyOverride.model_validate(body)
     except ValidationError as exc:
         return PolicyEntry(name, repo, tuple(_problems(exc, prefix, override=True)))
+    except OverflowError:
+        return PolicyEntry(name, repo, (_arith_problem(prefix),))
     if override.recommend is not None:
         override = override.model_copy(
             update={"recommend": _resolve_recommend(override.recommend, defaults)}
@@ -685,8 +739,8 @@ class LoadedConfig:
         return ["config_problem"] if self.shared_problems else []
 
     def policy_names(self) -> list[str]:
-        """Every policy name in the file, valid or not (``set off`` and ``outcome`` accept them)."""
-        return sorted(self.policies)
+        """Every addressable policy name (an invalid name cannot be named on a command line)."""
+        return sorted(n for n in self.policies if ids.is_policy_name(n))
 
     def policy_problems(self) -> list[ConfigProblem]:
         """Every problem of every policy and override."""
@@ -797,7 +851,10 @@ def _is_executable_file(path: str) -> bool:
 
 
 def resolve_session_cmd(
-    session_cmd: list[str], *, dirs: tuple[str, ...] = SESSION_CMD_DIRS
+    session_cmd: list[str],
+    *,
+    dirs: tuple[str, ...] = SESSION_CMD_DIRS,
+    environ: Mapping[str, str] | None = None,
 ) -> list[str] | None:
     """Resolve ``session_cmd[0]`` to an absolute path; never searches ``PATH``.
 
@@ -812,12 +869,10 @@ def resolve_session_cmd(
         return [first, *rest] if _is_executable_file(first) else None
     if "/" in first or not first:
         return None
-    home = os.environ.get("HOME", "")
+    home = str(_home(os.environ if environ is None else environ))
     for directory in dirs:
         if directory.startswith("~"):
-            if not (home and os.path.isabs(home)):
-                continue
-            directory = home + directory[1:]
+            directory = home.rstrip("/") + directory[1:]
         candidate = os.path.join(directory, first)
         if _is_executable_file(candidate):
             return [candidate, *rest]
