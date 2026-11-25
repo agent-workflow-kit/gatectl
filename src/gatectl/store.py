@@ -181,7 +181,7 @@ def _translate(exc: sqlite3.Error) -> InternalError:
     return _fail(_UNUSABLE)
 
 
-# --- the directory and the files -------------------------------------------------------------------
+# --- the directory and the files ------------------------------
 
 
 def _vet_dir(path: Path, create: bool) -> bool:
@@ -255,7 +255,7 @@ def _same_file(path: Path, ident: tuple[int, int]) -> bool:
     return stat.S_ISREG(info.st_mode) and (info.st_dev, info.st_ino) == ident
 
 
-# --- reading the schema ------------------------------------------------------------------------------
+# --- reading the schema ------------------------------
 
 
 def _uri(path: Path, query: str) -> str:
@@ -318,7 +318,7 @@ def _peek(path: Path) -> int | None | bool:
         con.close()
 
 
-# --- the store -----------------------------------------------------------------------------------------
+# --- the store ------------------------------
 
 
 class Store:
@@ -518,7 +518,7 @@ def _row(raw: Sequence[object]) -> StateRow:
     )
 
 
-# --- opening -----------------------------------------------------------------------------------------------
+# --- opening ------------------------------
 
 
 def _configure(con: sqlite3.Connection, busy_timeout: float) -> None:
@@ -610,7 +610,9 @@ def open_store(
 
     mode = "mode=rw" if create else "mode=ro"
     try:
-        con = sqlite3.connect(_uri(path, mode), uri=True, timeout=busy_timeout, isolation_level=None)
+        con = sqlite3.connect(
+            _uri(path, mode), uri=True, timeout=busy_timeout, isolation_level=None
+        )
     except sqlite3.Error as exc:
         raise _translate(exc) from None
     store = Store(con, path, readonly=not create)

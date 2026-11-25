@@ -392,10 +392,10 @@ def test_a_later_migration_applies_once_and_keeps_every_row(
     monkeypatch.setattr(store, "MIGRATIONS", (*store.MIGRATIONS, V2))
     s = opened(sdir)
     assert s.schema_version() == 2
-    assert [(r.scope, r.state) for r in s.rows("p")] == [
+    assert {(r.scope, r.state) for r in s.rows("p")} == {
         ("*", "enforced"),
         ("github.com/o/r", "shadow"),
-    ] or {(r.scope, r.state) for r in s.rows("p")} == {("*", "enforced"), ("github.com/o/r", "shadow")}
+    }
     cols = {r[1] for r in s.con.execute("PRAGMA table_info(policy_state)")}
     assert "note" in cols
     s.close()
@@ -456,9 +456,7 @@ def test_rolled_back_write_leaves_no_row_and_no_committed_rev_repeats(sdir: Path
     s = opened(sdir)
     first = put(s)
     with pytest.raises(RuntimeError), s.write():
-        s.write_state_row(
-            "p", "x/y", "off", set_by="a", set_at=TS, cause="set", fingerprint=FP
-        )
+        s.write_state_row("p", "x/y", "off", set_by="a", set_at=TS, cause="set", fingerprint=FP)
         raise RuntimeError
     assert [r.scope for r in s.rows("p")] == ["*"]
     assert put(s, "p", "other/repo", "off").rev > first.rev
@@ -714,8 +712,13 @@ def _writer(directory: str, worker: int, count: int, out: Any) -> None:
     for i in range(count):
         with s.write():
             row = s.write_state_row(
-                f"p{worker}", f"github.com/o/r{i}", "shadow",
-                set_by="auto:t", set_at=TS, cause="set", fingerprint=FP,
+                f"p{worker}",
+                f"github.com/o/r{i}",
+                "shadow",
+                set_by="auto:t",
+                set_at=TS,
+                cause="set",
+                fingerprint=FP,
             )
         revs.append(row.rev)
     s.close()

@@ -2,8 +2,8 @@
 
 It follows Check order steps 1 to 5 as far as the config and the input allow: load and validate
 the policy, read and parse the input, resolve the scope and the override, compute the fingerprint
-and the state, and judge the declaration. It never starts a process, opens ``state.db`` or writes
-``audit.jsonl`` and ``log.jsonl``.
+and the state, and judge the declaration. It never starts a process or writes ``audit.jsonl`` and
+``log.jsonl``; it reads ``state.db`` read-only (never creating or migrating it).
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from typing import Any
 
 from gatectl import fingerprint as fingerprint_mod
 from gatectl import inputs, plan
+from gatectl import store as store_mod
 from gatectl.config import load_for_command
 from gatectl.config_models import (
     AgentCheck,
@@ -132,9 +133,15 @@ def handle(ctx: Context) -> Result:
     effective = resolve_effective(loaded, name, scope)
     policy = effective.policy
     repo = None if scope.scope == "*" else scope.scope
+    # The stored rows decide (repo row, else the "*" row, else the initial state; the strictest
+    # stored state for an indeterminate scope). Unreadable storage exits 1 (an unknown state).
+    # TODO(#18): add the definition_changed warning once the engine compares row fingerprints.
+    state = store_mod.read_effective(
+        name, scope.scope, policy.state, indeterminate=scope.indeterminate
+    ).state
 
     # Steps 4, 4a and 5: off and a false applies_when end the check before the declaration.
-    if policy.state == "off":
+    if state == "off":
         run, valid = False, True
     elif (
         policy.applies_when is not None
@@ -155,9 +162,7 @@ def handle(ctx: Context) -> Result:
         "dry_run": True,
         "policy": name,
         "scope": scope.scope,
-        # TODO(#12): the effective state comes from the stored rows; until then it is the
-        # initial state.
-        "state": policy.state,
+        "state": state,
         "fingerprint": fingerprint_mod.fingerprint(name, policy, shared),
         "input_valid": valid,
         "checks": [_plan_check(c, shared, run) for c in plan.execution_order(policy)],

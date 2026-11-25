@@ -133,7 +133,7 @@ def test_the_fingerprint_is_the_effective_definitions(
     assert doc["fingerprint"] == fp.fingerprint_for(loaded, "p", Scope("*", False, ()))
 
 
-def test_state_is_the_initial_state_until_the_store_lands(
+def test_state_is_the_initial_state_without_a_state_database(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     config = cfg(tmp_path, {"p": {"state": "shadow", "checks": [rule()]}})
