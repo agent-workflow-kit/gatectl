@@ -30,15 +30,18 @@ import re
 import sqlite3
 import stat
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, TypeVar
 from urllib.parse import quote
 
 from gatectl import audit, ids
 from gatectl.errors import InternalError
 from gatectl.sanitize import sanitize
+
+T = TypeVar("T")
 
 STATES = ("off", "shadow", "enforced")
 CAUSES = ("set", "miss")
@@ -147,6 +150,14 @@ def latest_version() -> int:
 
 class StoreBusyError(InternalError):
     """The write lock was not obtained within the bounded wait (exit 1; a retry was made)."""
+
+
+class AuditWriteError(InternalError):
+    """``audit.jsonl`` could not be written (full disk, read-only file, record too large).
+
+    Fixed text, no reason code: the caller's transaction is rolled back and the state is unknown
+    (exit 1). A partial line this may have left stays in the file (it is never truncated back).
+    """
 
 
 @dataclass(frozen=True)
@@ -418,10 +429,52 @@ class Store:
             self._rollback()
             raise
         try:
-            self.con.execute("COMMIT")
+            self._commit()
         except sqlite3.Error as exc:
             self._rollback()
             raise _translate(exc) from None
+
+    def _commit(self) -> None:
+        self.con.execute("COMMIT")
+
+    def append_audit(self, record: Mapping[str, Any]) -> None:
+        """Append one record to ``audit.jsonl`` inside the open write transaction, before the
+        commit (interface.md, Audit and log). A failed append raises ``AuditWriteError`` and the
+        ``write()`` block rolls back; the line (or a partial line) may stay, a row never outlives
+        a failed append."""
+        if self.readonly:
+            raise RuntimeError("the store was opened read-only")
+        if not self.con.in_transaction:
+            raise RuntimeError("an audit line is appended inside a write transaction")
+        try:
+            audit.append_audit(record, state_dir=self.path.parent)
+        except (OSError, audit.RecordTooLargeError):
+            raise AuditWriteError("audit.jsonl cannot be written") from None
+
+    def transact(self, body: Callable[[], T]) -> T:
+        """Run ``body`` in one ``write()`` transaction; if the write lock is not obtained within
+        ``busy_timeout``, try the whole transaction once more (worst case 2 x ``busy_timeout``).
+
+        Only a lock timeout at the start is retried: nothing has run or been appended yet, so
+        ``body`` (which re-reads the state) runs once. A busy error raised later, at the commit
+        included, is not retried: the audit line may already be written and a second run would
+        append a second line for the same decision.
+        """
+        started = False
+
+        def run() -> T:
+            nonlocal started
+            started = True
+            return body()
+
+        try:
+            with self.write():
+                return run()
+        except StoreBusyError:
+            if started:
+                raise
+        with self.write():
+            return run()
 
     def _rollback(self) -> None:
         try:
