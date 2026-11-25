@@ -1,0 +1,1 @@
+{"schema_version":1,"policy":"auto-merge","scope":"github.com/org/repo","state":"shadow","shadow":true,"enforced":false,"decision":"escalate","reason":"check_error","fingerprint":"sha256:abababababababababababababababababababababababababababababababab","checks":[],"warnings":[],"error":{"code":"internal","message":"could not record the decision","reason":null,"details":null}}

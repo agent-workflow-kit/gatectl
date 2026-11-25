@@ -1,16 +1,27 @@
 from __future__ import annotations
 
+import importlib.metadata
 import json
+import os
+import shlex
+import subprocess
+import sys
+import tempfile
+import tomllib
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+import gatectl
 from gatectl import commands
 from gatectl.cli import main
 from gatectl.commands import Context, Result
 from gatectl.errors import UsageError
 from tests import schema_util
+
+ROOT = Path(__file__).resolve().parent.parent
 
 ALL_COMMANDS = (
     "check",
@@ -66,19 +77,36 @@ def run(capsys: pytest.CaptureFixture[str], argv: list[str]) -> tuple[int, str, 
 # --- version and help ---------------------------------------------------------------------
 
 
-def test_version_prints_version_and_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
+def test_version_prints_the_installed_package_version(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     with pytest.raises(SystemExit) as exc:
         main(["--version"])
     assert exc.value.code == 0
-    assert capsys.readouterr().out.strip() == "gatectl 0.0.0"
+    assert capsys.readouterr().out.strip() == f"gatectl {importlib.metadata.version('gatectl')}"
+
+
+def test_the_package_version_is_the_pyproject_version() -> None:
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert gatectl.__version__ == pyproject["project"]["version"]
 
 
 def test_the_command_table_lists_every_documented_command() -> None:
     assert tuple(spec.name for spec in commands.SPECS) == ALL_COMMANDS
 
 
-def test_no_arguments_is_a_usage_error() -> None:
-    assert main([]) == 2
+def test_no_arguments_is_a_usage_error_with_one_stderr_line(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert run(capsys, []) == (2, "", "gatectl: usage: no command given\n")
+
+
+def test_no_command_with_json_prints_the_envelope_only(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, out, err = run(capsys, ["--json"])
+    assert (code, err) == (2, "")
+    assert _error_of(out)["message"] == "no command given"
 
 
 def test_top_level_help_names_every_command(capsys: pytest.CaptureFixture[str]) -> None:
@@ -231,12 +259,11 @@ def test_a_bad_actor_exits_2_without_echoing_it(
         assert bad in ("", "human:") or bad not in text  # "human:" is in the fixed text
 
 
-def test_verbose_and_quiet_together_are_a_usage_error(
+def test_verbose_and_quiet_together_are_accepted_and_quiet_wins(
     seen: list[Context], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    code, out, _ = run(capsys, ["stats", "--json", "--verbose", "--quiet"])
-    assert code == 2
-    assert _error_of(out)["code"] == "usage"
+    assert run(capsys, ["stats", "--json", "--verbose", "--quiet"])[0] == 0
+    assert (seen[-1].verbose, seen[-1].quiet) == (False, True)
 
 
 # --- parse errors never echo input --------------------------------------------------------
@@ -260,7 +287,7 @@ def test_verbose_and_quiet_together_are_a_usage_error(
 def test_parse_errors_exit_2_and_never_echo_the_value(
     argv: list[str], seen: list[Context], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    code, out, err = run(capsys, [*argv, "--json"])
+    code, out, err = run(capsys, ["--json", *argv])
     assert code == 2
     assert "SECRET" not in out + err
     assert _error_of(out)["code"] == "usage"
@@ -441,7 +468,11 @@ def test_other_commands_print_a_human_error_line_without_json(
     assert code == 10
     assert _error_of(out)["code"] == "not_found"
     assert err == ""
-    assert run(capsys, ["show", "gd-abcdefghijkl", "--quiet"]) == (10, "", "")
+    assert run(capsys, ["show", "gd-abcdefghijkl", "--quiet"]) == (
+        10,
+        "",
+        "gatectl: not_found: no such decision\n",
+    )
 
 
 def test_an_unexpected_exception_exits_1_without_leaking_its_text(
@@ -482,3 +513,113 @@ def test_a_bare_run_exits_cleanly_when_stdin_is_not_a_tty(
     monkeypatch.setattr("sys.stdin", None)
     assert run(capsys, ["stats"])[0] == 0
     assert seen[0].stdin_tty is False
+
+
+# --- the output form of a parse error follows the real command and flags -------------------
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--actor", "check", "nosuch"],
+        ["set", "check"],
+        ["stats", "--", "--json"],
+        ["--config", "--json", "nosuch"],
+        ["--decision-id", "--quiet", "x"],
+        ["show", "check", "--bogus"],
+    ],
+)
+def test_a_parse_error_uses_the_non_check_form_unless_the_command_and_flag_are_real(
+    argv: list[str], seen: list[Context], capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = run(capsys, argv)
+    assert code == 2
+    assert out == ""
+    assert err.startswith("gatectl: usage: ")
+
+
+def test_a_real_json_flag_gives_the_envelope_for_a_non_check_parse_error(
+    seen: list[Context], capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = run(capsys, ["--actor", "check", "--json", "nosuch"])
+    assert (code, err) == (2, "")
+    assert _error_of(out)["code"] == "usage"
+
+
+def test_a_check_parse_error_gives_the_envelope_and_the_check_line(
+    seen: list[Context], capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = run(capsys, ["--actor", "human:x", "check", "p", "--bogus"])
+    assert code == 2
+    assert _error_of(out)["code"] == "usage"
+    assert err == "gatectl: usage p\n"
+
+
+def test_the_policy_name_skips_the_values_of_check_flags(
+    seen: list[Context], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run(capsys, ["check", "--input", "f", "p", "--bogus"])[2] == "gatectl: usage p\n"
+
+
+def test_a_check_parse_error_names_a_valid_policy_only(
+    seen: list[Context], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run(capsys, ["check", "p", "--js"])[2] == "gatectl: usage p\n"
+    assert run(capsys, ["check", "bad\x1b", "--js"])[2] == "gatectl: usage\n"
+
+
+# --- a closed or broken output stream never changes the exit code -------------------------
+
+
+def _run_gatectl(argv: list[str], *, stdout: Any, stderr: Any = subprocess.PIPE, shell: str = ""):
+    home = tempfile.mkdtemp(prefix="gatectl-home-")
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": home,
+        "XDG_CONFIG_HOME": home,
+        "PYTHONPATH": str(ROOT / "src"),
+    }
+    cmd = [sys.executable, "-m", "gatectl", *argv]
+    if shell:
+        return subprocess.run(
+            ["sh", "-c", f"{shlex.join(cmd)} {shell}"],
+            env=env, stdout=stdout, stderr=stderr, timeout=60, check=False,
+        )  # fmt: skip
+    return subprocess.run(cmd, env=env, stdout=stdout, stderr=stderr, timeout=60, check=False)
+
+
+# (argv, intended exit code): not implemented -> 1, usage -> 2
+_STREAM_CASES = [(["stats", "--json"], 1), (["check", "p", "--js"], 2), (["stats"], 1)]
+
+
+@pytest.mark.parametrize(("argv", "code"), _STREAM_CASES)
+def test_a_closed_stdout_keeps_the_exit_code(argv: list[str], code: int) -> None:
+    done = _run_gatectl(argv, stdout=None, shell=">&-")
+    assert done.returncode == code
+    assert b"Traceback" not in done.stderr
+
+
+@pytest.mark.parametrize(("argv", "code"), _STREAM_CASES)
+def test_a_broken_pipe_on_stdout_keeps_the_exit_code(argv: list[str], code: int) -> None:
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    try:
+        done = _run_gatectl(argv, stdout=write_fd)
+    finally:
+        os.close(write_fd)
+    assert done.returncode == code
+    assert b"Traceback" not in done.stderr
+
+
+@pytest.mark.parametrize(("argv", "code"), _STREAM_CASES)
+def test_a_full_device_on_stdout_keeps_the_exit_code(argv: list[str], code: int) -> None:
+    with open("/dev/full", "wb") as full:
+        done = _run_gatectl(argv, stdout=full)
+    assert done.returncode == code
+    assert b"Traceback" not in done.stderr
+
+
+@pytest.mark.parametrize(("argv", "code"), _STREAM_CASES)
+def test_a_closed_stderr_keeps_the_exit_code(argv: list[str], code: int) -> None:
+    done = _run_gatectl(argv, stdout=subprocess.PIPE, stderr=None, shell="2>&-")
+    assert done.returncode == code

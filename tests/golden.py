@@ -23,6 +23,8 @@ SHAPES: dict[str, str] = {
     "check-shadow-allow": "cli/check",
     "check-enforced-deny": "cli/check",
     "check-not-applicable": "cli/check",
+    "check-off": "cli/check",
+    "check-shadow-error": "cli/check",
     "check-dry-run": "cli/check-dry-run",
     "outcome": "cli/outcome",
     "decisions": "cli/decisions",
@@ -31,10 +33,12 @@ SHAPES: dict[str, str] = {
     "set": "cli/set",
     "policies": "cli/policies",
     "validate": "cli/validate",
+    "validate-invalid": "cli/validate",
     "reconcile": "cli/reconcile",
     "prune": "cli/prune",
     "cron": "cli/cron",
     "error-usage": "cli/error",
+    "error-refused": "cli/error",
 }
 
 

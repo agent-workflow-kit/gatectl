@@ -330,7 +330,7 @@ All commands take `--json`, `--config PATH`, `--verbose`, `--quiet`, `--actor` a
 |---|---|
 | `--json` | machine-readable output (always on for `check`) |
 | `--config PATH` | config file, replacing `~/.config/gatectl/config.yaml` (drop-ins still apply from its directory) |
-| `--verbose`, `--quiet` | more or less stderr |
+| `--verbose`, `--quiet` | more or less stderr; when both are given, `--quiet` wins; `--quiet` never suppresses the one-line error on stderr |
 | `--actor A` | `human:<name>` or `auto:<name>`; accepted by every command (Actors and human actions) |
 | `--decision-id ID` | repeatable up to 16 times (exit 2 beyond that), accepted by every command; recorded in the audit record of the command |
 

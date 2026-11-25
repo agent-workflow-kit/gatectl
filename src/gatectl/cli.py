@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from collections.abc import Mapping
@@ -109,8 +110,6 @@ def _stdin_is_tty() -> bool:
 
 def _context(ns: argparse.Namespace) -> Context:
     """Validate the global flags and build the handler's context."""
-    if ns.verbose and ns.quiet:
-        raise errors.UsageError("--verbose and --quiet are mutually exclusive")
     decision_ids = ids.validate_caller_decision_ids(
         [*(ns.decision_ids_top or ()), *(getattr(ns, "decision_ids_sub", None) or ())]
     )
@@ -122,7 +121,7 @@ def _context(ns: argparse.Namespace) -> Context:
         args=argparse.Namespace(**own),
         json=ns.json,
         config=ns.config,
-        verbose=ns.verbose,
+        verbose=ns.verbose and not ns.quiet,  # --quiet wins when both are given
         quiet=ns.quiet,
         actor=ns.actor,
         decision_ids=decision_ids,
@@ -139,17 +138,35 @@ def render_json(payload: Mapping[str, Any]) -> str:
 
 
 def _write(stream: Any, text: str) -> None:
-    stream.write(text)
-    stream.flush()
+    """Write and flush; a closed, broken or full stream is ignored so the exit code survives.
+
+    After a failed write the stream's file descriptor is pointed at ``/dev/null`` so the flush of
+    the interpreter's shutdown stays quiet and cannot turn the exit code into 120.
+    """
+    try:
+        stream.write(text)
+        stream.flush()
+    except (OSError, ValueError, AttributeError):  # AttributeError: the stream is None (closed fd)
+        _silence(stream)
+
+
+def _silence(stream: Any) -> None:
+    try:
+        fd = stream.fileno()
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, fd)
+        finally:
+            os.close(devnull)
+    except (OSError, ValueError, AttributeError):
+        pass  # no real descriptor (a captured stream, or already closed): nothing to redirect
 
 
 def _stderr_line(text: str) -> str:
     return sanitize(text, STDERR_CAP).replace("\n", " ") + "\n"
 
 
-def _error_exit(
-    exc: BaseException, *, json_mode: bool, is_check: bool, quiet: bool, policy: str | None
-) -> int:
+def _error_exit(exc: BaseException, *, json_mode: bool, is_check: bool, policy: str | None) -> int:
     envelope = errors.envelope(exc)
     body = envelope["error"]
     if is_check or json_mode:
@@ -158,7 +175,8 @@ def _error_exit(
         # One line built from closed fields only (interface.md, check).
         line = f"gatectl: {body['code']}" + (f" {policy}" if policy else "")
         _write(sys.stderr, _stderr_line(line))
-    elif not json_mode and not quiet:
+    elif not json_mode:
+        # --quiet never suppresses this line: cron's `reconcile --quiet` must keep its reason.
         _write(sys.stderr, _stderr_line(f"gatectl: {body['code']}: {body['message']}"))
     return errors.exit_code_of(exc)
 
@@ -167,24 +185,72 @@ def _spec(name: str | None) -> CommandSpec | None:
     return next((s for s in commands.SPECS if s.name == name), None)
 
 
+_GLOBAL_VALUE_FLAGS = frozenset({"--config", "--actor", "--decision-id"})
+
+
+def _value_flags(spec: CommandSpec) -> frozenset[str]:
+    """The option strings of a command (and the global flags) that take a value."""
+    probe = argparse.ArgumentParser(add_help=False)
+    spec.add_arguments(probe)
+    own = {o for a in probe._actions if a.nargs != 0 for o in a.option_strings}  # noqa: SLF001
+    return _GLOBAL_VALUE_FLAGS | own
+
+
+def _prescan(argv: list[str]) -> tuple[str | None, bool, str | None]:
+    """Find (command, real --json, check's policy name) in argv that failed to parse.
+
+    A token counts only as a real flag or command outside the value of a value-taking flag and
+    before ``--``. The command is the first remaining non-flag token, and only if it names a
+    command. The policy is the first positional after ``check``, only if it is a valid name.
+    """
+    command: str | None = None
+    value_flags = _GLOBAL_VALUE_FLAGS
+    json_flag = False
+    policy: str | None = None
+    policy_seen = False
+    command_seen = False
+    skip = False
+    for token in argv:
+        if skip:
+            skip = False
+            continue
+        if token == "--":
+            break
+        if token.startswith("-"):
+            if token == "--json":
+                json_flag = True
+            elif token in value_flags:
+                skip = True
+            continue
+        if not command_seen:
+            command_seen = True
+            spec = _spec(token)
+            if spec is not None:
+                command = token
+                value_flags = _value_flags(spec)
+        elif command == "check" and not policy_seen:
+            policy_seen = True
+            policy = token if ids.is_policy_name(token) else None
+    return command, json_flag, policy
+
+
 def main(argv: list[str] | None = None) -> int:
     args_in = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     try:
         ns = parser.parse_args(args_in)
     except errors.UsageError as exc:
-        # The command is unknown when parsing failed; guess from the tokens, only to pick the
-        # output form (an error envelope for check and --json, a text line otherwise).
+        # The parse failed, so the command is unknown; scan the tokens only to pick the output
+        # form (an error envelope for check and --json, a text line otherwise).
+        command, json_flag, policy = _prescan(args_in)
+        is_check = command == "check"
         return _error_exit(
-            exc,
-            json_mode="--json" in args_in,
-            is_check="check" in args_in,
-            quiet="--quiet" in args_in,
-            policy=None,
+            exc, json_mode=json_flag, is_check=is_check, policy=policy if is_check else None
         )
     if ns.command is None:
-        parser.print_help(sys.stderr)
-        return 2
+        return _error_exit(
+            errors.UsageError("no command given"), json_mode=ns.json, is_check=False, policy=None
+        )
     spec = _spec(ns.command)
     is_check = bool(spec and spec.always_json)
     policy = getattr(ns, "policy", None) if is_check else None
@@ -194,7 +260,7 @@ def main(argv: list[str] | None = None) -> int:
         ctx = _context(ns)
         result = commands.dispatch(ctx)
     except Exception as exc:  # the envelope hides the text of anything that is not ours
-        return _error_exit(exc, json_mode=ns.json, is_check=is_check, quiet=ns.quiet, policy=policy)
+        return _error_exit(exc, json_mode=ns.json, is_check=is_check, policy=policy)
     return _emit(result, json_mode=ctx.json or is_check)
 
 

@@ -8,26 +8,42 @@ import pytest
 from gatectl import commands
 from gatectl.cli import main
 from gatectl.commands import Context, Result
+from gatectl.errors import RefusedError
 from tests import golden
 from tests.test_cli import MIN_ARGV
 
 SCHEMAS = Path(__file__).resolve().parent.parent / "schemas"
 
-# golden stem -> the command whose stdout it is
+# golden stem -> the command whose stdout it is. The handlers are stubs until each command lands:
+# the owner issue replaces the stub with the real command output (see the todo on each entry).
 COMMAND_OF = {
+    # todo(#18): replace the stub with the real check output
     "check-shadow-allow": "check",
     "check-enforced-deny": "check",
     "check-not-applicable": "check",
+    "check-off": "check",
+    "check-shadow-error": "check",
     "check-dry-run": "check",
+    # todo(#28): replace the stub with the real outcome output
     "outcome": "outcome",
+    # todo(#15): replace the stub with the real decisions output
     "decisions": "decisions",
+    # todo(#15): replace the stub with the real show output
     "show": "show",
+    # todo(#29): replace the stub with the real stats output
     "stats": "stats",
+    # todo(#14): replace the stub with the real set output
     "set": "set",
+    # todo(#11): replace the stub with the real policies output
     "policies": "policies",
+    # todo(#10): replace the stub with the real validate output
     "validate": "validate",
+    "validate-invalid": "validate",
+    # todo(#32): replace the stub with the real reconcile output
     "reconcile": "reconcile",
+    # todo(#33): replace the stub with the real prune output
     "prune": "prune",
+    # todo(#34): replace the stub with the real cron output
     "cron": "cron",
 }
 
@@ -48,9 +64,15 @@ def test_each_golden_file_is_canonical_and_matches_its_schema(name: str) -> None
 
 
 @pytest.mark.parametrize("name", sorted(COMMAND_OF))
-def test_each_command_prints_its_golden_file_byte_for_byte(
+def test_each_golden_document_survives_the_printer_unchanged(
     name: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """A stub handler returns the parsed golden document; the CLI must print the same bytes.
+
+    This checks ``render_json`` (canonical form) and the dispatch path, and the golden file's
+    schema through ``golden.load``. It cannot catch a wrong command output: the stub supplies the
+    content. Each real command replaces its stub (the todo on its ``COMMAND_OF`` entry).
+    """
     _, document = golden.load(name)
     command = COMMAND_OF[name]
 
@@ -67,6 +89,17 @@ def test_the_error_envelope_prints_its_golden_file_byte_for_byte(
 ) -> None:
     assert main(["stats", "--json", "--decision-id", "bad id"]) == 2
     golden.assert_output("error-usage", capsys.readouterr().out)
+
+
+def test_the_refused_envelope_prints_its_golden_file_byte_for_byte(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def refuse(ctx: Context) -> Result:
+        raise RefusedError("this action needs a human actor")
+
+    monkeypatch.setattr(commands, "HANDLERS", {"set": refuse})
+    assert main([*MIN_ARGV["set"], "--json"]) == 20
+    golden.assert_output("error-refused", capsys.readouterr().out)
 
 
 # --- the harness itself can fail ----------------------------------------------------------
