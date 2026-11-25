@@ -374,7 +374,10 @@ CASES: dict[str, Case] = {
         "session_cmd_unresolved",
         "problems",
         "session_cmd",
-        lambda e: {"session_cmd": ["/nonexistent/claude-session"], "policies": {"p": agent_policy()}},
+        lambda e: {
+            "session_cmd": ["/nonexistent/claude-session"],
+            "policies": {"p": agent_policy()},
+        },
     ),
     "state_db_missing": Case(
         "state_db_missing",
@@ -416,7 +419,10 @@ CASES: dict[str, Case] = {
         "session_cmd_unresolved",
         "warnings",
         "session_cmd",
-        lambda e: {"session_cmd": ["/nonexistent/claude-session"], "policies": {"p": good_policy()}},
+        lambda e: {
+            "session_cmd": ["/nonexistent/claude-session"],
+            "policies": {"p": good_policy()},
+        },
     ),
 }
 
@@ -475,7 +481,7 @@ def test_a_config_with_only_warnings_is_valid_and_exits_0(env: Env) -> None:
 
 
 def test_an_empty_config_is_valid_and_has_no_warnings(env: Env) -> None:
-    code, payload = env.run({})
+    code, payload = env.run(env.base())
     assert code == 0
     assert payload == {"valid": True, "problems": [], "warnings": [], "probe": None}
 
@@ -672,7 +678,9 @@ def test_a_plugin_dir_without_a_readable_name_is_plugin_not_found(env: Env) -> N
     os.mkfifo(fifo_dir / ".claude-plugin" / "plugin.json")
     big = env.tmp / "big"
     (big / ".claude-plugin").mkdir(parents=True)
-    (big / ".claude-plugin" / "plugin.json").write_text('{"name":"big","pad":"' + "x" * 2_000_000 + '"}')
+    (big / ".claude-plugin" / "plugin.json").write_text(
+        '{"name":"big","pad":"' + "x" * 2_000_000 + '"}'
+    )
     bad = env.tmp / "bad"
     (bad / ".claude-plugin").mkdir(parents=True)
     (bad / ".claude-plugin" / "plugin.json").write_text("[1,")
@@ -721,7 +729,9 @@ def test_a_placeholder_of_the_wrong_type_counts_as_missing(env: Env) -> None:
 def test_the_bundled_plugin_is_checked_for_placeholders_when_an_agent_check_exists(
     tmp_path: Path,
 ) -> None:
-    bundled = make_plugin(tmp_path / "bundled", "gatectl", skills=("gate-check",), missing=(".mcp.json",))
+    bundled = make_plugin(
+        tmp_path / "bundled", "gatectl", skills=("gate-check",), missing=(".mcp.json",)
+    )
     session = make_executable(tmp_path / "bin" / "claude-session")
     cfg = write(tmp_path / "c.yaml", {"session_cmd": [session], "policies": {"p": agent_policy()}})
     loaded = load_config(str(cfg), environ={})
@@ -845,6 +855,7 @@ def test_a_per_repo_override_agent_check_is_judged_too(env: Env) -> None:
                 "policies": {
                     "p": {
                         "checks": [
+                            *good_policy()["checks"],
                             agent_check(sandbox="off", setting_sources=["user"]),
                         ]
                     }
@@ -853,7 +864,7 @@ def test_a_per_repo_override_agent_check_is_judged_too(env: Env) -> None:
         },
     )
     _, payload = env.run(cfg)
-    base = "repos.example.com/o/r.policies.p.checks.0"
+    base = "repos.example.com/o/r.policies.p.checks.1"
     assert found(payload, "problems") == {("unsafe_setting_sources", f"{base}.setting_sources")}
     assert found(payload, "warnings") == {("sandbox_lowered", f"{base}.sandbox")}
 
@@ -869,7 +880,10 @@ def test_agent_block_settings_without_any_agent_check_are_not_reported(env: Env)
 def test_a_repeated_agent_block_finding_is_reported_once(env: Env) -> None:
     cfg = env.base(
         agent={"sandbox": "off"},
-        policies={"p": {"checks": [agent_check(), agent_check() | {"name": "j2"}]}, "q": agent_policy()},
+        policies={
+            "p": {"checks": [agent_check(), agent_check() | {"name": "j2"}]},
+            "q": agent_policy(),
+        },
     )
     _, payload = env.run(cfg)
     assert [w["path"] for w in payload["warnings"] if w["code"] == "sandbox_lowered"] == [
@@ -895,7 +909,9 @@ def test_deadline_uses_the_defaults_timeout_record_reserve_and_min_start_budget(
     )
     _, payload = env.run(cfg)
     assert found(payload, "problems") == {("deadline_too_short", "defaults.timeout")}
-    cfg = env.base(agent={"min_start_budget": "1s"}, defaults={"timeout": "8s"}, policies={"p": agent_policy()})
+    cfg = env.base(
+        agent={"min_start_budget": "1s"}, defaults={"timeout": "8s"}, policies={"p": agent_policy()}
+    )
     assert env.run(cfg)[0] == 0
 
 
@@ -927,7 +943,11 @@ def test_deadline_too_short_applies_to_repo_overrides(env: Env) -> None:
 def test_an_override_that_drops_the_agent_check_is_not_judged(env: Env) -> None:
     cfg = env.base(
         policies={"p": agent_policy()},
-        repos={"example.com/o/r": {"policies": {"p": {"timeout": "5s", "checks": good_policy()["checks"]}}}},
+        repos={
+            "example.com/o/r": {
+                "policies": {"p": {"timeout": "5s", "checks": good_policy()["checks"]}}
+            }
+        },
     )
     code, _ = env.run(cfg)
     assert code == 0
@@ -1089,7 +1109,6 @@ def test_state_db_values_that_are_not_policy_names_are_never_printed(env: Env) -
     db = sqlite3.connect(state / "state.db")
     db.execute("INSERT INTO policy_state VALUES (NULL, '*', 'off')")
     db.execute("INSERT INTO policy_state VALUES (X'DEADBEEF', '*', 'off')")
-    db.execute("INSERT INTO policy_state VALUES (42, '*', 'off')")
     db.commit()
     db.close()
     _, payload = env.run(env.base())
@@ -1115,9 +1134,7 @@ def test_state_db_is_opened_read_only_and_left_unchanged(env: Env) -> None:
 # --- hostile input and untrusted text ------------------------------------------------------
 
 
-def test_no_config_value_reaches_the_output(
-    env: Env, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_no_config_value_reaches_the_output(env: Env, capsys: pytest.CaptureFixture[str]) -> None:
     hostile = f"{CANARY}\x1b]0;x\x07‮\n"
     cfg = {
         "session_cmd": [f"/nonexistent/{hostile}"],

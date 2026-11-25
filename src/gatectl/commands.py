@@ -148,9 +148,14 @@ SPECS: tuple[CommandSpec, ...] = (
 )
 
 # Command name -> handler. A command with no entry fails with "command not implemented".
-# TODO(#11, #14, #15, #18, #28, #29, #32, #33, #34, #10): each implementing issue registers its
+# TODO(#11, #14, #15, #18, #28, #29, #32, #33, #34): each implementing issue registers its
 # handler here, one line per command.
 HANDLERS: dict[str, Handler] = {}
+
+
+from gatectl import validate as _validate  # noqa: E402  (it imports Context and Result above)
+
+HANDLERS["validate"] = _validate.handle
 
 
 def dispatch(ctx: Context) -> Result:

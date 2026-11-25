@@ -150,6 +150,11 @@ class _Files:
         return name if isinstance(name, str) else None
 
 
+def plugin_name_of(directory: str) -> str | None:
+    """The plugin's ``name`` (``.claude-plugin/plugin.json``, read like every hashed file)."""
+    return _Files(None, time.monotonic).plugin_name(directory)
+
+
 def _text_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
 

@@ -1,1 +1,1 @@
-{"valid":false,"problems":[{"code":"invalid_value","path":"policies.review.timeout","message":"timeout must be a positive number"}],"warnings":[],"probe":null}
+{"valid":false,"problems":[{"code":"invalid_value","path":"policies.review.timeout","message":"must be greater than 0 and at most 86400 s"}],"warnings":[],"probe":null}

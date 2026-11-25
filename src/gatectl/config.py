@@ -116,6 +116,11 @@ def _path(parts: tuple[str | int, ...]) -> str:
     return sanitize(".".join(_seg(p) for p in parts), PATH_CAP)
 
 
+def problem_path(*parts: str | int) -> str:
+    """The dotted, sanitized and capped path of a problem (every segment is a key or an index)."""
+    return _path(parts)
+
+
 _BUILTIN_MESSAGES = {
     "string_type": "expected a string",
     "int_type": "expected an integer",
@@ -890,6 +895,7 @@ __all__ = [
     "default_config_path",
     "load_config",
     "load_for_command",
+    "problem_path",
     "requires_valid_shared",
     "resolve_session_cmd",
 ]
