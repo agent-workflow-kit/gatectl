@@ -778,7 +778,8 @@ def test_a_busy_write_lock_fails_after_the_bounded_wait_not_forever(sdir: Path) 
         with pytest.raises(store.StoreBusyError):
             with s.write():
                 pytest.fail("must not get the lock")
-        assert time.monotonic() - start < 5  # the wait, plus one retry, is bounded
+        elapsed = time.monotonic() - start
+        assert 0.1 <= elapsed < 0.35  # one wait of busy_timeout, no second one
         # a reader never waits for the writer
         reader = store.open_store(sdir, create=False, busy_timeout=0.2)
         assert reader is not None
@@ -797,6 +798,273 @@ def test_store_busy_error_is_an_internal_error_without_reason() -> None:
     err = store.StoreBusyError("busy")
     assert isinstance(err, InternalError)
     assert err.exit_code == 1
+
+
+# --- round 1 review fixes -----------------------------------------------------------------------
+
+
+def _loop_writer(directory: str, seconds: float, out: Any) -> None:
+    errors: list[str] = []
+    try:
+        s = store.open_store(Path(directory), create=True)
+        assert s is not None
+        end = time.monotonic() + seconds
+        n = 0
+        while time.monotonic() < end:
+            with s.write():
+                s.write_state_row(
+                    "p", f"github.com/o/r{n % 5}", "shadow", set_by="auto:t", set_at=TS,
+                    cause="set", fingerprint=FP,
+                )  # fmt: skip
+            n += 1
+        s.close()
+    except Exception as exc:  # reported to the parent
+        errors.append(f"{type(exc).__name__}: {exc} {getattr(exc, 'reason', None)}")
+    out.put(errors)
+
+
+def _loop_reader(directory: str, seconds: float, out: Any) -> None:
+    errors: list[str] = []
+    end = time.monotonic() + seconds
+    try:
+        while time.monotonic() < end:
+            s = store.open_store(Path(directory), create=False)
+            assert s is not None
+            s.rows("p")
+            s.close()
+    except Exception as exc:  # reported to the parent
+        errors.append(f"{type(exc).__name__}: {exc} {getattr(exc, 'reason', None)}")
+    out.put(errors)
+
+
+def test_readers_racing_writers_never_see_a_spurious_error(sdir: Path) -> None:
+    """R1: extended busy codes (261 and kin) are busy, never 'not usable' or state_db_missing."""
+    opened(sdir).close()
+    audit_line(sdir)
+    ctx = multiprocessing.get_context("spawn")
+    out = ctx.Queue()
+    procs = [ctx.Process(target=_loop_writer, args=(str(sdir), 2.0, out)) for _ in range(2)]
+    procs += [ctx.Process(target=_loop_reader, args=(str(sdir), 2.0, out)) for _ in range(2)]
+    try:
+        for p in procs:
+            p.start()
+        results = [out.get(timeout=120) for _ in procs]
+        for p in procs:
+            p.join(30)
+    finally:
+        _reap(procs)
+    assert [e for errs in results for e in errs] == []
+
+
+@pytest.mark.parametrize("code", [261, 5, 6, 15, 517])
+def test_extended_busy_codes_translate_to_busy(code: int) -> None:
+    exc = sqlite3.OperationalError("x")
+    exc.sqlite_errorcode = code  # type: ignore[attr-defined]
+    assert isinstance(store._translate(exc), store.StoreBusyError)
+
+
+def test_extended_busy_code_in_read_version_is_raised_not_a_foreign_database() -> None:
+    class Con:
+        calls = 0
+
+        def execute(self, sql: str) -> Any:
+            self.calls += 1
+            if "sqlite_master" in sql:
+                return self
+            exc = sqlite3.OperationalError("database is locked")
+            exc.sqlite_errorcode = 261  # type: ignore[attr-defined]
+            raise exc
+
+        def fetchone(self) -> tuple[int]:
+            return (1,)
+
+    with pytest.raises(sqlite3.OperationalError):
+        store._read_version(Con())  # type: ignore[arg-type]
+
+
+def _creator(directory: str, start_at: float, out: Any) -> None:
+    while time.time() < start_at:
+        pass
+    try:
+        s = store.open_store(Path(directory), create=True)
+        assert s is not None
+        s.close()
+        out.put("ok")
+    except Exception as exc:  # reported to the parent
+        out.put(f"{type(exc).__name__}: {exc}")
+
+
+def test_simultaneous_first_creators_all_succeed(tmp_path: Path) -> None:
+    """R4: losing the O_EXCL race re-vets the file; the WAL switch waits out a racing creator."""
+    ctx = multiprocessing.get_context("spawn")
+    for rnd in range(5):
+        directory = tmp_path / f"r{rnd}" / "g"
+        out = ctx.Queue()
+        start_at = time.time() + 1.5
+        args = (str(directory), start_at, out)
+        procs = [ctx.Process(target=_creator, args=args) for _ in range(4)]
+        try:
+            for p in procs:
+                p.start()
+            results = [out.get(timeout=120) for _ in procs]
+            for p in procs:
+                p.join(30)
+        finally:
+            _reap(procs)
+        assert results == ["ok"] * 4, results
+
+
+def test_a_file_that_appears_between_the_vet_and_the_create_is_vetted_not_refused(
+    sdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sdir.mkdir(parents=True, mode=0o700)
+    real = store._vet_file
+    calls = {"n": 0}
+
+    def racing(path: Path) -> Any:
+        if path.name == "state.db" and calls["n"] == 0:
+            calls["n"] += 1
+            result = real(path)  # absent
+            path.write_bytes(b"")  # another creator wins here
+            os.chmod(path, 0o600)
+            return result
+        return real(path)
+
+    monkeypatch.setattr(store, "_vet_file", racing)
+    opened(sdir).close()
+    assert (sdir / "state.db").exists()
+
+
+def test_a_creation_race_that_leaves_a_non_regular_file_is_refused(
+    sdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sdir.mkdir(parents=True, mode=0o700)
+    real = store._vet_file
+
+    def racing(path: Path) -> Any:
+        result = real(path)
+        if path.name == "state.db" and result is None and not path.exists():
+            os.mkfifo(path)
+        return result
+
+    monkeypatch.setattr(store, "_vet_file", racing)
+    with pytest.raises(InternalError):
+        store.open_store(sdir, create=True)
+
+
+def test_a_huge_numeric_schema_version_is_schema_newer_and_untouched(sdir: Path) -> None:
+    """R3: no 18-digit cap."""
+    path = make_db(sdir, None)
+    con = sqlite3.connect(path)
+    con.execute("INSERT INTO meta VALUES('schema_version', ?)", ("9" * 30,))
+    con.commit()
+    con.close()
+    before = digest(path)
+    for create in (True, False):
+        with pytest.raises(InternalError) as info:
+            store.open_store(sdir, create=create)
+        assert info.value.reason == "schema_newer"
+    assert digest(path) == before
+
+
+@pytest.mark.parametrize("history", [True, False])
+@pytest.mark.parametrize("create", [True, False])
+def test_a_non_sqlite_file_is_state_db_missing_only_over_a_history(
+    sdir: Path, create: bool, history: bool
+) -> None:
+    """R5: a file with no valid SQLite header has no schema_version row."""
+    sdir.mkdir(parents=True, mode=0o700)
+    if history:
+        audit_line(sdir)
+    path = sdir / "state.db"
+    path.write_bytes((CANARY + "\n").encode() * 100)
+    os.chmod(path, 0o600)
+    before = digest(path)
+    with pytest.raises(InternalError) as info:
+        store.open_store(sdir, create=create)
+    assert info.value.reason == ("state_db_missing" if history else None)
+    assert CANARY not in info.value.message
+    assert digest(path) == before
+
+
+def test_a_valid_header_with_a_corrupt_tree_over_a_history_is_a_plain_error(sdir: Path) -> None:
+    s = opened(sdir)
+    put(s)
+    s.close()
+    audit_line(sdir)
+    path = sdir / "state.db"
+    raw = bytearray(path.read_bytes())
+    for i in range(100, len(raw), 997):
+        raw[i] ^= 0xFF
+    path.write_bytes(bytes(raw))
+    with pytest.raises(InternalError) as info:
+        s2 = store.open_store(sdir, create=True)
+        assert s2 is not None
+        try:
+            s2.rows("p")
+        finally:
+            s2.close()
+    assert info.value.reason is None
+
+
+def test_the_revision_counter_cannot_overflow(sdir: Path) -> None:
+    """R8: a tampered row with rev 2**63-1 is a fixed-text internal error, not OverflowError."""
+    s = opened(sdir)
+    put(s)
+    with s.write():
+        s.con.execute("UPDATE policy_state SET rev = ?", (2**63 - 1,))
+    with pytest.raises(InternalError) as info:
+        put(s, "q")
+    assert "exhausted" in info.value.message
+    s.close()
+
+
+def test_a_huge_tampered_text_value_is_capped_when_read(sdir: Path) -> None:
+    """R9: the text columns are cut in SQL, not after fetching them whole."""
+    s = opened(sdir)
+    put(s)
+    big = "x" * (2 * 1024 * 1024)
+    with s.write():
+        s.con.execute("UPDATE policy_state SET set_by = ?, fingerprint = ?", (big, big))
+    for row in (s.get_row("p", "*"), s.rows("p")[0], s.effective("p", "*", "off").row):
+        assert row is not None
+        assert len(row.set_by) <= 512 and len(row.fingerprint) <= 512
+    s.close()
+
+
+def test_the_select_statements_cut_text_columns() -> None:
+    assert "substr(set_by" in store.Store._COLUMNS
+
+
+@pytest.mark.parametrize("kind", ["fifo", "dir", "symlink", "empty_regular"])
+@pytest.mark.parametrize("create", [True, False])
+def test_the_store_judges_an_audit_log_by_lstat_and_fails_closed(
+    sdir: Path, tmp_path: Path, kind: str, create: bool
+) -> None:
+    """R11: a FIFO, directory or symlink audit.jsonl is history; no hang, no database made."""
+    sdir.mkdir(parents=True, mode=0o700)
+    target = sdir / "audit.jsonl"
+    if kind == "fifo":
+        os.mkfifo(target)
+    elif kind == "dir":
+        target.mkdir()
+    elif kind == "symlink":
+        (tmp_path / "elsewhere").write_bytes(b"")
+        target.symlink_to(tmp_path / "elsewhere")
+    else:
+        target.write_bytes(b"")
+    if kind == "empty_regular":
+        s = store.open_store(sdir, create=create)
+        assert (s is None) == (not create)
+        if s:
+            s.close()
+        return
+    start = time.monotonic()
+    with pytest.raises(InternalError) as info:
+        store.open_store(sdir, create=create)
+    assert info.value.reason == "state_db_missing"
+    assert time.monotonic() - start < 5
+    assert not (sdir / "state.db").exists()
 
 
 def _iter_unused() -> Iterator[None]:  # keeps the import of Iterator meaningful for pyright

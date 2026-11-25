@@ -4,16 +4,19 @@
 Upgrades). This module owns how it is opened and what is in it:
 
 * The directory is a real directory owned by the user (0700); ``state.db`` and its ``-wal``,
-  ``-shm`` and ``-journal`` files are regular files owned by the user (0600), opened with
-  ``O_NOFOLLOW | O_NONBLOCK`` so a link or a FIFO is refused and never followed or waited on.
+  ``-shm`` and ``-journal`` files are regular files owned by the user (0600). They are judged
+  with ``lstat`` and tightened with ``chmod`` by path, never opened to inspect them, so a link or
+  a FIFO is refused and never followed or waited on.
 * Migrations are additive only and run in one ``BEGIN IMMEDIATE`` transaction each. A database
   from a newer gatectl is refused (``schema_newer``) before anything is written to it.
 * A missing, empty or schema-less ``state.db`` next to a non-empty ``audit.jsonl`` is refused
   (``state_db_missing``): gatectl never starts a fresh database over an existing history.
 * Text read from the database is untrusted: it is validated and sanitized, and error messages
   are fixed text that never echo it.
-* A write waits at most ``busy_timeout`` for the lock and retries the transaction once; a
-  reader opens the database read-only and never waits for a writer (WAL).
+* A write waits at most ``busy_timeout`` for the lock, once (retrying the whole transaction is
+  the caller's business); a reader opens the database read-only and never waits for a writer
+  (WAL). Busy-class errors are recognised by their primary code (``code & 0xFF``): Python
+  reports SQLite's extended codes (261 is ``SQLITE_BUSY_RECOVERY``).
 
 ``validate.py`` reads ``state.db`` with raw read-only SQLite and depends on the names
 ``meta(key, value)`` with a ``schema_version`` row, ``policy_state.policy`` and
@@ -44,8 +47,13 @@ DEFAULT_BUSY_TIMEOUT = 2.0  # defaults.record_reserve
 _TEXT_CAP = 512
 _ROW_LIMIT = 10000  # rows of one policy a read returns (a tampered database stays bounded)
 _STRICTNESS = {"enforced": 0, "shadow": 1, "off": 2}
-_VERSION = re.compile(r"[0-9]{1,18}", re.ASCII)
+_DIGITS = re.compile(r"[0-9]{1,1000}", re.ASCII)
+_MAX_REV = 2**63 - 1
+_TEXT_SQL = 513  # text columns are cut in SQL to a little over the cap
 _SQLITE_BUSY = (5, 6, 15)  # SQLITE_BUSY, SQLITE_LOCKED, SQLITE_PROTOCOL (WAL lock race)
+_SQLITE_ERROR = 1
+_SQLITE_NOTADB = 26
+_BUSY_WAIT = 2.0  # total bound of the short retries of a busy-class read error
 _SIDECARS = ("-wal", "-shm", "-journal")
 
 # Seam the tests replace (the module ``os`` itself is never patched).
@@ -174,9 +182,26 @@ def _fail(message: str, reason: str | None = None) -> InternalError:
 _UNUSABLE = "state.db is not a usable database"
 
 
+def _primary(exc: sqlite3.Error) -> int | None:
+    """The primary result code: Python reports extended codes (261 = 5 | 1 << 8)."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    return code & 0xFF if isinstance(code, int) else None
+
+
+def _is_busy(exc: sqlite3.Error) -> bool:
+    return _primary(exc) in _SQLITE_BUSY
+
+
+def _parse_int(value: object) -> int | None:
+    """A non-negative decimal integer of any size up to 1000 digits, else None."""
+    if isinstance(value, str) and _DIGITS.fullmatch(value) is not None:
+        return int(value)
+    return None
+
+
 def _translate(exc: sqlite3.Error) -> InternalError:
     """A fixed-text error for a SQLite failure: never the driver's text (it can echo content)."""
-    if getattr(exc, "sqlite_errorcode", None) in _SQLITE_BUSY:
+    if _is_busy(exc):
         return StoreBusyError("state.db is busy")
     return _fail(_UNUSABLE)
 
@@ -248,6 +273,9 @@ def _has_history(directory: Path) -> bool:
 
 
 def _same_file(path: Path, ident: tuple[int, int]) -> bool:
+    """Best-effort detection that ``path`` is still the file that was vetted. It does not prove
+    which inode the connection holds and a swap-and-restore passes it; it is not a defence (the
+    state directory is 0700, and whoever can write there as this user can edit the database)."""
     try:
         info = os.lstat(path)
     except OSError:
@@ -263,16 +291,19 @@ def _uri(path: Path, query: str) -> str:
 
 
 def _first(con: sqlite3.Connection, sql: str) -> tuple[object, ...] | None:
-    """One row of ``sql``. SQLite answers SQLITE_PROTOCOL ("locking protocol") to a reader that
-    races the first use of a WAL by a writer; that is transient and is retried a few times."""
-    for attempt in range(20):
+    """One row of ``sql``. A reader that races a writer (the first use of a WAL, a checkpoint,
+    recovery) is answered with a busy-class code, SQLITE_PROTOCOL or an extended busy code such
+    as 261; that is transient and is retried with short sleeps, bounded by ``_BUSY_WAIT``."""
+    deadline = time.monotonic() + _BUSY_WAIT
+    attempt = 0
+    while True:
         try:
             return con.execute(sql).fetchone()
         except sqlite3.OperationalError as exc:
-            if getattr(exc, "sqlite_errorcode", None) != 15 or attempt == 19:
+            if not _is_busy(exc) or time.monotonic() >= deadline:
                 raise
-            time.sleep(0.01 * (attempt + 1))
-    raise AssertionError("unreachable")
+            attempt += 1
+            time.sleep(min(0.005 * attempt, 0.05))
 
 
 def _read_version(con: sqlite3.Connection) -> int | None | bool:
@@ -281,17 +312,17 @@ def _read_version(con: sqlite3.Connection) -> int | None | bool:
     if _first(con, "SELECT 1 FROM sqlite_master LIMIT 1") is None:
         return None
     try:
-        row = con.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+        row = _first(con, "SELECT value FROM meta WHERE key = 'schema_version'")
     except sqlite3.OperationalError as exc:
-        if getattr(exc, "sqlite_errorcode", None) in _SQLITE_BUSY:
-            raise
-        return False  # no such table: meta
+        if _primary(exc) == _SQLITE_ERROR and "no such table: meta" in str(exc):
+            return False
+        raise  # busy past the bound, corrupt, not a database: the caller decides
     if row is None:
         return False
-    value = row[0]
-    if not isinstance(value, str) or _VERSION.fullmatch(value) is None or int(value) < 1:
+    number = _parse_int(row[0])
+    if number is None or number < 1:
         raise _fail("state.db has an unusable schema_version")
-    return int(value)
+    return number
 
 
 def _peek(path: Path) -> int | None | bool:
@@ -313,6 +344,8 @@ def _peek(path: Path) -> int | None | bool:
         con.execute("PRAGMA trusted_schema=OFF")
         return _read_version(con)
     except sqlite3.Error as exc:
+        if _primary(exc) == _SQLITE_NOTADB:
+            return False  # no valid SQLite header: no schema_version row (interface.md)
         raise _translate(exc) from None
     finally:
         con.close()
@@ -353,14 +386,12 @@ class Store:
     # -- transactions --
 
     def _begin(self) -> None:
-        for attempt in (1, 2):  # the bounded wait, then one retry
-            try:
-                self.con.execute("BEGIN IMMEDIATE")
-                return
-            except sqlite3.Error as exc:
-                err = _translate(exc)
-                if attempt == 2 or not isinstance(err, StoreBusyError):
-                    raise err from None
+        """One attempt: SQLite waits ``busy_timeout`` for the lock inside it. Retrying the whole
+        step-8 transaction (state re-read included) belongs to the caller."""
+        try:
+            self.con.execute("BEGIN IMMEDIATE")
+        except sqlite3.Error as exc:
+            raise _translate(exc) from None
 
     @contextmanager
     def write(self) -> Iterator[Store]:
@@ -397,9 +428,11 @@ class Store:
         try:
             self.con.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('state_rev', '0')")
             raw = self.con.execute("SELECT value FROM meta WHERE key = 'state_rev'").fetchone()[0]
-            counter = int(raw) if isinstance(raw, str) and _VERSION.fullmatch(raw) else 0
+            counter = _parse_int(raw) or 0
             top = self.con.execute("SELECT COALESCE(MAX(rev), 0) FROM policy_state").fetchone()[0]
             rev = max(counter, top if isinstance(top, int) else 0) + 1
+            if rev > _MAX_REV:
+                raise _fail("state.db revision counter is exhausted")
             self.con.execute("UPDATE meta SET value = ? WHERE key = 'state_rev'", (str(rev),))
         except sqlite3.Error as exc:
             raise _translate(exc) from None
@@ -442,7 +475,13 @@ class Store:
             raise _translate(exc) from None
         return [_row(r) for r in raw]
 
-    _COLUMNS = "policy, scope, state, set_by, set_at, cause, fingerprint, rev FROM policy_state"
+    # Text columns are cut in SQL so a huge tampered value is never read whole.
+    _COLUMNS = (
+        f"substr(policy, 1, {_TEXT_SQL}), substr(scope, 1, {_TEXT_SQL}),"
+        f" substr(state, 1, {_TEXT_SQL}), substr(set_by, 1, {_TEXT_SQL}),"
+        f" substr(set_at, 1, {_TEXT_SQL}), substr(cause, 1, {_TEXT_SQL}),"
+        f" substr(fingerprint, 1, {_TEXT_SQL}), rev FROM policy_state"
+    )
 
     def rows(self, policy: str) -> list[StateRow]:
         """Every stored row of ``policy`` (configured or not), by scope."""
@@ -554,6 +593,32 @@ def _migrate(con: sqlite3.Connection, store: Store) -> None:
                 raise _translate(exc) from None
 
 
+def _ensure_wal(con: sqlite3.Connection, busy_timeout: float) -> None:
+    """Switch to WAL. Concurrent first creators answer each other "database is locked" at once
+    (the switch does not use the busy handler), so a busy-class error is retried, re-querying the
+    mode each time, within ``busy_timeout``."""
+    deadline = time.monotonic() + busy_timeout
+    attempt = 0
+    busy = False
+    while True:
+        try:
+            mode = str(con.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+            if mode != "wal":
+                mode = str(con.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower()
+            if mode == "wal":
+                return
+        except sqlite3.OperationalError as exc:
+            if not _is_busy(exc):
+                raise
+            busy = True
+        if time.monotonic() >= deadline:
+            if busy:
+                raise StoreBusyError("state.db is busy")
+            raise _fail("state.db cannot use the WAL journal here")
+        attempt += 1
+        time.sleep(min(0.005 * attempt, 0.05))
+
+
 def _refuse_missing(history: bool) -> None:
     if history:
         raise _fail(
@@ -590,12 +655,15 @@ def open_store(
             fd = os.open(
                 path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600
             )
+        except FileExistsError:
+            pass  # another creator won the race: vet the file that is there now
         except OSError:
             raise _fail("state.db cannot be created safely") from None
-        os.close(fd)
+        else:
+            os.close(fd)
         ident = _vet_file(path)
         if ident is None:
-            raise _fail(_UNUSABLE)
+            raise _fail("state.db cannot be created safely")
     _vet_sidecars(path)
 
     found = _peek(path)
@@ -631,9 +699,7 @@ def open_store(
         if create:
             # Query first: setting the mode on a database that is already WAL needs locks that a
             # busy writer holds.
-            mode_now = con.execute("PRAGMA journal_mode").fetchone()[0].lower()
-            if mode_now != "wal" and con.execute("PRAGMA journal_mode=WAL").fetchone()[0] != "wal":
-                raise _fail("state.db cannot use the WAL journal here")
+            _ensure_wal(con, busy_timeout)
             if version is None or version < latest_version():  # type: ignore[operator]
                 _migrate(con, store)
         _vet_sidecars(path)

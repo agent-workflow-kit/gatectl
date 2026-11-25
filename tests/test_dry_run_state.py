@@ -169,3 +169,22 @@ def test_a_tampered_database_never_echoes_its_text(
     assert code == 1
     assert CANARY not in out and CANARY not in err
     _ = rule  # imported for parity with the other dry-run tests
+
+
+@pytest.mark.parametrize("history", [True, False])
+def test_a_non_sqlite_database_is_state_db_missing_only_over_a_history(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], state_dir: Path, history: bool
+) -> None:
+    state_dir.mkdir(parents=True, mode=0o700)
+    if history:
+        (state_dir / "audit.jsonl").write_bytes(b'{"x":1}\n')
+    (state_dir / "state.db").write_bytes((CANARY + "\n").encode() * 100)
+    (state_dir / "state.db").chmod(0o600)
+    config = cfg(tmp_path, {"p": MIXED})
+    code, out, _ = run(
+        capsys,
+        ["check", "p", "--dry-run", "--config", config, "--input", input_file(tmp_path, {})],
+    )
+    assert code == 1
+    assert error_of(out).get("reason") == ("state_db_missing" if history else None)
+    assert CANARY not in out
