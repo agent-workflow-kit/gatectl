@@ -76,7 +76,7 @@ def test_bad_utf8(data: bytes) -> None:
 
 def test_utf16_is_not_utf8() -> None:
     assert parse_kind('{"a":1}'.encode("utf-16")) in {"not_utf8", "bom"}
-    assert parse_kind('{"a":1}'.encode("utf-16-le")) == "not_utf8"
+    assert parse_kind('{"a":1}'.encode("utf-16-le")) == "syntax"  # NULs, but valid UTF-8
 
 
 def test_bom_rejected() -> None:
