@@ -32,8 +32,7 @@ COMMAND_OF = {
     "show": "show",
     # todo(#29): replace the stub with the real stats output
     "stats": "stats",
-    # todo(#14): replace the stub with the real set output
-    "set": "set",
+    # set is real (#14): see tests/test_set.py::test_set_shadow_prints_the_golden_output
     # policies-static is real (#11): see tests/test_policies.py::test_the_output_is_golden.
     # todo(#15): "policies" (stored rows and records) stays a stub until the stored view lands
     "policies": "policies",

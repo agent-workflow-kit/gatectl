@@ -567,6 +567,41 @@ class Store:
         )
         return found[0] if found else None
 
+    def has_policy(self, policy: str) -> bool:
+        """Whether ``policy`` has a stored row or a recorded decision (a removed policy is known
+        to ``set`` only through this)."""
+        try:
+            found = self.con.execute(
+                "SELECT 1 FROM policy_state WHERE policy = ? UNION ALL"
+                " SELECT 1 FROM decisions WHERE policy = ? LIMIT 1",
+                (policy, policy),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise _translate(exc) from None
+        return found is not None
+
+    def has_decision(self, policy: str, scope: str) -> bool:
+        """Whether a decision of ``policy`` was recorded for exactly ``scope``."""
+        try:
+            found = self.con.execute(
+                "SELECT 1 FROM decisions WHERE policy = ? AND scope = ? LIMIT 1", (policy, scope)
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise _translate(exc) from None
+        return found is not None
+
+    def meta(self, key: str) -> str | None:
+        """A ``meta`` value as text (cut to the text cap), or None when absent or not text."""
+        try:
+            found = self.con.execute(
+                f"SELECT substr(value, 1, {_TEXT_SQL}) FROM meta"  # noqa: S608
+                " WHERE key = ? AND typeof(value) = 'text'",
+                (key,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise _translate(exc) from None
+        return sanitize(found[0], _TEXT_CAP) if found is not None else None
+
     def effective(
         self, policy: str, scope: str, initial: str, *, indeterminate: bool = False
     ) -> Resolved:
