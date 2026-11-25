@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 from pathlib import Path
 
 from gatectl import ids, procinfo
@@ -31,7 +32,12 @@ class UnsafeTree(Exception):
     """A tree (or its name) is not what gatectl would have created; nothing further was done."""
 
 
+_LABEL_MAX = 160
+
+
 def _unsafe(path: str, why: str) -> UnsafeTree:
+    if len(path) > _LABEL_MAX:  # a deep tree must not put its whole path in a message
+        path = f"{path[: _LABEL_MAX // 2]}...{path[-(_LABEL_MAX // 2 - 3) :]}"
     return UnsafeTree(f"{path}: {why}")
 
 
@@ -50,7 +56,7 @@ def _open_dir(name: str, dir_fd: int | None, label: str) -> int:
         try:
             fd = os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
         except PermissionError:
-            os.chmod(name, 0o700, dir_fd=dir_fd)
+            _make_accessible(name, dir_fd, before, label)
             fd = os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
     except OSError as e:
         raise _unsafe(label, e.strerror or "cannot open") from e
@@ -61,15 +67,52 @@ def _open_dir(name: str, dir_fd: int | None, label: str) -> int:
     return fd
 
 
-def _state_tmp(state_dir: Path) -> int:
-    """Open ``<state_dir>/tmp`` (created 0700 if missing) and return its descriptor."""
-    state_dir.mkdir(parents=True, exist_ok=True)
+def _make_accessible(name: str, dir_fd: int | None, before: os.stat_result, label: str) -> None:
+    """chmod 0700 a directory that cannot be opened, through a handle that is not a path.
+
+    The entry is opened with ``O_PATH`` and ``O_NOFOLLOW`` (no permission needed, a link is
+    not followed), its identity is compared with what was judged, and only then is it changed,
+    through ``/proc/self/fd``, so a swap after the judgment cannot redirect the chmod. Where
+    there is no ``O_PATH`` the directory is refused (macOS: todo(#37)).
+    """
+    if not sys.platform.startswith("linux"):
+        raise _unsafe(label, "not readable and cannot be made readable safely")
+    pfd = os.open(name, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
     try:
-        os.mkdir(state_dir / "tmp", 0o700)
+        now = os.fstat(pfd)
+        if (now.st_dev, now.st_ino) != (before.st_dev, before.st_ino) or not _mine(now):
+            raise _unsafe(label, "changed while opening")
+        os.chmod(f"/proc/self/fd/{pfd}", 0o700)
+    finally:
+        os.close(pfd)
+
+
+def _state_tmp(state_dir: Path) -> int:
+    """Open ``<state_dir>/tmp`` (created 0700 if missing) and return its descriptor.
+
+    The state directory is judged like ``store.py`` judges it: a real directory owned by this
+    user (a link or a file is refused with a clear message), created 0700 whatever the umask,
+    an existing one tightened to 0700.
+    """
+    state_dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.mkdir(state_dir, 0o700)
     except FileExistsError:
         pass
-    state_fd = os.open(state_dir, _DIR_FLAGS)
     try:
+        state_fd = os.open(state_dir, _DIR_FLAGS)
+    except OSError as e:
+        raise _unsafe(str(state_dir), f"the state directory is not a real directory ({e})") from e
+    try:
+        info = os.fstat(state_fd)
+        if not _mine(info):
+            raise _unsafe(str(state_dir), "the state directory is not owned by the current user")
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            os.fchmod(state_fd, 0o700)
+        try:
+            os.mkdir("tmp", 0o700, dir_fd=state_fd)
+        except FileExistsError:
+            pass
         fd = _open_dir("tmp", state_fd, str(state_dir / "tmp"))
     finally:
         os.close(state_fd)
@@ -97,8 +140,17 @@ def create_decision_dir(state_dir: Path, decision_id: str) -> Path:
         try:
             _write_owner(fd, str(path))
         except BaseException:
+            # Unlink a partly written owner first, or the rmdir fails with ENOTEMPTY and hides
+            # the real error.
+            try:
+                os.unlink(OWNER, dir_fd=fd)
+            except OSError:
+                pass
             os.close(fd)
-            os.rmdir(decision_id, dir_fd=tmp_fd)
+            try:
+                os.rmdir(decision_id, dir_fd=tmp_fd)
+            except OSError:
+                pass
             raise
         os.close(fd)
         return path
@@ -115,33 +167,66 @@ def _write_owner(dir_fd: int, label: str) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
     fd = os.open(OWNER, flags, 0o600, dir_fd=dir_fd)
     try:
-        os.write(fd, json.dumps(record).encode("ascii"))
+        view = memoryview(json.dumps(record).encode("ascii"))
+        while view:
+            view = view[os.write(fd, view) :]
     finally:
         os.close(fd)
 
 
 def make_script_dir(decision_dir: Path, n: int) -> Path:
-    """Create the private, empty ``s-<n>/`` working directory of the n-th script check."""
+    """Create the private, empty ``s-<n>/`` working directory of the n-th script check.
+
+    The decision directory is opened once without following a link and ``s-<n>`` is made
+    relative to that descriptor, so a swap of the directory's name cannot redirect it.
+    """
     if isinstance(n, bool) or not isinstance(n, int) or n < 1:
         raise ValueError(f"script check number must be 1 or more, got {n!r}")
     path = decision_dir / f"s-{n}"
-    os.mkdir(path, 0o700)
-    info = os.lstat(path)
-    if not stat.S_ISDIR(info.st_mode) or not _mine(info):
-        raise _unsafe(str(path), "not the directory just created")
+    try:
+        parent_fd = os.open(decision_dir, _DIR_FLAGS)
+    except OSError as e:
+        raise _unsafe(str(decision_dir), e.strerror or "cannot open") from e
+    try:
+        if not _mine(os.fstat(parent_fd)):
+            raise _unsafe(str(decision_dir), "not owned by this user")
+        os.mkdir(path.name, 0o700, dir_fd=parent_fd)
+        fd = os.open(path.name, _DIR_FLAGS, dir_fd=parent_fd)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISDIR(info.st_mode) or not _mine(info):
+                raise _unsafe(str(path), "not the directory just created")
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
     return path
 
 
 def remove_tree(path: Path | str) -> None:
-    """Remove a directory tree under the rules in the module docstring; no-op if missing."""
+    """Remove a directory tree under the rules in the module docstring; no-op if missing.
+
+    The parent is opened first, without following a link, and judged; only then is a missing
+    ``path`` a no-op. Every failure on the way is ``UnsafeTree``, never a bare ``OSError``.
+    """
     label = os.fspath(path)
+    parent_label = os.path.dirname(label) or "."
+    name = os.path.basename(label)
     try:
-        os.lstat(label)
+        parent_fd = os.open(parent_label, _DIR_FLAGS)
     except FileNotFoundError:
-        return
-    parent_fd = os.open(os.path.dirname(label) or ".", _DIR_FLAGS)
+        return  # nothing above it: nothing to remove
+    except OSError as e:
+        raise _unsafe(parent_label, e.strerror or "cannot open the parent") from e
     try:
-        name = os.path.basename(label)
+        if not _mine(os.fstat(parent_fd)):
+            raise _unsafe(parent_label, "not owned by this user")
+        try:
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            raise _unsafe(label, e.strerror or "cannot look at it") from e
         fd = _open_dir(name, parent_fd, label)
         try:
             _empty(fd, os.fstat(fd).st_dev, 0, True, label)

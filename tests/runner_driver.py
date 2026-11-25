@@ -8,7 +8,10 @@ and leaves a sleeping grandchild behind). The pids are written to ``<dir>``.
 At ``swept`` and ``done_sent`` a decoy is first put into the check's own process group (the
 leader is still an unreaped zombie there, so the group still exists): a watchdog that was told
 ``done`` must leave it alone, one that was not must kill it. Then the driver sends itself
-SIGKILL, so the real runner never gets to clean up. Test-only; it is not part of gatectl.
+SIGKILL, so the real runner never gets to clean up. Before that it waits (bounded) for the
+test to create ``<dir>/ack``: the test records every pid while all of them are alive, so a
+process that dies early is never mistaken for a recycled pid. Test-only; it is not part of
+gatectl.
 """
 
 from __future__ import annotations
@@ -67,6 +70,9 @@ def on_phase(phase: str, check_pid: int, watchdog_pid: int) -> None:
             close_fds=True,
         )
         write("decoy", decoy.pid)
+    give_up = time.monotonic() + 20
+    while time.monotonic() < give_up and not (directory / "ack").exists():
+        time.sleep(0.01)
     os.kill(os.getpid(), signal.SIGKILL)
 
 

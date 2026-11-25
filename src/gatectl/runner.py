@@ -27,7 +27,12 @@ Nothing here decodes with the locale: output is bytes, and text is decoded as UT
 
 # TODO(#18): the engine calls ``run_script_check`` per script check (numbering ``n``, the
 #   remaining-budget timeout, the ``skipped`` rules), removes ``tmp/<decision_id>/`` when the
-#   whole ``check`` ends and logs a ``warning`` event for ``workdir_left``.
+#   whole ``check`` ends and logs a ``warning`` event for ``workdir_left``, ``leader_unkilled``
+#   and ``pipes_held`` (``ScriptOutcome`` carries them; they are not warning codes). The engine
+#   must remove ``tmp/<decision_id>/`` wholesale (residue beside or renamed from ``s-<n>/`` is
+#   not found by the per-check removal) and treat any leftover as ``workdir_left``. It also
+#   catches the ``ValueError`` of ``run_script_check`` for an invalid ``env_allow`` or
+#   ``script_env_allow`` (the loaded config is validated, so this is a bug, not a verdict).
 # TODO(#20): detached hooks reuse ``run_process`` pieces (own group, deadlines, watchdog).
 # TODO(#37): where ``os.waitid`` is missing (some macOS builds), ``Child.wait_exited`` in
 #   gateway.py needs the ``kqueue`` fallback; the watchdog's start-time guard needs a macOS
@@ -50,7 +55,7 @@ from typing import Literal
 
 from gatectl import inputs, procinfo, tmptree
 from gatectl.gateway import Child, ChildSpec, Gateway, Stdio, watchdog_spec
-from gatectl.sanitize import sanitize
+from gatectl.sanitize import MARKER, sanitize
 
 OUTPUT_CAP = 64 * 1024
 KILL_GRACE = 2.0
@@ -62,7 +67,15 @@ _KILL_WAIT = 5.0
 _TICK = 0.02
 _READ_SIZE = 64 * 1024
 
-Status = Literal["exited", "signaled", "timeout", "cancelled", "tool_missing", "not_started"]
+Status = Literal[
+    "exited",
+    "signaled",
+    "timeout",
+    "cancelled",
+    "tool_missing",
+    "not_started",
+    "lifeline_lost",
+]
 PhaseHook = Callable[[str, int, int], None]
 
 # Watchdogs of leaders that would not die: kept referenced (so their lifeline stays open until
@@ -189,7 +202,7 @@ class _Run:
         self.t0 = time.monotonic()
         self.wd: Child | None = None
         self.child: Child | None = None
-        self.reason: Literal["timeout", "cancelled"] | None = None
+        self.reason: Literal["timeout", "cancelled", "lifeline_lost"] | None = None
         self.exited = False
         self.pipes_held = False
         self.not_started = False
@@ -226,14 +239,16 @@ class _Run:
             cwd=spec.cwd,
             env=spec.env,
         )
+        # Everything from here on is inside one try, so the group and the watchdog are always
+        # ended, even by a ``BaseException`` (an interrupt) right after the child started.
         try:
-            self.child = self.gw.start(child_spec)
-        except OSError as e:
-            missing = e.errno in _MISSING_ERRNOS and e.filename == spec.argv[0]
-            self.missing = missing
-            self.not_started = not missing
-            return
-        try:
+            try:
+                self.child = self.gw.start(child_spec)
+            except OSError as e:
+                missing = e.errno in _MISSING_ERRNOS and e.filename == spec.argv[0]
+                self.missing = missing
+                self.not_started = not missing
+                return
             try:
                 self._register()
             except _NoLifeline:
@@ -241,13 +256,20 @@ class _Run:
             self._phase("started")
             self._loop()
         finally:
-            self._teardown()
+            if self.child is not None:
+                self._teardown()
 
     def _phase(self, name: str) -> None:
         if self.on_phase is not None and self.child is not None and self.wd is not None:
             self.on_phase(name, self.child.pid, self.wd.pid)
 
     def _register(self) -> None:
+        """Tell the watchdog the check's group; no lifeline means the check is killed at once.
+
+        The check is already running when this is called, so a check with no lifeline may have
+        executed for a few microseconds before it is killed and reaped: it is "not started" as
+        a verdict, not as a guarantee that nothing ran.
+        """
         assert self.child is not None and self.wd is not None and self.wd.stdin is not None
         start = procinfo.start_time(self.child.pid)
         line = f"G {self.child.pid} {start or '-'}\n".encode("ascii")
@@ -255,9 +277,11 @@ class _Run:
             self.wd.stdin.write(line)
             self.wd.stdin.flush()
         except OSError:
-            # No lifeline, no check: a child nobody would stop if gatectl died must not run.
             self.not_started = True
             raise _NoLifeline from None
+        if self.wd.poll() is not None:  # the watchdog was already gone: nobody guards the group
+            self.not_started = True
+            raise _NoLifeline
 
     # -- the selector loop -------------------------------------------------------------
 
@@ -309,6 +333,8 @@ class _Run:
                             self.reason = "cancelled"
                         elif now >= deadline:
                             self.reason = "timeout"
+                        elif self.wd is not None and self.wd.poll() is not None:
+                            self.reason = "lifeline_lost"  # nobody would stop the group now
                         if self.reason is not None:
                             child.signal_group(signal.SIGTERM)
                             term_at = now
@@ -345,6 +371,8 @@ class _Run:
         child, wd = self.child, self.wd
         assert child is not None and wd is not None
         try:
+            if self.leader_unkilled:
+                return  # the loop already killed it and waited out ``_KILL_WAIT``: no second wait
             if not self.exited:
                 child.signal_group(signal.SIGKILL)
                 self.exited = child.wait_exited(_KILL_WAIT)
@@ -353,6 +381,8 @@ class _Run:
                 return
             child.signal_group(signal.SIGKILL)  # the sweep, with the leader still a zombie
             self._phase("swept")
+            if self.reason is None and wd.poll() is not None:
+                self.reason = "lifeline_lost"  # it died before ``done``: the run was unguarded
             self._tell_done(wd)
             self._phase("done_sent")
             self.returncode = child.wait(timeout=_KILL_WAIT)
@@ -540,6 +570,11 @@ class ScriptOutcome:
     duration_ms: int = 0
     # The private working directory could not be removed safely and was left for ``reconcile``.
     workdir_left: bool = False
+    # The leader survived SIGKILL (not reaped, its group left to the watchdog) / a process
+    # outside the group held a pipe past the drain deadline. Not warning codes (the interface's
+    # warning list is fixed); the engine logs them.
+    leader_unkilled: bool = False
+    pipes_held: bool = False
 
 
 @dataclass(frozen=True)
@@ -557,6 +592,8 @@ def _parse_stdout(data: bytes) -> _Output:
         return _Output()
     raw = obj.get("reason")
     reason = sanitize(raw, REASON_MAX) if isinstance(raw, str) and raw else None
+    if reason is not None and not reason.strip(f" {MARKER}"):
+        reason = None  # nothing readable is left: the exit form is the better detail
     return _Output(reason, "decision" in obj, obj.get("decision"))
 
 
@@ -574,7 +611,15 @@ def interpret(argv0: str, result: RunResult) -> ScriptOutcome:
         | None,
         detail: str | None,
     ) -> ScriptOutcome:
-        return ScriptOutcome(verdict, reason, detail, warnings, ms)
+        return ScriptOutcome(
+            verdict,
+            reason,
+            detail,
+            warnings,
+            ms,
+            leader_unkilled=result.leader_unkilled,
+            pipes_held=result.pipes_held,
+        )
 
     if result.status == "tool_missing":
         return outcome("escalate", "tool_missing", sanitize(argv0))
@@ -583,6 +628,8 @@ def interpret(argv0: str, result: RunResult) -> ScriptOutcome:
     parsed = _parse_stdout(result.stdout)
     if result.status == "timeout":
         return outcome("escalate", "timeout", parsed.reason or "timeout")
+    if result.status == "lifeline_lost":
+        return outcome("escalate", "check_error", "lifeline lost")
     if result.status == "cancelled":
         return outcome("escalate", "check_error", parsed.reason or "cancelled")
     if result.status == "signaled":
@@ -602,6 +649,13 @@ def interpret(argv0: str, result: RunResult) -> ScriptOutcome:
 # --- the whole script check ----------------------------------------------------------------
 
 
+def _argv(argv: object) -> tuple[str, ...]:
+    """The argv as a tuple; a string is refused (it would split into characters)."""
+    if isinstance(argv, str | bytes | bytearray) or not isinstance(argv, Sequence):
+        raise ValueError("argv must be a list of strings, not a string")
+    return tuple(argv)
+
+
 def run_script(
     gw: Gateway,
     *,
@@ -617,7 +671,7 @@ def run_script(
 ) -> ScriptOutcome:
     """Run one script check's process and return its verdict."""
     spec = RunSpec(
-        argv=tuple(argv),
+        argv=_argv(argv),
         env=env,
         cwd=cwd,
         timeout=timeout,
@@ -648,7 +702,13 @@ def run_script_check(
     check ends; if it cannot be removed safely it is left for ``reconcile`` and the outcome says
     so (``workdir_left``). The decision's own ``tmp/<decision_id>/`` directory is the caller's
     to remove when the whole ``check`` ends. A check whose directory cannot be made did not run.
+
+    The caller validates ``env_allow`` and ``defaults.script_env_allow`` first: an invalid
+    entry, or a string ``argv``, raises ``ValueError`` before anything is created or started.
+    Removal problems (``UnsafeTree`` or any ``OSError``) never replace the verdict: they set
+    ``workdir_left``.
     """
+    argv = _argv(argv)
     env = build_env(environ, default_env_allow, env_allow)
     try:
         decision_dir = tmptree.create_decision_dir(state_dir, decision_id)
@@ -669,6 +729,6 @@ def run_script_check(
         left = False
         try:
             tmptree.remove_tree(workdir)
-        except tmptree.UnsafeTree:
+        except (OSError, tmptree.UnsafeTree):
             left = True
     return replace(result, workdir_left=left)

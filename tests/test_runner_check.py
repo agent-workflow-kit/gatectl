@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from gatectl.gateway import Child, ChildSpec, Gateway
-from gatectl.runner import RunSpec, run_process, run_script_check
+from gatectl.runner import RunSpec, run_process, run_script, run_script_check
 from tests.proc_util import Tracker
 
 PY = sys.executable
@@ -188,3 +188,54 @@ def test_a_check_with_no_lifeline_is_stopped_and_not_started(tracker: Tracker) -
     assert r.status == "not_started"
     # Both children are gone: the check was killed and reaped, the watchdog released.
     assert all(not tracker.alive(item.pid) for item in tracker.items)
+
+
+# --- a check that tampers with its parent, and argv that is not a list ---------------------
+
+
+def test_a_check_that_locks_its_parent_still_gets_its_verdict_and_reports_the_leftover(
+    tracker: Tracker, tmp_path: Path
+) -> None:
+    decision_dir = tmp_path / "tmp" / ID
+    try:
+        o = check(tracker, tmp_path, "import os; os.chmod('..', 0)")
+        assert (o.verdict, o.reason) == ("allow", None)
+        assert o.workdir_left
+    finally:
+        decision_dir.chmod(0o700)
+    assert (decision_dir / "s-1").exists()
+
+
+def test_a_check_that_swaps_its_parent_for_a_link_is_never_reported_removed(
+    tracker: Tracker, tmp_path: Path
+) -> None:
+    code = (
+        f"import os\nos.rename('../../{ID}', '../../moved')\nos.symlink('moved', '../../{ID}')\n"
+        "raise SystemExit(11)"
+    )
+    o = check(tracker, tmp_path, code)
+    assert (o.verdict, o.reason) == ("deny", "check_denied")
+    assert o.workdir_left
+    assert (tmp_path / "tmp" / "moved" / "s-1").exists()
+
+
+def test_a_removal_error_of_any_kind_never_replaces_the_verdict(
+    tracker: Tracker, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(path: object) -> None:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr("gatectl.runner.tmptree.remove_tree", boom)
+    o = check(tracker, tmp_path, "raise SystemExit(11)")
+    assert (o.verdict, o.reason, o.workdir_left) == ("deny", "check_denied", True)
+
+
+@pytest.mark.parametrize("argv", ["/bin/true", b"/bin/true", bytearray(b"/bin/true")])
+def test_a_string_argv_is_refused_not_split_into_characters(
+    tracker: Tracker, tmp_path: Path, argv: object
+) -> None:
+    with pytest.raises(ValueError, match="argv"):
+        check(tracker, tmp_path, "pass", argv=argv)
+    assert not (tmp_path / "tmp").exists()
+    with pytest.raises(ValueError, match="argv"):
+        run_script(tracker.gateway(), argv=argv, payload=None, timeout=1.0, env={}, cwd="/")  # type: ignore[arg-type]

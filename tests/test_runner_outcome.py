@@ -260,21 +260,47 @@ def test_hostile_early_exit_with_a_big_stdin(tracker: Tracker) -> None:
     assert (o.verdict, o.reason) == ("deny", "check_denied")
 
 
-@pytest.mark.parametrize(
-    "stdout_code",
-    [
-        "sys.stdout.buffer.write(b'\\xff\\xfe{\"reason\": 1}')",
+# (what the script writes to stdout, the detail when it exits 11, the detail when it exits 2).
+# Only the last is parseable JSON with a ``reason``; the rest drop the detail.
+HOSTILE_STDOUT = [
+    pytest.param(
+        "sys.stdout.buffer.write(b'\\xff\\xfe{\"reason\": 1}')", "exit 11", "exit 2", id="bad-utf8"
+    ),
+    pytest.param(
         'sys.stdout.write(\'{"reason": "a", "reason": "b"}\')',
-        "sys.stdout.write('[' * 100000)",
+        "exit 11",
+        "exit 2",
+        id="duplicate-keys",
+    ),
+    pytest.param("sys.stdout.write('[' * 100000)", "exit 11", "exit 2", id="deep-nesting"),
+    pytest.param(
         'sys.stdout.write(\'{"reason": "x\\\\u0000\\\\u001b[0m"}\')',
-    ],
-)
+        "x\ufffd\ufffd[0m",
+        "x\ufffd\ufffd[0m",
+        id="control-chars",
+    ),
+]
+
+
+@pytest.mark.parametrize(("stdout_code", "detail_11", "detail_2"), HOSTILE_STDOUT)
 def test_hostile_stdout_shapes_still_follow_the_exit_code(
-    tracker: Tracker, stdout_code: str
+    tracker: Tracker, stdout_code: str, detail_11: str, detail_2: str
 ) -> None:
     o = go(tracker, f"import sys\n{stdout_code}\nsys.exit(11)")
-    assert (o.verdict, o.reason) == ("deny", "check_denied")
-    assert o.detail is None or all(ch.isprintable() for ch in o.detail)
+    assert (o.verdict, o.reason, o.detail) == ("deny", "check_denied", detail_11)
+
+
+@pytest.mark.parametrize(("stdout_code", "detail_11", "detail_2"), HOSTILE_STDOUT)
+def test_hostile_stdout_shapes_with_a_crash_exit_escalate(
+    tracker: Tracker, stdout_code: str, detail_11: str, detail_2: str
+) -> None:
+    o = go(tracker, f"import sys\n{stdout_code}\nsys.exit(2)")
+    assert (o.verdict, o.reason, o.detail) == ("escalate", "check_error", detail_2)
+
+
+def test_hostile_early_exit_with_a_big_stdin_and_a_crash_escalates(tracker: Tracker) -> None:
+    o = go(tracker, "import sys; sys.exit(2)", payload=b"x" * 5_000_000)
+    assert (o.verdict, o.reason, o.detail) == ("escalate", "check_error", "exit 2")
 
 
 def test_hostile_grandchild_ignoring_sigterm_escalates_and_leaves_nothing(
@@ -312,3 +338,33 @@ def test_environment_reaches_the_check_exactly(tracker: Tracker) -> None:
     # (Python itself adds LC_CTYPE when it coerces a C locale; it is not inherited from us.)
     o = go(tracker, code, env={"ONLY": "this"})
     assert o.detail is not None and json.loads(o.detail) == ["ONLY"]
+
+
+# --- the review round ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("reason", ["   ", "\n", "\x00", " \x00 \n ", "\u202e"])
+def test_a_reason_with_nothing_readable_falls_back_to_the_exit_form(reason: str) -> None:
+    assert out(rr(code=11, stdout=j(reason=reason))).detail == "exit 11"
+    assert out(rr(code=2, stdout=j(reason=reason))).detail == "exit 2"
+    assert out(rr(status="timeout", code=None, stdout=j(reason=reason))).detail == "timeout"
+    assert out(rr(status="signaled", code=None, signal=9, stdout=j(reason=reason))).detail == (
+        "signal 9"
+    )
+
+
+def test_a_reason_with_some_readable_text_is_kept() -> None:
+    assert out(rr(code=11, stdout=j(reason=" \x00x"))).detail == " \ufffdx"
+
+
+def test_the_outcome_carries_leader_unkilled_and_pipes_held() -> None:
+    o = out(rr(code=0))
+    assert (o.leader_unkilled, o.pipes_held) == (False, False)
+    o = out(rr(status="timeout", code=None, leader_unkilled=True, pipes_held=True))
+    assert (o.leader_unkilled, o.pipes_held) == (True, True)
+    assert o.warnings == ()  # not warning codes: the interface's list is fixed
+
+
+def test_a_lifeline_lost_run_is_check_error() -> None:
+    o = out(rr(status="lifeline_lost", code=0))
+    assert (o.verdict, o.reason, o.detail) == ("escalate", "check_error", "lifeline lost")

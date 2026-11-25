@@ -163,3 +163,139 @@ def test_remove_tree_refuses_absurd_depth_and_leaves_it(tmp_path: Path) -> None:
 
 def test_remove_tree_of_a_missing_path_is_a_no_op(tmp_path: Path) -> None:
     remove_tree(tmp_path / "never")
+
+
+# --- review round: parent handling, special files, state directory, creation races ---------
+
+
+def test_remove_tree_with_a_symlinked_parent_is_refused_not_a_silent_no_op(
+    tmp_path: Path,
+) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    os.symlink(real, link)
+    # The label is missing behind the link, but the link itself is not what gatectl made.
+    with pytest.raises(UnsafeTree):
+        remove_tree(link / "s-1")
+
+
+def test_remove_tree_with_an_unreadable_parent_is_unsafe_not_an_oserror(tmp_path: Path) -> None:
+    parent = tmp_path / "p"
+    (parent / "s-1").mkdir(parents=True)
+    parent.chmod(0)
+    try:
+        with pytest.raises(UnsafeTree):
+            remove_tree(parent / "s-1")
+    finally:
+        parent.chmod(0o700)
+
+
+def test_remove_tree_with_a_missing_parent_is_a_no_op(tmp_path: Path) -> None:
+    remove_tree(tmp_path / "gone" / "s-1")
+
+
+def test_remove_tree_refuses_a_socket_and_keeps_the_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import socket
+
+    root = tmp_path / "t"
+    root.mkdir()
+    monkeypatch.chdir(root)  # a relative name keeps the path under the AF_UNIX length limit
+    sock = socket.socket(socket.AF_UNIX)
+    try:
+        sock.bind("s")
+    finally:
+        sock.close()
+    with pytest.raises(UnsafeTree, match="unexpected file type"):
+        remove_tree(root)
+    assert root.exists()
+
+
+def test_the_depth_cap_message_does_not_embed_the_whole_path(tmp_path: Path) -> None:
+    fd = os.open(tmp_path, os.O_RDONLY)
+    try:
+        os.mkdir("t", dir_fd=fd)
+        d2 = os.open("t", os.O_RDONLY, dir_fd=fd)
+        os.close(fd)
+        fd = d2
+        for _ in range(400):
+            os.mkdir("dddddddddd", dir_fd=fd)
+            nxt = os.open("dddddddddd", os.O_RDONLY, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+    finally:
+        os.close(fd)
+    with pytest.raises(UnsafeTree) as info:
+        remove_tree(tmp_path / "t")
+    assert len(str(info.value)) < 400
+
+
+def test_a_fresh_state_directory_is_0700_whatever_the_umask(tmp_path: Path) -> None:
+    old = os.umask(0o022)
+    try:
+        create_decision_dir(tmp_path / "a" / "state", ID)
+    finally:
+        os.umask(old)
+    assert mode(tmp_path / "a" / "state") == 0o700
+    assert mode(tmp_path / "a" / "state" / "tmp") == 0o700
+
+
+def test_an_existing_loose_state_directory_is_tightened(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    state.chmod(0o755)
+    create_decision_dir(state, ID)
+    assert mode(state) == 0o700
+
+
+def test_a_symlinked_state_directory_is_refused_with_a_clear_message(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    os.symlink(real, tmp_path / "state")
+    with pytest.raises(UnsafeTree, match="state directory is not a real directory"):
+        create_decision_dir(tmp_path / "state", ID)
+    assert list(real.iterdir()) == []
+
+
+def test_a_state_directory_that_is_a_file_is_refused_with_a_clear_message(tmp_path: Path) -> None:
+    (tmp_path / "state").write_text("x")
+    with pytest.raises(UnsafeTree, match="state directory is not a real directory"):
+        create_decision_dir(tmp_path / "state", ID)
+
+
+def test_a_failed_owner_write_leaves_no_directory_and_the_real_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import errno
+
+    def boom(fd: int, data: bytes) -> int:
+        raise OSError(errno.ENOSPC, "no space")
+
+    monkeypatch.setattr("gatectl.tmptree.os.write", boom)
+    with pytest.raises(OSError) as info:
+        create_decision_dir(tmp_path, ID)
+    assert info.value.errno == errno.ENOSPC  # not ENOTEMPTY from the rmdir
+    assert not (tmp_path / "tmp" / ID).exists()
+
+
+def test_a_short_owner_write_is_completed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = os.write
+
+    def one_byte(fd: int, data: bytes) -> int:
+        return real(fd, bytes(data)[:1])
+
+    monkeypatch.setattr("gatectl.tmptree.os.write", one_byte)
+    d = create_decision_dir(tmp_path, ID)
+    assert json.loads((d / "owner").read_text())["pid"] == os.getpid()
+
+
+def test_the_script_dir_is_made_relative_to_the_held_decision_dir(tmp_path: Path) -> None:
+    d = create_decision_dir(tmp_path, ID)
+    moved = tmp_path / "tmp" / "moved"
+    os.symlink(moved, tmp_path / "tmp" / "swap")
+    # A decision dir that is a link is refused (nothing is created through it).
+    with pytest.raises(UnsafeTree):
+        make_script_dir(tmp_path / "tmp" / "swap", 1)
+    assert make_script_dir(d, 2) == d / "s-2"

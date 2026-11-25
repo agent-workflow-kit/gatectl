@@ -16,11 +16,14 @@ from pathlib import Path
 
 import pytest
 
-from gatectl.gateway import Stdio, watchdog_spec
+from gatectl.gateway import WATCHDOG_SOURCE, Stdio, watchdog_spec
 from gatectl.runner import RunSpec, run_process
 from tests.proc_util import Tracker, read_pid
 
 PY = sys.executable
+# The first line of the watchdog program, which is in its command line: a recycled pid is never
+# taken for it.
+WD_MARKER = WATCHDOG_SOURCE.strip().splitlines()[0].encode()
 DRIVER = str(Path(__file__).with_name("runner_driver.py"))
 
 
@@ -45,6 +48,11 @@ def learn(tracker: Tracker, directory: Path, name: str, marker: bytes | None = N
     return pid
 
 
+def ack(directory: Path) -> None:
+    """Tell the driver every pid is recorded: it may now kill itself."""
+    (directory / "ack").write_text("1")
+
+
 def wait_for(path: Path, timeout: float = 10.0) -> None:
     deadline = time.monotonic() + timeout
     while not path.exists():
@@ -58,7 +66,8 @@ def test_sigkill_of_gatectl_during_a_check_kills_the_checks_group(
     driver = start_driver(tracker, tmp_path, "started", "sleep")
     gc = learn(tracker, tmp_path, "gc", str(tmp_path).encode())
     leader = learn(tracker, tmp_path, "leader", str(tmp_path).encode())
-    wd = learn(tracker, tmp_path, "watchdog.pid")
+    wd = learn(tracker, tmp_path, "watchdog.pid", WD_MARKER)
+    ack(tmp_path)
     assert tracker.wait_dead(driver, 10)
     assert tracker.wait_dead(leader, 10), "the check leader outlived gatectl"
     assert tracker.wait_dead(gc, 10), "the check's grandchild outlived gatectl"
@@ -71,7 +80,8 @@ def test_sigkill_between_the_sweep_and_done_still_kills_the_group(
     start_driver(tracker, tmp_path, "swept", "straggler")
     wait_for(tmp_path / "decoy")
     decoy = learn(tracker, tmp_path, "decoy", f"decoy{tmp_path}".encode())
-    wd = learn(tracker, tmp_path, "watchdog.pid")
+    wd = learn(tracker, tmp_path, "watchdog.pid", WD_MARKER)
+    ack(tmp_path)
     # gatectl died before it said ``done``: the group is the watchdog's to kill, the late
     # arrival in it included.
     assert tracker.wait_dead(decoy, 10)
@@ -85,7 +95,8 @@ def test_sigkill_between_done_and_the_reap_signals_nothing(
     wait_for(tmp_path / "decoy")
     decoy = learn(tracker, tmp_path, "decoy", f"decoy{tmp_path}".encode())
     tracker.expect_survivor(decoy)
-    wd = learn(tracker, tmp_path, "watchdog.pid")
+    wd = learn(tracker, tmp_path, "watchdog.pid", WD_MARKER)
+    ack(tmp_path)
     # ``done`` was sent: the group was already swept and its id may be reused any moment, so
     # the watchdog must exit without a signal even though the pipe now reaches EOF.
     assert tracker.wait_dead(wd, 10)
@@ -99,7 +110,7 @@ def test_a_driver_that_finishes_normally_leaves_no_watchdog(
     driver = start_driver(tracker, tmp_path, "never", "straggler")
     wait_for(tmp_path / "finished")
     gc = learn(tracker, tmp_path, "gc", str(tmp_path).encode())
-    wd = learn(tracker, tmp_path, "watchdog.pid")
+    wd = learn(tracker, tmp_path, "watchdog.pid", WD_MARKER)
     assert tracker.wait_dead(driver, 10)
     assert tracker.wait_dead(gc, 5)
     assert tracker.wait_dead(wd, 5)

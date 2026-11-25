@@ -35,6 +35,18 @@ def _cmdline_of(pid: int) -> bytes | None:
         return None
 
 
+def _settled_cmdline(pid: int) -> bytes | None:
+    """The command line, re-read briefly while empty: a zombie's stays empty, but a process
+    that has only just exec'd can read empty for an instant."""
+    line = _cmdline_of(pid)
+    for _ in range(5):
+        if line:
+            break
+        time.sleep(0.01)
+        line = _cmdline_of(pid)
+    return line
+
+
 @dataclass
 class _Tracked:
     pid: int
@@ -47,18 +59,28 @@ class _Tracked:
 
 @dataclass
 class Tracker:
+    """``use_pidfd`` selects the handle: ``True`` takes a pidfd where the kernel has one (the
+    default), ``False`` forces the start-time fallback so both modes can be tested."""
+
     items: list[_Tracked] = field(default_factory=list)
+    use_pidfd: bool = True
 
     # -- recording ---------------------------------------------------------------------
 
     def _record(self, pid: int, direct_child: bool) -> _Tracked:
         pidfd: int | None = None
-        if hasattr(os, "pidfd_open"):
+        if self.use_pidfd and hasattr(os, "pidfd_open"):
             try:
                 pidfd = os.pidfd_open(pid)
             except OSError:
                 pidfd = None
-        item = _Tracked(pid, pidfd, _start_of(pid), direct_child)
+        start = _start_of(pid)
+        for known in self.items:
+            if known.pid == pid and known.start == start and start is not None:
+                if pidfd is not None:
+                    os.close(pidfd)
+                return known  # the same process recorded twice is one item
+        item = _Tracked(pid, pidfd, start, direct_child)
         self.items.append(item)
         return item
 
@@ -69,22 +91,19 @@ class Tracker:
     def track_pid(self, pid: int, cmdline_contains: bytes | None = None) -> None:
         """Record a descendant a hostile script reported. ``cmdline_contains`` guards reuse."""
         if cmdline_contains is not None:
-            line = _cmdline_of(pid)
-            if line is not None and cmdline_contains not in line:
+            line = _settled_cmdline(pid)
+            if line is not None and line and cmdline_contains not in line:
                 raise AssertionError(f"pid {pid} is not the expected process: {line!r}")
-            if line is None:
-                # Already gone (the runner is fast): record it as dead, with no handle to signal.
+            if not line:
+                # Already gone: unreadable, or a zombie (its cmdline reads as empty). Record it
+                # as dead, with no handle to signal.
                 self.items.append(_Tracked(pid, None, None, False))
                 return
         self._record(pid, False)
 
     def expect_survivor(self, pid: int) -> None:
         """Mark a recorded process that is meant to outlive the test body (killed on teardown)."""
-        for item in self.items:
-            if item.pid == pid:
-                item.survivor_ok = True
-                return
-        raise AssertionError(f"pid {pid} was never recorded")
+        self._item(pid).survivor_ok = True
 
     def gateway(self) -> TrackingGateway:
         return TrackingGateway(self)
@@ -92,14 +111,19 @@ class Tracker:
     # -- liveness ----------------------------------------------------------------------
 
     def _item(self, pid: int) -> _Tracked:
-        for item in self.items:
+        """The most recently recorded process with this pid (a pid can be recorded again once
+        its first holder is gone; ``teardown`` still treats every record on its own)."""
+        for item in reversed(self.items):
             if item.pid == pid:
                 return item
         raise AssertionError(f"pid {pid} was never recorded")
 
     def alive(self, pid: int) -> bool:
         """True while the recorded process runs (a zombie, awaiting its reaper, is dead)."""
-        item = self._item(pid)
+        return self._alive(self._item(pid))
+
+    def _alive(self, item: _Tracked) -> bool:
+        pid = item.pid
         if item.pidfd is not None:
             poller = select.poll()
             poller.register(item.pidfd, select.POLLIN)
@@ -118,13 +142,17 @@ class Tracker:
             try:
                 return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None
             except ChildProcessError:
+                item.reaped = True
                 return False
         return False
 
     def wait_dead(self, pid: int, timeout: float = 5.0) -> bool:
         """Bounded wait (no busy loop) until the recorded process is gone."""
+        return self._wait_item_dead(self._item(pid), timeout)
+
+    def _wait_item_dead(self, item: _Tracked, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
-        while self.alive(pid):
+        while self._alive(item):
             if time.monotonic() >= deadline:
                 return False
             time.sleep(0.02)
@@ -133,6 +161,7 @@ class Tracker:
     # -- teardown ----------------------------------------------------------------------
 
     def _kill(self, item: _Tracked) -> None:
+        """Signal exactly this record's process, never one that merely has the same pid."""
         if item.pidfd is not None:
             try:
                 signal.pidfd_send_signal(item.pidfd, signal.SIGKILL)
@@ -141,7 +170,7 @@ class Tracker:
             return
         if item.start is not None and _start_of(item.pid) != item.start:
             return
-        if item.start is None and not item.direct_child:
+        if item.start is None and (not item.direct_child or item.reaped):
             return  # no safe handle: never guess
         try:
             os.kill(item.pid, signal.SIGKILL)
@@ -152,12 +181,12 @@ class Tracker:
         """Kill every recorded process still running; return those that were not allowed to be."""
         leaked: list[int] = []
         for item in self.items:
-            if self.alive(item.pid):
+            if self._alive(item):
                 if not item.survivor_ok:
                     leaked.append(item.pid)
                 self._kill(item)
         for item in self.items:
-            if not self.wait_dead(item.pid, 5.0):
+            if not self._wait_item_dead(item, 5.0):
                 leaked.append(item.pid)
             if item.pidfd is not None:
                 os.close(item.pidfd)
