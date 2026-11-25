@@ -11,9 +11,10 @@ the reader is defensive and streams:
   present when the file was opened are read, so a writer that keeps appending cannot hold the
   command open.
 * A line is a record when it is a UTF-8 JSON object (no ``NaN``, no number that does not
-  serialize) with a ``ts`` in the fixed timestamp form; any other line is skipped and counted, and
-  the count is reported on stderr after the output (``--quiet`` does not silence it: a skipped
-  line is lost data). ``--since`` keeps the records whose ``ts`` is not older than it.
+  serialize) with a ``ts`` in the fixed timestamp form; a blank line is skipped silently, any other
+  line is skipped and counted, and the count is reported on stderr after the output (``--quiet``
+  does not silence it: a skipped line is lost data). ``--since`` keeps the records whose ``ts``
+  is not older than it.
 * What is printed is the parsed record re-serialized as ASCII JSON with every string sanitized
   (non-printable code points become the marker) and nesting beyond 32 levels cut, so a tampered
   file cannot put control sequences or bidi text on a terminal.
@@ -142,6 +143,8 @@ def _lines(path: Path, since: str | None, skipped: _Skipped) -> Iterator[str]:
             if len(body) > audit.LINE_CAP:
                 skipped.count += 1
                 continue
+            if not body.strip():
+                continue  # a blank line is skipped, not an invalid record
             line = _record(body, since)
             if line is False:
                 skipped.count += 1
