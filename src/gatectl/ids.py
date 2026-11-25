@@ -162,13 +162,13 @@ def parse_actor(text: str) -> Actor:
     return Actor(match.group(1), match.group(2))
 
 
-def actor_name(raw: str | None) -> str:
+def actor_name(raw: object) -> str:
     """Make a ``me.name`` or OS user name fit the actor grammar.
 
     Each disallowed character becomes ``_``, the result is cut to 64 characters, and an empty
     one becomes ``user``.
     """
-    if not raw:
+    if not isinstance(raw, str) or not raw:
         return "user"
     return _ACTOR_BAD_CHAR.sub("_", raw)[:64] or "user"
 

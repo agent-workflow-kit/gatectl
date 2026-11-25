@@ -292,8 +292,8 @@ def test_input_ignore_may_not_name_repo(tmp_path: Path) -> None:
         (
             "me",
             "name",
-            [None, "alice", "a.b_c-d@e", "x" * 64],
-            ["", "x" * 65, "a b", "a/b", 5, "é"],
+            [None, "alice", "a.b_c-d@e", "x" * 64, "", "x" * 1024, "a b", "a/b", "é"],
+            ["x" * 1025, 5, ["a"], True],
         ),
         (
             "defaults",
@@ -775,7 +775,7 @@ def test_messages_never_echo_values(tmp_path: Path) -> None:
     c = load(
         tmp_path,
         {
-            "me": {"name": CANARY + "!"},
+            "me": {"name": CANARY + "!" * 1100},
             "defaults": {
                 "timeout": CANARY,
                 "input_max_bytes": CANARY,

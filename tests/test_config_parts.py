@@ -34,7 +34,7 @@ def _doc(**over: Any) -> dict[str, Any]:
 # --- the validation matrix: each part separately -------------------------------------------
 
 BAD_PART: dict[str, dict[str, Any]] = {
-    "me": {"me": {"name": "a b"}},
+    "me": {"me": {"name": 5}},
     "session_cmd": {"session_cmd": []},
     "defaults": {"defaults": {"timeout": "0"}},
     "agent": {"agent": {"sandbox": "no"}},

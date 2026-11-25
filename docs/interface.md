@@ -27,7 +27,7 @@ gatectl answers one question for a caller: may this step go ahead? A caller send
 
 ### Actors and human actions
 
-`--actor` is `human:<name>` or `auto:<name>` (`<name>` matches `[A-Za-z0-9._@-]{1,64}`). Without `--actor` the default is `human:<me.name>` when stdin is a TTY, otherwise `auto:unknown`; a `me.name` or OS user name outside the charset has each disallowed character replaced by `_` and is cut to 64 characters (an empty one becomes `user`). A **human action** is one whose effective actor is `human:<name>`: an explicit `--actor` must be `human:<name>` with a non-blank name (any other explicit actor is not human, even with a TTY), and without `--actor` stdin must be a TTY. An actor is a claim: a same-user process can lie about it, so every human-only rule is advisory against such a process (Residual risks). The audit record carries `stdin_tty` and `actor_source`.
+`--actor` is `human:<name>` or `auto:<name>` (`<name>` matches `[A-Za-z0-9._@-]{1,64}`). Without `--actor` the default is `human:<me.name>` when stdin is a TTY, otherwise `auto:unknown`; a `me.name` or OS user name outside the charset has each disallowed character replaced by `_` and is cut to 64 characters (an empty one becomes `user`). `me.name` is never refused for its content: the config accepts any string of at most 1024 characters (a longer value or a non-string is a config error), so a bad name never makes a command fail, and it reaches the audit log and any output only after this sanitizing. A **human action** is one whose effective actor is `human:<name>`: an explicit `--actor` must be `human:<name>` with a non-blank name (any other explicit actor is not human, even with a TTY), and without `--actor` stdin must be a TTY. An actor is a claim: a same-user process can lie about it, so every human-only rule is advisory against such a process (Residual risks). The audit record carries `stdin_tty` and `actor_source`.
 
 ### Untrusted text
 
@@ -415,7 +415,7 @@ A caller wires a gate as a `pre-` hook, for example `cmd: "gatectl check start-w
 
 | Key | Default |
 |---|---|
-| `me.name` | the OS username (used only for the default actor) |
+| `me.name` | the OS username (used only for the default actor; sanitized as in Actors and human actions) |
 | `session_cmd` | `[claude-session]` (binding B) |
 | `defaults.timeout` | `60s` |
 | `defaults.script_timeout` | `20s` |

@@ -13,9 +13,9 @@
             "string",
             "null"
           ],
-          "pattern": "^[A-Za-z0-9._@-]{1,64}$",
+          "maxLength": 1024,
           "default": null,
-          "description": "Used only for the default actor; null: the OS username."
+          "description": "Used only for the default actor; null: the OS username. Any string is accepted; each character outside [A-Za-z0-9._@-] becomes _, the result is cut to 64 characters and an empty result becomes user."
         }
       },
       "additionalProperties": false,
