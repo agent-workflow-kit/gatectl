@@ -491,11 +491,24 @@ def _read_env(
         if not name.startswith(_ENV_PREFIX):
             continue
         rest = name[len(_ENV_PREFIX) :]
-        if re.fullmatch(r"[A-Z0-9_]+", rest) is None:
-            continue
-        segments = [s.lower() for s in rest.split("__")]
-        if segments[0] not in _TOP_KEYS:
+        parts = rest.split("__")
+        segments = [s.lower() for s in parts]
+        # The section is matched whatever the name's characters (a hyphen, lower case ...), so a
+        # near miss of a config key is a problem rather than silently ignored; ASCII only, so
+        # that a letter that lower-cases to an ASCII one (the Kelvin sign) names no section.
+        if not parts[0].isascii() or segments[0] not in _TOP_KEYS:
             continue  # GATECTL_HOOK, GATECTL_ID and the like are not config
+        if re.fullmatch(r"[A-Z0-9_]+", rest) is None:
+            # Never echo the name: it can hold anything. Only the exact upper-case form applies.
+            problems.append(
+                ConfigProblem(
+                    "invalid_value",
+                    _path(tuple(segments)),
+                    "an environment variable names a config key outside the listed ones, or not "
+                    "in upper case (only the listed keys can be set, as GATECTL_<KEY>)",
+                )
+            )
+            continue
         key = ".".join(segments)
         if key not in ENV_KEYS:
             problems.append(
