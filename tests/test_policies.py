@@ -257,7 +257,7 @@ def test_no_policies_is_an_empty_list(
 def test_hostile_config_text_is_sanitized_in_summaries(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    hostile = f"{CANARY}\x1b[31m\nINJECT‮ end"
+    hostile = f"{CANARY}\x1b[31m\nINJECT\u202e end\u2028"
     config = cfg(
         tmp_path,
         {
@@ -283,7 +283,7 @@ def test_hostile_config_text_is_sanitized_in_summaries(
         assert "INJECT" in text and "\n" not in text
     code, text_out, _ = run(capsys, ["policies", "--config", config])
     assert code == 0
-    assert "\x1b" not in text_out and "‮" not in text_out and " " not in text_out
+    assert not {"\x1b", "\u202e", "\u2028"} & set(text_out)
     assert text_out.count("\n") == len(text_out.splitlines())
 
 
@@ -313,9 +313,6 @@ def test_the_output_is_golden(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(fp, "fingerprint", lambda name, *a, **k: "sha256:" + name[0] * 64)
-    from gatectl import policies
-
-    monkeypatch.setattr(policies, "fingerprint", fp.fingerprint)
     config = cfg(
         tmp_path,
         {
