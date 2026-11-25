@@ -671,7 +671,10 @@ def test_a_reader_never_writes(sdir: Path) -> None:
         reader.con.execute("DELETE FROM policy_state")
     reader.close()
     assert digest(path) == before
-    assert listing(sdir) == names
+    # a WAL reader needs its -shm and -wal; they stay empty of data and private
+    assert set(listing(sdir)) <= {*names, "state.db-wal", "state.db-shm"}
+    for extra in set(listing(sdir)) - set(names):
+        assert stat.S_IMODE((sdir / extra).stat().st_mode) == 0o600
 
 
 # --- validate reads the same names ---------------------------------------------------------------
