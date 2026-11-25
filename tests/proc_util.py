@@ -102,6 +102,13 @@ class Tracker:
         """Record a descendant a hostile script reported. ``cmdline_contains`` guards reuse."""
         if cmdline_contains is not None:
             line = _settled_cmdline(pid)
+            # A just-spawned child can still show its parent's command line for an instant
+            # after the spawn returns; re-read for a short bound before calling it a mismatch.
+            for _ in range(50):
+                if not line or cmdline_contains in line:
+                    break
+                time.sleep(0.01)
+                line = _cmdline_of(pid)
             if line is not None and line and cmdline_contains not in line:
                 raise AssertionError(f"pid {pid} is not the expected process: {line!r}")
             if not line and _state_of(pid) in (None, b"Z"):

@@ -464,10 +464,16 @@ def test_env_must_be_a_string_mapping() -> None:
 
 
 @pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="needs /proc")
-def test_runs_do_not_leak_descriptors(tracker: Tracker) -> None:
-    run(tracker, spec("pass"))  # warm up
-    before = len(os.listdir("/proc/self/fd"))
-    for _ in range(3):
-        run(tracker, spec("import sys; sys.stdout.write('x')", stdin_data=b"y"))
-        run(tracker, spec("import time; time.sleep(30)", timeout=0.2))
-    assert len(os.listdir("/proc/self/fd")) == before
+def test_runs_do_not_leak_descriptors() -> None:
+    # A private tracker in start-time mode: it opens no pidfd per recorded process, so any
+    # change in the descriptor count is a leak from run_process itself.
+    own = Tracker(use_pidfd=False)
+    try:
+        run(own, spec("pass"))  # warm up
+        before = len(os.listdir("/proc/self/fd"))
+        for _ in range(3):
+            run(own, spec("import sys; sys.stdout.write('x')", stdin_data=b"y"))
+            run(own, spec("import time; time.sleep(30)", timeout=0.2))
+        assert len(os.listdir("/proc/self/fd")) == before
+    finally:
+        assert not own.teardown()
