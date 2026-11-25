@@ -499,13 +499,6 @@ def test_a_good_timeout_is_accepted(
     assert code == 0
 
 
-def test_without_dry_run_check_is_still_not_implemented(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    code, out, _ = run(capsys, ["check", "p", "--config", cfg(tmp_path, {"p": MIXED})])
-    assert code == 1 and payload(out)["error"]["code"] == "internal"
-
-
 # --- nothing runs, nothing is recorded ---------------------------------------------------------
 
 

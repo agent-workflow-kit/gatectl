@@ -37,7 +37,7 @@ from typing import Any, Literal
 
 from gatectl.config_models import InputDecl
 from gatectl.errors import UsageError
-from gatectl.inputhash import canonical_input
+from gatectl.inputhash import canonical_input, input_sha256
 
 MAX_DEPTH = 64
 MAX_NUMBER_CHARS = 640
@@ -462,3 +462,20 @@ def identity(obj: Mapping[str, Any]) -> Identity:
         else:
             values.append(None)
     return Identity(*values)
+
+
+def case_key(decl: InputDecl | None, obj: Mapping[str, Any]) -> str:
+    """The case key recorded with a decision (interface.md, Track records): the SHA-256 of the
+    canonical JSON of ``[object_type, object_id, declared values]`` (the keys of ``input.ignore``
+    left out, values uncapped) when the input has a string ``object_id``; else the hash of the
+    input without its ``input.ignore`` keys (the cache-key hash), so a retry of one input is one
+    case. A non-string ``object_type`` or ``object_id`` counts as null."""
+    object_type = obj.get("object_type")
+    object_id = obj.get("object_id")
+    if not isinstance(object_id, str):
+        return input_sha256(without_ignored(decl, obj))
+    skip = set(decl.ignore) if decl is not None else set()
+    declared = {} if decl is None else {k: obj[k] for k in (*decl.require, *decl.types) if k in obj}
+    declared = {k: v for k, v in declared.items() if k not in skip}
+    listed = [object_type if isinstance(object_type, str) else None, object_id, declared]
+    return input_sha256(listed)

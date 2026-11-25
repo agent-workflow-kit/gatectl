@@ -8,11 +8,12 @@ import json
 import os
 import re
 import sys
+import time
 from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from typing import Any, NoReturn
 
-from gatectl import __version__, commands, errors, ids, scope
+from gatectl import PROCESS_STARTED, __version__, commands, errors, ids, scope
 from gatectl.commands import CommandSpec, Context, Result
 from gatectl.sanitize import sanitize
 
@@ -110,7 +111,7 @@ def _stdin_is_tty() -> bool:
         return False
 
 
-def _context(ns: argparse.Namespace) -> Context:
+def _context(ns: argparse.Namespace, started: float) -> Context:
     """Validate the global flags and build the handler's context."""
     decision_ids = ids.validate_caller_decision_ids(
         [*(ns.decision_ids_top or ()), *(getattr(ns, "decision_ids_sub", None) or ())]
@@ -130,6 +131,7 @@ def _context(ns: argparse.Namespace) -> Context:
         actor=ns.actor,
         decision_ids=decision_ids,
         stdin_tty=_stdin_is_tty(),
+        started=started,
     )
 
 
@@ -167,6 +169,24 @@ def _silence(stream: Any) -> None:
             os.close(devnull)
     except (OSError, ValueError, AttributeError):
         pass  # no real descriptor (a captured stream, or already closed): nothing to redirect
+
+
+def _detach_descriptors() -> None:
+    """Point descriptors 0, 1 and 2 at /dev/null with ``dup2`` (closing a Python stream does not
+    close its descriptor), so nothing started afterwards inherits the caller's pipes."""
+    try:
+        devnull = os.open(os.devnull, os.O_RDWR)
+    except OSError:
+        return
+    try:
+        for fd in (0, 1, 2):
+            try:
+                os.dup2(devnull, fd)
+            except OSError:
+                pass
+    finally:
+        if devnull > 2:
+            os.close(devnull)
 
 
 def _stderr_line(text: str) -> str:
@@ -242,6 +262,10 @@ def _prescan(argv: list[str]) -> tuple[str | None, bool, str | None]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The deadline of ``check`` counts from the process start; an in-process caller (a test)
+    # counts from this call.
+    started = PROCESS_STARTED if argv is None else time.monotonic()
+    real_process = argv is None
     args_in = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     try:
@@ -264,9 +288,12 @@ def main(argv: list[str] | None = None) -> int:
     if not (isinstance(policy, str) and ids.is_policy_name(policy)):
         policy = None
     try:
-        ctx = _context(ns)
+        ctx = _context(ns, started)
         result = commands.dispatch(ctx)
-        return _emit(result, json_mode=ctx.json or is_check)
+        code = _emit(result, json_mode=ctx.json or is_check)
+        if result.detach and real_process:
+            _detach_descriptors()
+        return code
     except Exception as exc:  # the envelope hides the text of anything that is not ours
         return _error_exit(exc, json_mode=ns.json, is_check=is_check, policy=policy)
 

@@ -1,6 +1,10 @@
 """gatectl: policy decisions (allow / deny / escalate) with first-class shadow mode."""
 
 import os
+import time
+
+# The monotonic start of the process: ``check``'s deadline counts from here.
+PROCESS_STARTED = time.monotonic()
 
 
 def _ensure_stdin_fd() -> None:
