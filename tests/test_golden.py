@@ -36,9 +36,7 @@ COMMAND_OF = {
     "set": "set",
     # todo(#11): replace the stub with the real policies output
     "policies": "policies",
-    # todo(#10): replace the stub with the real validate output
-    "validate": "validate",
-    "validate-invalid": "validate",
+    # validate is real (#10): see test_validate_prints_its_golden_files_byte_for_byte
     # todo(#32): replace the stub with the real reconcile output
     "reconcile": "reconcile",
     # todo(#33): replace the stub with the real prune output
@@ -82,6 +80,30 @@ def test_each_golden_document_survives_the_printer_unchanged(
     monkeypatch.setattr(commands, "HANDLERS", {command: handler})
     assert main([*MIN_ARGV[command], "--json"]) == 0
     golden.assert_output(name, capsys.readouterr().out)
+
+
+def _validate_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], review: dict[str, object]
+) -> tuple[int, str]:
+    session = tmp_path / "claude-session"
+    session.write_text("#!/bin/sh\n")
+    session.chmod(0o755)
+    config = tmp_path / "config.yaml"
+    config.write_text(json.dumps({"session_cmd": [str(session)], "policies": {"review": review}}))
+    code = main(["validate", "--json", "--config", str(config)])
+    return code, capsys.readouterr().out
+
+
+def test_validate_prints_its_golden_files_byte_for_byte(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    agent = {"name": "judge", "type": "agent", "instruction": "Be careful."}
+    code, out = _validate_output(tmp_path, capsys, {"checks": [agent]})
+    assert code == 0
+    golden.assert_output("validate", out)
+    code, out = _validate_output(tmp_path, capsys, {"timeout": "0s", "checks": [agent]})
+    assert code == 2
+    golden.assert_output("validate-invalid", out)
 
 
 def test_the_error_envelope_prints_its_golden_file_byte_for_byte(

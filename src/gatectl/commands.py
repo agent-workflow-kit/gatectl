@@ -12,42 +12,12 @@ dispatcher prints the error envelope and exits with the error's code). It never 
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
 
+from gatectl import validate
+from gatectl.context import Context, Result
 from gatectl.errors import InternalError
-
-
-@dataclass(frozen=True)
-class Context:
-    """What a handler gets: the validated global flags and its own parsed arguments."""
-
-    command: str
-    args: argparse.Namespace
-    json: bool
-    config: str | None
-    verbose: bool
-    quiet: bool
-    actor: str | None  # validated against the grammar, not yet resolved to a default
-    decision_ids: tuple[str, ...]  # the caller's --decision-id values, validated
-    stdin_tty: bool
-
-
-@dataclass(frozen=True)
-class Result:
-    """What a handler returns.
-
-    ``payload`` is the result object. It is printed as JSON when ``--json`` is given, always for
-    ``check``, and whenever there is no ``text``. ``text`` is the human form (already sanitized
-    by the handler) used without ``--json``. ``stderr`` is one sanitized line for stderr.
-    """
-
-    payload: Mapping[str, Any] | None = None
-    text: str | None = None
-    exit_code: int = 0
-    stderr: str | None = None
-
 
 Handler = Callable[[Context], Result]
 
@@ -148,9 +118,9 @@ SPECS: tuple[CommandSpec, ...] = (
 )
 
 # Command name -> handler. A command with no entry fails with "command not implemented".
-# TODO(#11, #14, #15, #18, #28, #29, #32, #33, #34, #10): each implementing issue registers its
+# TODO(#11, #14, #15, #18, #28, #29, #32, #33, #34): each implementing issue registers its
 # handler here, one line per command.
-HANDLERS: dict[str, Handler] = {}
+HANDLERS: dict[str, Handler] = {"validate": validate.handle}
 
 
 def dispatch(ctx: Context) -> Result:
