@@ -22,7 +22,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import IO, Protocol
+from typing import IO, Any, Protocol
 
 # Read size for ``read_capped``.
 _CHUNK = 64 * 1024
@@ -47,6 +47,14 @@ class ChildSpec:
     cwd: str | None = None
     # None: the environment of gatectl. Read-only, and kept out of repr (it may hold secrets).
     env: Mapping[str, str] | None = field(default=None, repr=False)
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        # env is a MappingProxyType (unpicklable); rebuild through __init__ with a plain dict.
+        env = None if self.env is None else dict(self.env)
+        return (
+            _rebuild_spec,
+            (self.argv, self.stdin, self.stdout, self.stderr, self.own_group, self.cwd, env),
+        )
 
     def __hash__(self) -> int:
         env = None if self.env is None else tuple(sorted(self.env.items()))
@@ -100,6 +108,20 @@ class ChildSpec:
         object.__setattr__(self, "own_group", own_group)
         object.__setattr__(self, "cwd", cwd)
         object.__setattr__(self, "env", None if env is None else MappingProxyType(dict(env)))
+
+
+def _rebuild_spec(
+    argv: tuple[str, ...],
+    stdin: Stdio,
+    stdout: Stdio,
+    stderr: Stdio,
+    own_group: bool,
+    cwd: str | None,
+    env: dict[str, str] | None,
+) -> ChildSpec:
+    return ChildSpec(
+        argv, stdin=stdin, stdout=stdout, stderr=stderr, own_group=own_group, cwd=cwd, env=env
+    )
 
 
 class Child(Protocol):
@@ -160,6 +182,7 @@ _STDIO = {Stdio.DEVNULL: subprocess.DEVNULL, Stdio.PIPE: subprocess.PIPE}
 class _Child:
     def __init__(self, popen: subprocess.Popen[bytes], own_group: bool) -> None:
         self._popen = popen
+        self._reaped = False  # reaped by someone else: the pid may be reused, never signal it
         self.pid = popen.pid
         self.own_group = own_group
         self.stdin = popen.stdin
@@ -188,6 +211,7 @@ class _Child:
                 if os.waitid(os.P_PID, self.pid, flags | os.WNOHANG) is not None:
                     return True
             except ChildProcessError:  # already reaped elsewhere
+                self._reaped = True
                 return True
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -197,7 +221,7 @@ class _Child:
     def signal_group(self, sig: int) -> None:
         if not self.own_group:
             raise ValueError("child was not started in its own process group")
-        if self._popen.returncode is not None:
+        if self._reaped or self._popen.returncode is not None:
             return
         try:
             os.killpg(self.pid, sig)

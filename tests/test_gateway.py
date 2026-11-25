@@ -6,9 +6,11 @@ Every child that is started is stopped through its own handle (the pid captured 
 
 from __future__ import annotations
 
+import copy
 import io
 import json
 import os
+import pickle
 import signal
 import sys
 import time
@@ -306,12 +308,23 @@ def test_signal_group_refuses_when_the_child_is_not_a_group_leader() -> None:
         assert child.poll() is None  # and nothing was signaled
 
 
-def _gone(pgid: int, deadline: float = 5.0) -> bool:
+def _zombie_or_missing(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        return True
+    return stat.rsplit(")", 1)[1].split()[0] == "Z"
+
+
+def _gone(pgid: int, grandchild: int, deadline: float = 5.0) -> bool:
     end = time.monotonic() + deadline
     while time.monotonic() < end:
         try:
             os.killpg(pgid, 0)
         except ProcessLookupError:
+            return True
+        # killpg(.., 0) also succeeds for an unreaped zombie; that counts as gone.
+        if _zombie_or_missing(grandchild):
             return True
         time.sleep(0.02)
     return False
@@ -338,7 +351,7 @@ def test_signal_group_kills_a_grandchild_that_ignores_sigterm() -> None:
         os.kill(grandchild, 0)  # and so does the grandchild: still alive
         child.signal_group(signal.SIGKILL)
         assert child.wait(timeout=10) == -signal.SIGKILL
-        assert _gone(child.pid), "the grandchild survived SIGKILL of the group"
+        assert _gone(child.pid, grandchild), "the grandchild survived SIGKILL of the group"
 
 
 def test_wait_exited_then_signal_group_sweeps_stragglers_before_reaping() -> None:
@@ -359,7 +372,7 @@ def test_wait_exited_then_signal_group_sweeps_stragglers_before_reaping() -> Non
         os.kill(grandchild, 0)  # the straggler is alive
         child.signal_group(signal.SIGKILL)  # works: the leader was not reaped
         assert child.wait(timeout=10) == 0
-        assert _gone(child.pid), "the straggler survived"
+        assert _gone(child.pid, grandchild), "the straggler survived"
 
 
 def test_wait_exited_is_true_after_reaping_and_false_while_running() -> None:
@@ -445,3 +458,28 @@ def test_read_capped_keeps_binary_data_intact() -> None:
     data = bytes(range(256)) + "é ".encode()
     r = read_capped(_stream(data), 10_000)
     assert r.data == data
+
+
+def test_wait_exited_after_out_of_band_reap_makes_signal_group_a_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with started(SubprocessGateway(), spec(py("pass"), own_group=True)) as child:
+        os.waitpid(child.pid, 0)  # someone else reaps the leader
+        assert child.wait_exited(timeout=10) is True
+
+        def boom(*_a: object) -> None:
+            raise AssertionError("killpg on a possibly reused pid")
+
+        monkeypatch.setattr("gatectl.gateway.os.killpg", boom)
+        child.signal_group(signal.SIGKILL)
+
+
+def test_child_spec_survives_deepcopy_and_pickle() -> None:
+    original = spec(py("pass"), own_group=True, cwd="/tmp", env={"A": "1"})
+    for clone in (copy.deepcopy(original), pickle.loads(pickle.dumps(original))):
+        assert clone == original
+        assert clone.env == {"A": "1"}
+        with pytest.raises(TypeError):
+            clone.env["B"] = "2"  # type: ignore[index]
+    bare = spec(py("pass"))
+    assert copy.deepcopy(bare) == bare
