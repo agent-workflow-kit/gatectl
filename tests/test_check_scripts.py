@@ -298,7 +298,11 @@ def test_a_grandchild_that_ignores_sigterm_is_killed_with_the_group(
 def test_two_script_checks_get_numbered_directories_and_everything_is_recorded(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path
 ) -> None:
-    body = 'import os; print(__import__("json").dumps({"reason": os.path.basename(os.getcwd())})); raise SystemExit(13)'
+    body = (
+        "import json, os\n"
+        "print(json.dumps({'reason': os.path.basename(os.getcwd())}))\n"
+        "raise SystemExit(13)\n"
+    )
     config = cfg(
         tmp_path,
         [sc("a", make_script(tmp_path, "d", body)), sc("b", make_script(tmp_path, "d", body))],

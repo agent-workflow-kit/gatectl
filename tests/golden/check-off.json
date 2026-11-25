@@ -1,1 +1,1 @@
-{"schema_version":1,"policy":"auto-merge","scope":"*","state":"off","shadow":false,"enforced":false,"decision":null,"reason":null,"fingerprint":"sha256:abababababababababababababababababababababababababababababababab","checks":[],"warnings":[],"error":null}
+{"schema_version":1,"policy":"auto-merge","scope":"github.com/org/repo","state":"off","shadow":false,"enforced":false,"decision":null,"reason":null,"fingerprint":"sha256:b9a50a638686288206d70f8a087450b5e930526a93ab09a182468a21c57b7f63","checks":[],"warnings":[],"error":null}

@@ -15,6 +15,12 @@ FP = "sha256:" + "a" * 64
 ID = "gd-abcdefghijkl"
 
 
+def opened(sdir: Path) -> store.Store:
+    found = store.open_store(sdir, create=True)
+    assert found is not None
+    return found
+
+
 def row(**over: object) -> store.DecisionRow:
     fields: dict[str, object] = {
         "id": ID,
@@ -44,8 +50,7 @@ def row(**over: object) -> store.DecisionRow:
 
 def test_a_decision_row_round_trips_every_column(tmp_path: Path) -> None:
     sdir = tmp_path / "gatectl"
-    with store.open_store(sdir, create=True) as s:
-        assert s is not None
+    with opened(sdir) as s:
         with s.write():
             s.insert_decision(row())
         cols = (
@@ -59,8 +64,7 @@ def test_a_decision_row_round_trips_every_column(tmp_path: Path) -> None:
 
 def test_the_same_id_twice_fails_with_fixed_text(tmp_path: Path) -> None:
     sdir = tmp_path / "gatectl"
-    with store.open_store(sdir, create=True) as s:
-        assert s is not None
+    with opened(sdir) as s:
         with s.write():
             s.insert_decision(row())
         with pytest.raises(InternalError) as info, s.write():
@@ -70,8 +74,7 @@ def test_the_same_id_twice_fails_with_fixed_text(tmp_path: Path) -> None:
 
 def test_a_bad_decision_value_is_refused_by_the_schema_not_stored(tmp_path: Path) -> None:
     sdir = tmp_path / "gatectl"
-    with store.open_store(sdir, create=True) as s:
-        assert s is not None
+    with opened(sdir) as s:
         with pytest.raises(InternalError), s.write():
             s.insert_decision(row(decision="maybe"))
         assert s.con.execute("SELECT count(*) FROM decisions").fetchone()[0] == 0
@@ -79,8 +82,7 @@ def test_a_bad_decision_value_is_refused_by_the_schema_not_stored(tmp_path: Path
 
 def test_insert_needs_a_write_transaction(tmp_path: Path) -> None:
     sdir = tmp_path / "gatectl"
-    with store.open_store(sdir, create=True) as s:
-        assert s is not None
+    with opened(sdir) as s:
         with pytest.raises(RuntimeError):
             s.insert_decision(row())
         assert isinstance(s.con, sqlite3.Connection)

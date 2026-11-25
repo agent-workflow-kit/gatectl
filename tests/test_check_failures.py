@@ -291,12 +291,11 @@ def test_the_case_key_follows_the_object_or_the_input_without_ignored_keys(
 def test_the_case_key_of_an_object_ignores_other_fields(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path
 ) -> None:
-    decl = {"require": ["head"]}
     base = {"object_type": "pr", "object_id": "7", "head": "a"}
     assert inputs.case_key(None, base) == inputs.case_key(None, {**base, "other": 1})
     from gatectl.config_models import InputDecl
 
-    d = InputDecl(**decl)
+    d = InputDecl(require=["head"])
     assert inputs.case_key(d, base) != inputs.case_key(d, {**base, "head": "b"})
     assert inputs.case_key(d, base) == inputs.case_key(d, {**base, "other": 1})
 
