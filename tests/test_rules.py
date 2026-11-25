@@ -153,23 +153,24 @@ def test_matcher_does_not_use_re() -> None:
 # --- the import boundary -------------------------------------------------------------------
 
 
-def test_rules_imports_no_process_environment_or_clock_module() -> None:
-    source = Path(rules.__file__).read_text()
-    banned = {
-        "os",
-        "posix",
-        "sys",
-        "time",
-        "datetime",
-        "subprocess",
-        "socket",
-        "random",
-        "secrets",
-        "gatectl.clock",
-        "gatectl.gateway",
-        "gatectl.runner",
-        "gatectl.procinfo",
-    }
+_BANNED_IMPORTS = {
+    "os",
+    "posix",
+    "sys",
+    "time",
+    "datetime",
+    "subprocess",
+    "socket",
+    "random",
+    "secrets",
+    "gatectl.clock",
+    "gatectl.gateway",
+    "gatectl.runner",
+    "gatectl.procinfo",
+}
+
+
+def _banned_imports(source: str) -> set[str]:
     found: set[str] = set()
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
@@ -177,10 +178,29 @@ def test_rules_imports_no_process_environment_or_clock_module() -> None:
         elif isinstance(node, ast.ImportFrom) and node.module:
             found.add(node.module)
             found |= {f"{node.module}.{a.name}" for a in node.names}
-    assert not {f for f in found if f in banned or f.split(".")[0] in banned - {"gatectl"}}
+    top_level = _BANNED_IMPORTS - {"gatectl"}
+    return {f for f in found if f in _BANNED_IMPORTS or f.split(".")[0] in top_level}
 
 
-def test_importing_rules_touches_neither_the_environment_nor_the_clock() -> None:
+def test_rules_imports_no_process_environment_or_clock_module() -> None:
+    assert not _banned_imports(Path(rules.__file__).read_text())
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import os",
+        "import time as t",
+        "from os import environ",
+        "from gatectl import clock",
+        "import gatectl.gateway",
+    ],
+)
+def test_the_import_boundary_check_flags_an_offending_source(source: str) -> None:
+    assert _banned_imports(source)
+
+
+def test_importing_rules_loads_no_gateway_runner_clock_or_subprocess_module(tmp_path: Path) -> None:
     import subprocess
     import sys
 
@@ -196,7 +216,7 @@ def test_importing_rules_touches_neither_the_environment_nor_the_clock() -> None
         capture_output=True,
         text=True,
         stdin=subprocess.DEVNULL,
-        env={"LC_ALL": "C"},
+        env={"LC_ALL": "C", "HOME": str(tmp_path), "XDG_CONFIG_HOME": str(tmp_path / ".config")},
         timeout=60,
         check=True,
     )
@@ -413,7 +433,20 @@ def test_nan_is_never_equal_and_never_raises() -> None:
     assert one("k", "eq", {"k": nan}, value=1) == ("false", None)
     assert one("k", "eq", {"k": nan}, value=1.5) == ("false", None)
     assert one("k", "ne", {"k": nan}, value=1)[0] == "true"
-    assert one("k", "in", {"k": nan}, value=[1, None])[0] in ("true", "false", "error")
+    assert one("k", "in", {"k": nan}, value=[1, None]) == ("false", None)
+    assert one("k", "not_in", {"k": nan}, value=[1, None]) == ("true", None)
+
+
+def test_a_glob_condition_that_skipped_validation_still_evaluates_without_raising() -> None:
+    built = Condition.model_construct(path="k", op="glob", value="a*")
+    assert run([built], {"k": "abc"}) == ("true", None)
+    assert run([built], {"k": "xbc"}) == ("false", None)
+
+
+@pytest.mark.parametrize("value", [None, 5, ["a"], "", "x" * 129])
+def test_an_unusable_glob_value_on_an_unvalidated_condition_escalates(value: Any) -> None:
+    built = Condition.model_construct(path="k", op="glob", value=value)
+    assert run([built], {"k": "abc"}) == ("error", "k: type")
 
 
 def test_deeply_nested_equality_does_not_recurse() -> None:
@@ -469,17 +502,6 @@ def test_the_guard_idiom() -> None:
     assert run(nullable, {"x": None}) == ("false", None)
 
 
-def test_the_between_hook_runs_between_conditions_only() -> None:
-    calls: list[int] = []
-    conds = [cond("a", "exists"), cond("b", "exists"), cond("c", "exists")]
-    result = evaluate(conds, {"a": 1, "b": 1, "c": 1}, between=lambda: calls.append(1))
-    assert result.outcome == "true"
-    assert len(calls) == 2
-    calls.clear()
-    evaluate(conds, {}, between=lambda: calls.append(1))
-    assert calls == []  # the first condition was false: nothing after it
-
-
 def _rule(**kw: Any) -> RuleCheck:
     doc = {"name": "r", "type": "rule", "when": [{"path": "k", "op": "eq", "value": 1}], **kw}
     return RuleCheck.model_validate(doc)
@@ -519,11 +541,45 @@ def test_applies_is_false_only_when_a_condition_is_false() -> None:
     assert rules.applies([cond("a", "exists"), cond("tool", "eq", value="x")], {}) is False
 
 
-def test_rule_checks_never_consult_a_deadline() -> None:
+def test_rule_checks_take_no_deadline_parameter() -> None:
     import inspect
 
-    params = inspect.signature(rules.run_rule).parameters
-    assert set(params) == {"check", "obj"}
+    assert set(inspect.signature(rules.run_rule).parameters) == {"check", "obj"}
+    assert set(inspect.signature(rules.evaluate).parameters) == {"conditions", "obj"}
+    assert set(inspect.signature(rules.applies).parameters) == {"conditions", "obj"}
+
+
+def test_rule_checks_never_read_the_clock_or_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("the evaluator consulted the clock or the environment")
+
+    obj = {"a": 1, "s": "abc/d", "l": ["x", "y"], "n": None}
+    conds = [
+        cond("a", "exists"),
+        cond("a", "lt", value=2),
+        cond("a", "in", value=[1, 2]),
+        cond("s", "glob", value="abc/*"),
+        cond("l", "glob", value="y"),
+        cond("n", "eq", value=None),
+        cond("missing", "absent"),
+    ]
+    monkeypatch.setattr(time, "time", boom)
+    monkeypatch.setattr(time, "monotonic", boom)
+    monkeypatch.setattr(time, "perf_counter", boom)
+    monkeypatch.setattr(os, "getenv", boom)
+    assert evaluate(conds, obj).outcome == "true"
+    assert rules.applies(conds, obj) is True
+    when = [
+        {"path": c.path, "op": c.op, **({} if c.op in ("exists", "absent") else {"value": c.value})}
+        for c in conds
+    ]
+    check = RuleCheck.model_validate({"name": "r", "type": "rule", "when": when, "then": "deny"})
+    assert rules.run_rule(check, obj).verdict == "deny"
+    assert rules.run_rule(check, {"a": "x"}).verdict == "escalate"
 
 
 # --- ticketctl-shaped payloads -----------------------------------------------------------------

@@ -6,18 +6,16 @@ untrusted: no value, however hostile, makes an evaluation raise. Every compariso
 (no recursion over a nested value) and a glob costs at most pattern length times subject length.
 
 A rule check is never skipped for the deadline (Deadline), so the evaluator takes no deadline.
-``between`` is a seam the check engine may use to observe the gap between two conditions; it is
-called with no argument and nothing else here reads its result.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from gatectl.config_models import Condition, RuleCheck
+from gatectl.config_models import GLOB_MAX_LEN, Condition, RuleCheck, tokenize_glob
 
 MAX_SUBJECT_BYTES = 4096
 MAX_LIST_ELEMENTS = 256
@@ -36,6 +34,10 @@ class GlobMatcher:
     of bit operations on an int of at most ``n + 1`` bits, so a match costs O(n * m). The
     tokenizer merges every run of stars, so two star tokens are never adjacent and one
     epsilon step (``*`` and ``**`` may match nothing) closes the set.
+
+    ``steps`` (subject characters consumed by the last ``matches`` call) and ``max_state_bits``
+    (the widest live set it held) are test seams for the cost bound; nothing else reads them and
+    they never change a result.
     """
 
     def __init__(self, tokens: Sequence[str]) -> None:
@@ -252,7 +254,11 @@ def _one(condition: Condition, obj: Any) -> Evaluation:
         if isinstance(subjects, str):
             return _error(path, subjects)
         tokens = condition.glob_tokens
-        assert tokens is not None  # set when the config was validated
+        if tokens is None:  # a Condition built without validation (config collects problems)
+            pattern = condition.value
+            if type(pattern) is not str or not pattern or len(pattern) > GLOB_MAX_LEN:
+                return _error(path, "type")
+            tokens = tokenize_glob(pattern)
         matcher = GlobMatcher(tokens)
         return _TRUE if any(matcher.matches(s) for s in subjects) else _FALSE
 
@@ -275,13 +281,9 @@ def _one(condition: Condition, obj: Any) -> Evaluation:
 def evaluate(
     conditions: Sequence[Condition],
     obj: Mapping[str, Any] | Any,
-    *,
-    between: Callable[[], None] | None = None,
 ) -> Evaluation:
     """An ordered AND that stops at the first false or error condition (never raises on ``obj``)."""
-    for index, condition in enumerate(conditions):
-        if index and between is not None:
-            between()
+    for condition in conditions:
         result = _one(condition, obj)
         if result.outcome != "true":
             return result
