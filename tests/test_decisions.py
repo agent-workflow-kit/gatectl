@@ -316,3 +316,24 @@ def test_text_output_for_nothing_and_for_truncation(
     assert main(["decisions", "--config", config, "--limit", "2"]) == 0
     out = capsys.readouterr().out
     assert len(out.splitlines()) == 3 and "truncated" in out.splitlines()[-1]
+
+
+# --- round 1 ------------------------------------------------------------------------------------
+
+
+def test_a_history_and_no_state_db_exits_1_state_db_missing(
+    capsys: pytest.CaptureFixture[str], config: str, state_dir: Path
+) -> None:
+    state_dir.mkdir(parents=True, mode=0o700)
+    (state_dir / "audit.jsonl").write_text('{"ts":"2026-11-24T12:00:00.000000Z"}\n')
+    code, doc, _ = call(capsys, "decisions", "--config", config)
+    assert code == 1 and doc["error"]["reason"] == "state_db_missing"
+
+
+def test_declared_filter_does_not_match_a_duplicate_key_row_that_is_then_refused(
+    capsys: pytest.CaptureFixture[str], config: str, state_dir: Path
+) -> None:
+    """json_each sees both duplicates, Python's last wins: such a row is a tamper (exit 1)."""
+    put_decision(state_dir, did(1), raw={"declared_json": '{"k":"a","k":"b"}'})
+    code, doc, _ = call(capsys, "decisions", "--config", config, "--declared", "k=a")
+    assert code == 1 and doc["error"]["message"] == "state.db holds an invalid decision row"

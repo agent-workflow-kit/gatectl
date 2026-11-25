@@ -346,3 +346,104 @@ def test_hostile_decision_id_prefixes_are_usage_errors(
     code, out, err = run_json(capsys, "show", f"gd-{hostile}abcdef", "--config", config)
     assert code == 2 and hostile not in out + err
     sql(state_dir, "SELECT 1")
+
+
+# --- a NUL does not hide from the caps or the grammar (round 1) --------------------------------
+
+NUL_TAIL = "\x00junk"
+
+
+@pytest.mark.parametrize(
+    "column",
+    [
+        "time",
+        "policy",
+        "scope",
+        "state",
+        "decision",
+        "reason",
+        "fingerprint",
+        "actor",
+        "input_sha256",
+        "case_key",
+    ],
+)
+def test_a_nul_after_a_valid_closed_value_is_refused_not_cut(
+    capsys: pytest.CaptureFixture[str], config: str, state_dir: Path, column: str
+) -> None:
+    """SQLite's substr() would hand back ``p`` for ``p<NUL>junk``; the NUL must not vanish."""
+    from tests.history_util import FP, HASH, T0
+
+    valid = {
+        "time": T0,
+        "policy": "p",
+        "scope": "*",
+        "state": "shadow",
+        "decision": "allow",
+        "reason": "all_passed",
+        "fingerprint": FP,
+        "actor": "auto:unknown",
+        "input_sha256": HASH,
+        "case_key": HASH,
+    }[column]
+    put_decision(state_dir, ID, raw={column: valid + NUL_TAIL})
+    for argv in (("decisions",), ("show", ID)):
+        code, out, err = run_json(capsys, *argv, "--config", config)
+        assert code == 1, (column, argv)
+        assert json.loads(out)["error"]["message"] == "state.db holds an invalid decision row"
+        assert "junk" not in out + err
+
+
+def test_a_nul_after_a_valid_id_is_refused_in_the_list_and_ignored_by_resolve(
+    capsys: pytest.CaptureFixture[str], config: str, state_dir: Path
+) -> None:
+    put_decision(state_dir, ID + NUL_TAIL)
+    code, out, _ = run_json(capsys, "decisions", "--config", config)
+    assert code == 1 and "junk" not in out
+    code, out, _ = run_json(capsys, "show", ID, "--config", config)
+    assert code == 10
+
+
+@pytest.mark.parametrize("column", ["tool", "hook", "object_type", "object_id"])
+def test_a_nul_in_free_text_becomes_the_marker_and_keeps_the_rest(
+    capsys: pytest.CaptureFixture[str], config: str, state_dir: Path, column: str
+) -> None:
+    put_decision(state_dir, ID, raw={column: "ab\x00cd"})
+    _, out, _ = run_json(capsys, "show", ID, "--config", config)
+    assert json.loads(out)[column] == "ab�cd"
+
+
+@pytest.mark.parametrize("column", ["declared_json", "checks_json"])
+def test_a_nul_does_not_bypass_the_read_caps(state_dir: Path, column: str) -> None:
+    """``length(text)`` stops at the NUL: a 5 MB value would pass a character-count cap."""
+    from gatectl import history, store
+
+    put_decision(state_dir, ID)
+    sql(state_dir, f"UPDATE decisions SET {column} = ?", "{}\x00" + "x" * 5_000_000)  # noqa: S608
+    cap = history.DECLARED_MAX_BYTES if column == "declared_json" else history.CHECKS_MAX_BYTES
+    s = store.open_store(state_dir, create=False)
+    assert s is not None
+    with s:
+        ((value,),) = s.query(
+            f"SELECT {history._bounded(f'd.{column}', cap)} FROM decisions d"  # noqa: S608, SLF001
+        )
+    assert value == b""
+
+
+@pytest.mark.parametrize("column", ["declared_json", "checks_json"])
+def test_a_nul_in_stored_json_is_a_tamper(
+    capsys: pytest.CaptureFixture[str], config: str, state_dir: Path, column: str
+) -> None:
+    good = "{}" if column == "declared_json" else "[]"
+    put_decision(state_dir, ID, raw={column: good + NUL_TAIL})
+    code, _, _ = run_json(capsys, "show", ID, "--config", config)
+    assert code == 1
+
+
+def test_a_nul_in_an_outcome_actor_never_counts_as_a_human_agree(
+    capsys: pytest.CaptureFixture[str], config: str, state_dir: Path
+) -> None:
+    put_decision(state_dir, ID)
+    put_outcome(state_dir, ID, "agree", actor="human:ann" + NUL_TAIL)
+    code, out, _ = run_json(capsys, "decisions", "--config", config, "--outcome", "agree")
+    assert code == 0 and json.loads(out)["decisions"] == []

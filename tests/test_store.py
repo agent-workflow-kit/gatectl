@@ -1079,7 +1079,18 @@ def test_a_huge_tampered_text_value_is_capped_when_read(sdir: Path) -> None:
 
 
 def test_the_select_statements_cut_text_columns() -> None:
-    assert "substr(set_by" in store.Store._COLUMNS
+    assert "substr(CAST(set_by AS BLOB)" in store.Store._COLUMNS  # by bytes: a NUL does not hide
+
+
+def test_a_nul_in_a_state_row_value_is_kept_for_the_sanitizer(sdir: Path) -> None:
+    """substr() of text stops at a NUL and would hand back ``human:ann``."""
+    s = opened(sdir)
+    put(s)
+    with s.write():
+        s.con.execute("UPDATE policy_state SET set_by = ?", ("human:ann\x00junk",))
+    row = s.get_row("p", "*")
+    assert row is not None and row.set_by == "human:ann\ufffdjunk"
+    s.close()
 
 
 @pytest.mark.parametrize("kind", ["fifo", "dir", "symlink", "empty_regular"])

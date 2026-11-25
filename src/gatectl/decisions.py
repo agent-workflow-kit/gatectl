@@ -8,6 +8,7 @@ is opened and none is echoed in an error; filters reach SQL only as bound parame
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import UTC, datetime
 from typing import Any
@@ -144,7 +145,12 @@ def _show_text(d: dict[str, Any]) -> str:
         f"effective outcome: {d['effective_outcome']}",
     ]
     for key, value in d["declared"].items():
-        lines.append(f"declared {key}: {value}")
+        shown = (
+            value
+            if isinstance(value, str)
+            else json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        )
+        lines.append(f"declared {key}: {shown}")
     if d["cache_source"] is not None:
         lines.append(f"cache source: {d['cache_source']['decision_id']}")
     lines.append("checks:")
@@ -167,6 +173,6 @@ def handle_show(ctx: Context) -> Result:
     store = store_mod.open_store(create=False)
     if store is None:
         raise NotFoundError("no such decision")
-    with store:
+    with store, store.snapshot():
         document = history.load(store, history.resolve(store, ref), set(loaded.policies))
     return Result(payload=document, text=_show_text(document), stderr=_warning(ctx, loaded))

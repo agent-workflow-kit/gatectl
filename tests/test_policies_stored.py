@@ -273,7 +273,7 @@ def test_records_stay_empty_until_stats_lands(
     assert only(doc)["records"] == []  # TODO(#29) fills them
 
 
-def test_hostile_stored_text_is_sanitized(
+def test_hostile_stored_text_in_a_state_row_is_refused_never_echoed(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], state_dir: Path
 ) -> None:
     evil = f"{CANARY}\x1b[31m\x00‮" + "x" * 2000
@@ -283,12 +283,11 @@ def test_hostile_stored_text_is_sanitized(
     sql(state_dir, "UPDATE policy_state SET set_by = ?, set_at = ?", evil, evil)
     config = make(tmp_path)
     code, out, err = run(capsys, ["policies", "--json", "--config", config])
-    assert code == 0 and err == ""
-    assert "\\u001b" not in out and "\\u202e" not in out and CANARY in out
-    (row,) = json.loads(out)["policies"][0]["scopes"]
-    assert len(row["set_by"]) <= 512 and len(row["set_at"]) <= 512
-    code, out, _ = run(capsys, ["policies", "--config", config])
-    assert code == 0 and all(c == "\n" or c.isprintable() for c in out)
+    assert code == 1 and json.loads(out)["error"]["code"] == "internal"
+    assert CANARY not in out + err and "\\u001b" not in out and "\\u202e" not in out
+    code, out, err = run(capsys, ["policies", "--config", config])
+    assert code == 1 and CANARY not in out + err
+    assert all(c == "\n" or c.isprintable() for c in out + err)
 
 
 @pytest.mark.parametrize(
@@ -348,3 +347,77 @@ def test_text_form_lists_each_scope_row(
     assert f"  {REPO} shadow auto:gatectl" in out and "miss" in out
     assert MARKER not in out
     assert all(c == "\n" or c.isprintable() for c in out)
+
+
+# --- round 1 ------------------------------------------------------------------------------------
+
+
+def test_a_history_and_no_state_db_exits_1_state_db_missing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], state_dir: Path
+) -> None:
+    state_dir.mkdir(parents=True, mode=0o700)
+    (state_dir / "audit.jsonl").write_text('{"ts":"2026-11-24T12:00:00.000000Z"}\n')
+    code, doc, _ = view(capsys, make(tmp_path))
+    assert code == 1 and doc["error"]["reason"] == "state_db_missing"
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("set_by", "root"),
+        ("set_by", "human:" + "x" * 100),
+        ("set_by", f"human:{CANARY}\x1b[31m"),
+        ("set_at", "yesterday"),
+        ("set_at", "2026-11-24T12:00:00Z"),
+        ("fingerprint", "sha256:abc"),
+        ("fingerprint", "x" * 2000),
+        ("fingerprint", "sha256:" + "A" * 64),
+    ],
+)
+def test_schema_invalid_set_by_set_at_or_fingerprint_is_refused(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    state_dir: Path,
+    column: str,
+    value: str,
+) -> None:
+    from tests.history_util import sql
+
+    seed(state_dir, "p", "*", "shadow", set_by="human:ann")
+    sql(state_dir, f"UPDATE policy_state SET {column} = ?", value)  # noqa: S608
+    code, out, err = run(capsys, ["policies", "--json", "--config", make(tmp_path)])
+    assert code == 1 and json.loads(out)["error"]["code"] == "internal"
+    assert json.loads(out)["error"]["message"] == "state.db holds an invalid state row"
+    assert CANARY not in out + err
+
+
+def test_a_nul_in_a_stored_row_value_is_not_hidden_by_sqlite(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], state_dir: Path
+) -> None:
+    """substr() stops at a NUL: ``human:ann<NUL>junk`` must not be read as ``human:ann``."""
+    from tests.history_util import sql
+
+    seed(state_dir, "p", "*", "shadow", set_by="human:ann")
+    sql(state_dir, "UPDATE policy_state SET set_by = ?", "human:ann\x00junk")
+    code, out, _ = run(capsys, ["policies", "--json", "--config", make(tmp_path)])
+    assert code == 1
+    assert json.loads(out)["error"]["message"] == "state.db holds an invalid state row"
+
+
+@pytest.mark.parametrize("column", ["scope", "state", "cause"])
+def test_a_nul_after_a_valid_closed_value_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], state_dir: Path, column: str
+) -> None:
+    seed(state_dir, "p", "*", "shadow")
+    current = {"scope": "*", "state": "shadow", "cause": "set"}[column]
+    # the CHECK constraints are per connection: a tamper writes past them
+    import sqlite3
+
+    con = sqlite3.connect(state_dir / "state.db")
+    con.execute("PRAGMA ignore_check_constraints = ON")
+    con.execute(f"UPDATE policy_state SET {column} = ?", (current + "\x00junk",))  # noqa: S608
+    con.commit()
+    con.close()
+    code, out, _ = run(capsys, ["policies", "--json", "--config", make(tmp_path)])
+    assert code == 1
+    assert json.loads(out)["error"]["message"] == "state.db holds an invalid state row"

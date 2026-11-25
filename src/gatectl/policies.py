@@ -15,19 +15,39 @@ as changed). The marker fingerprint of a row written for a scope with no definit
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from gatectl import fingerprint as fingerprint_mod
-from gatectl import plan
+from gatectl import ids, plan
 from gatectl import store as store_mod
+from gatectl.clock import parse_ts
 from gatectl.config import LoadedConfig, load_for_command
 from gatectl.context import Context, Result
-from gatectl.errors import ConfigInvalidError, UsageError
+from gatectl.errors import ConfigInvalidError, GatectlError, InternalError, UsageError
 from gatectl.sanitize import sanitize
 from gatectl.scope import STAR, Scope, resolve_effective
 from gatectl.setcmd import NO_DEFINITION
 
 _LINE_CAP = 1200
+_FINGERPRINT = re.compile(r"sha256:[0-9a-f]{64}")  # the marker NO_DEFINITION has this form too
+
+
+def _checked(row: store_mod.StateRow) -> store_mod.StateRow:
+    """A stored row whose ``set_by``, ``set_at`` and ``fingerprint`` follow their schemas.
+
+    ``store._row`` (shared with the check engine, which never prints these three) only sanitizes
+    them; this command prints them, and ``schemas/cli/policies.json`` is closed, so a tampered
+    row is refused with fixed text (exit 1) rather than printed.
+    """
+    try:
+        ids.parse_actor(row.set_by)
+        parse_ts(row.set_at)
+    except (GatectlError, ValueError):
+        raise InternalError("state.db holds an invalid state row") from None
+    if _FINGERPRINT.fullmatch(row.fingerprint) is None:
+        raise InternalError("state.db holds an invalid state row")
+    return row
 
 
 class _Current:
@@ -92,7 +112,7 @@ def _entry(
     shared = loaded.shared
     initial = effective.policy.state
     fingerprint = fingerprint_mod.fingerprint(name, effective.policy, shared)
-    rows = store.rows(name) if store is not None else []
+    rows = [_checked(r) for r in store.rows(name)] if store is not None else []
     deciding = _deciding(rows, scope.scope)
     # The global fingerprint is the one of the ``*`` scope; for a repo with an override the shown
     # one is the override's, so the lazy lookup computes the ``*`` one on first use.

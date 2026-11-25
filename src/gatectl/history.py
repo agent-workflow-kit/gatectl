@@ -5,7 +5,8 @@ migrated or written) with fixed SQL text and bound parameters. A caller's value 
 the SQL, and a decision-id prefix is matched as a range, never with ``LIKE``.
 
 Every stored value is untrusted (a same-user process can edit the database). A text column is cut
-in SQL before it is read; a value that must follow a closed grammar (ids, times, states,
+in SQL before it is read (by bytes: ``length()`` and ``substr()`` stop at a NUL, which would hide
+it and the rest of the value); a value that must follow a closed grammar (ids, times, states,
 fingerprints, reason codes, check entries, actors) and does not is refused with the fixed text
 ``state.db holds an invalid decision row`` (exit 1), never echoed; free text (``tool``, ``hook``,
 ``object_type``, ``object_id``, declared strings, a check ``detail``, an outcome reason) is
@@ -30,22 +31,22 @@ from typing import Any
 
 from gatectl import ids
 from gatectl.clock import parse_ts
-from gatectl.errors import GatectlError, InternalError
+from gatectl.errors import GatectlError, InternalError, NotFoundError
+from gatectl.inputhash import canonical_input
 from gatectl.sanitize import sanitize
 from gatectl.scope import STAR
-from gatectl.store import Store
+from gatectl.store import Store, cut_sql, uncut
 
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
 OUTCOME_LIMIT = 1000  # outcome records ``show`` prints for one decision
 TEXT_CAP = 256  # the cap of the input strings a row carries (tool, hook, declared values, ...)
 DETAIL_CAP = 1024  # a check detail and an outcome reason
-DECLARED_MAX_CHARS = 32768  # stored declared_json read (a larger one is a tamper)
-CHECKS_MAX_CHARS = 65536  # stored checks_json read
+DECLARED_MAX_BYTES = 32768  # stored declared_json read (a larger one is a tamper)
+CHECKS_MAX_BYTES = 65536  # stored checks_json read
 MAX_CHECKS = 256
 _DECLARED_VALUE_MAX = 1024  # canonical JSON of a non-string declared value
 _DECLARED_DEPTH = 8
-_TEXT_SQL = 513  # a text column is cut in SQL to a little over any cap
 
 STATES = ("off", "shadow", "enforced")
 DECISIONS = ("allow", "deny", "escalate")
@@ -83,19 +84,13 @@ def _tampered() -> InternalError:
     return InternalError(_TAMPERED)
 
 
-def _cut(column: str) -> str:
-    return (
-        f"CASE WHEN typeof({column}) = 'text' THEN substr({column}, 1, {_TEXT_SQL})"
-        f" ELSE {column} END"
-    )
-
-
-def _bounded(column: str, max_chars: int) -> str:
-    """The column when it is NULL or text of at most ``max_chars``; else an empty blob (invalid)."""
+def _bounded(column: str, max_bytes: int) -> str:
+    """The column when it is NULL or text of at most ``max_bytes`` bytes (a NUL counts); else an
+    empty blob (invalid). ``length()`` of text stops at a NUL, so the bytes are measured."""
     return (
         f"CASE WHEN {column} IS NULL THEN NULL"
-        f" WHEN typeof({column}) = 'text' AND length({column}) <= {max_chars} THEN {column}"
-        " ELSE zeroblob(0) END"
+        f" WHEN typeof({column}) = 'text' AND length(CAST({column} AS BLOB)) <= {max_bytes}"
+        f" THEN {column} ELSE zeroblob(0) END"
     )
 
 
@@ -103,13 +98,14 @@ def _bounded(column: str, max_chars: int) -> str:
 # disagree, or an agree from a human actor), else pending. ``d`` is the decisions row.
 _EFFECTIVE = (
     "COALESCE((SELECT o.outcome FROM outcomes o WHERE o.decision_id = d.id"
-    " AND (o.outcome = 'disagree' OR (o.outcome = 'agree' AND substr(o.actor, 1, 6) = 'human:'))"
+    " AND (o.outcome = 'disagree' OR (o.outcome = 'agree' AND substr(o.actor, 1, 6) = 'human:'"
+    " AND instr(CAST(o.actor AS BLOB), x'00') = 0))"
     " ORDER BY o.seq DESC LIMIT 1), 'pending')"
 )
 
 _COLUMNS = (
     ", ".join(
-        _cut(f"d.{c}")
+        cut_sql(f"d.{c}")
         for c in (
             "id",
             "time",
@@ -130,12 +126,12 @@ _COLUMNS = (
         )
     )
     + ", d.state_rev, "
-    + _bounded("d.declared_json", DECLARED_MAX_CHARS)
+    + _bounded("d.declared_json", DECLARED_MAX_BYTES)
     + ", "
     + _EFFECTIVE
 )
 
-_SHOW_COLUMNS = _COLUMNS + ", " + _bounded("d.checks_json", CHECKS_MAX_CHARS)
+_SHOW_COLUMNS = _COLUMNS + ", " + _bounded("d.checks_json", CHECKS_MAX_BYTES)
 
 
 @dataclass(frozen=True)
@@ -200,6 +196,17 @@ def _reject_constant(_: str) -> Any:
     raise ValueError("not a JSON number")
 
 
+def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """``json.loads`` hook: SQLite's ``json_each`` yields both of two equal keys and Python keeps
+    the last, so a stored object with a duplicate key is a tamper."""
+    out: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError("duplicate key")
+        out[key] = value
+    return out
+
+
 def _finite(value: object) -> bool:
     return not isinstance(value, float) or math.isfinite(value)
 
@@ -234,6 +241,15 @@ def _declared_object(value: Mapping[str, Any], depth: int) -> dict[str, Any]:
     return out
 
 
+def _canonical_size(value: Any) -> int:
+    """The UTF-8 bytes of a declared value's canonical JSON: what the writer capped at 1 KiB
+    (``inputs.VALUE_CAP``), so a stored value that was legitimately under the cap is not refused."""
+    try:
+        return len(canonical_input(value).encode("utf-8", errors="surrogatepass"))
+    except (ValueError, TypeError, RecursionError):
+        raise _tampered() from None
+
+
 def _declared(raw: object) -> dict[str, Any]:
     """The declared fields: strings capped at 256, other values at 1 KiB of canonical JSON."""
     if raw is None:
@@ -241,16 +257,16 @@ def _declared(raw: object) -> dict[str, Any]:
     if not isinstance(raw, str):
         raise _tampered()
     try:
-        parsed = json.loads(raw, parse_constant=_reject_constant)
+        parsed = json.loads(
+            raw, parse_constant=_reject_constant, object_pairs_hook=_no_duplicate_keys
+        )
     except (ValueError, RecursionError):
         raise _tampered() from None
     if not isinstance(parsed, dict):
         raise _tampered()
     declared = _declared_object(parsed, 0)
-    for value in declared.values():
-        if not isinstance(value, str) and len(json.dumps(value, separators=(",", ":"))) > (
-            _DECLARED_VALUE_MAX
-        ):
+    for value in parsed.values():
+        if not isinstance(value, str) and _canonical_size(value) > _DECLARED_VALUE_MAX:
             raise _tampered()
     return declared
 
@@ -264,6 +280,7 @@ def _int_at_least_zero(value: object) -> int | None:
 
 
 def _decision(raw: tuple[Any, ...], configured: Mapping[str, Any] | set[str]) -> dict[str, Any]:
+    raw = (*(uncut(v) for v in raw[:16]), *raw[16:])
     (
         raw_id,
         when,
@@ -423,7 +440,8 @@ def _where(filters: Filters) -> tuple[str, list[Any]]:
     if filters.declared is not None:
         clauses.append(
             "CASE WHEN typeof(d.declared_json) = 'text'"
-            f" AND length(d.declared_json) <= {DECLARED_MAX_CHARS}"
+            f" AND length(CAST(d.declared_json AS BLOB)) <= {DECLARED_MAX_BYTES}"
+            " AND instr(CAST(d.declared_json AS BLOB), x'00') = 0"
             " AND json_valid(d.declared_json)"
             " THEN EXISTS (SELECT 1 FROM json_each(d.declared_json) j"
             " WHERE j.key = ? AND j.type = 'text' AND j.value = ?) ELSE 0 END"
@@ -451,22 +469,22 @@ def resolve(store: Store, ref: ids.DecisionRef) -> str:
     low = f"gd-{ref.prefix}"
     high = low[:-1] + _ONE_BASE32_UP[low[-1]]
     rows = store.query(
-        "SELECT substr(id, 1, 64) FROM decisions WHERE id >= ? AND id < ? ORDER BY id LIMIT 100",
+        f"SELECT {cut_sql('id')} FROM decisions WHERE id >= ? AND id < ? ORDER BY id LIMIT 100",
         (low, high),
     )
-    return ids.resolve_decision_ref(ref, [r[0] for r in rows if isinstance(r[0], str)])
+    found = [uncut(r[0]) for r in rows]
+    return ids.resolve_decision_ref(ref, [f for f in found if isinstance(f, str)])
 
 
 def _outcomes(store: Store, decision_id: str) -> list[dict[str, Any]]:
     rows = store.query(
-        "SELECT time, outcome, signal, actor, actor_kind,"
-        " CASE WHEN typeof(reason) = 'text'"
-        f" THEN substr(reason, 1, {DETAIL_CAP + 1}) ELSE reason END"
+        f"SELECT time, outcome, signal, actor, actor_kind, {cut_sql('reason', DETAIL_CAP + 1)}"
         " FROM outcomes WHERE decision_id = ? ORDER BY seq LIMIT ?",
         (decision_id, OUTCOME_LIMIT),
     )
     out: list[dict[str, Any]] = []
-    for when, outcome, signal, actor, kind, reason in rows:
+    for when, outcome, signal, actor, kind, packed in rows:
+        reason = uncut(packed, DETAIL_CAP + 1)
         if not isinstance(signal, str) or not ids.is_signal(signal):
             raise _tampered()
         out.append(
@@ -482,34 +500,45 @@ def _outcomes(store: Store, decision_id: str) -> list[dict[str, Any]]:
     return out
 
 
-def _cache_source(store: Store, keys: list[str]) -> dict[str, str] | None:
+def _cache_source(store: Store, keys: list[str], decided_at: str) -> dict[str, str] | None:
+    """The decision that produced the cached result a reused check read, or None.
+
+    The cache row counts only if it already existed (``time`` not after the decision) and was
+    not yet expired (``expires_at`` after it) at the decision's time: a refreshed key names a
+    later decision, and an expired row was not a hit. A row that was replaced and a row that was
+    pruned are both None (interface.md, show).
+    """
     for key in keys:
         rows = store.query(
-            "SELECT CASE WHEN typeof(decision_id) = 'text' THEN substr(decision_id, 1, 64) END"
-            " FROM agent_cache WHERE key = ?",
-            (key,),
+            f"SELECT {cut_sql('decision_id')} FROM agent_cache WHERE key = ?"
+            " AND typeof(time) = 'text' AND typeof(expires_at) = 'text'"
+            " AND time <= ? AND expires_at > ?",
+            (key, decided_at, decided_at),
         )
-        if rows and isinstance(rows[0][0], str) and ids.is_decision_id(rows[0][0]):
-            return {"decision_id": rows[0][0]}
+        found = uncut(rows[0][0]) if rows else None
+        if isinstance(found, str) and ids.is_decision_id(found):
+            return {"decision_id": found}
     return None
 
 
 def load(
     store: Store, decision_id: str, configured: Mapping[str, Any] | set[str]
 ) -> dict[str, Any]:
-    """The ``show`` document of one stored decision id."""
+    """The ``show`` document of one stored decision id. Call it inside ``store.snapshot()`` with
+    the ``resolve`` that found the id, so every read sees one state; an id that is gone anyway is
+    not found (exit 10)."""
     rows = store.query(
         f"SELECT {_SHOW_COLUMNS} FROM decisions d WHERE d.id = ?",  # noqa: S608
         (decision_id,),
     )
     if not rows:
-        raise InternalError("the decision disappeared while it was being read")
+        raise NotFoundError("no such decision")
     row = rows[0]
     base = _decision(row, configured)
     checks, keys = _checks(row[19])
     return {
         **base,
         "checks": checks,
-        "cache_source": _cache_source(store, keys),
+        "cache_source": _cache_source(store, keys, base["time"]),
         "outcomes": _outcomes(store, decision_id),
     }

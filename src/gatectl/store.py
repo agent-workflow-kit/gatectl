@@ -188,6 +188,28 @@ class Resolved:
     row: StateRow | None
 
 
+def cut_sql(column: str, chars: int = _TEXT_SQL) -> str:
+    """SQL that reads a text column cut to the bytes that hold its first ``chars`` characters
+    (4 per character, UTF-8), hex-encoded behind a ``T`` (``uncut`` decodes it); any other type
+    is returned as it is.
+
+    SQLite's ``substr()`` and ``length()`` stop at a NUL, which would hide it (and the rest of the
+    value) from the cap and from the sanitizer; the byte cut does not.
+    """
+    return (
+        f"CASE WHEN typeof({column}) = 'text'"
+        f" THEN 'T' || hex(substr(CAST({column} AS BLOB), 1, {4 * chars})) ELSE {column} END"
+    )
+
+
+def uncut(value: object, chars: int = _TEXT_SQL) -> object:
+    """The value ``cut_sql`` read: text cut to ``chars`` characters (a NUL stays in it, for
+    the sanitizer or the grammar check to deal with); anything that is not text as it is."""
+    if isinstance(value, str):
+        return bytes.fromhex(value[1:]).decode("utf-8", errors="replace")[:chars]
+    return value
+
+
 def _fail(message: str, reason: str | None = None) -> InternalError:
     return InternalError(message, reason=reason)
 
@@ -556,12 +578,12 @@ class Store:
             raw = self.con.execute(sql, args).fetchall()
         except sqlite3.Error as exc:
             raise _translate(exc) from None
-        return [_row(r) for r in raw]
+        return [_row([*(uncut(v) for v in r[:7]), r[7]]) for r in raw]
 
     # Text columns are cut in SQL so a huge tampered value is never read whole.
     _COLUMNS = (
         ", ".join(
-            f"CASE WHEN typeof({c}) = 'text' THEN substr({c}, 1, {_TEXT_SQL}) ELSE {c} END"
+            cut_sql(c)
             for c in ("policy", "scope", "state", "set_by", "set_at", "cause", "fingerprint")
         )
         + ", rev FROM policy_state"
@@ -591,6 +613,23 @@ class Store:
         except sqlite3.Error as exc:
             raise _translate(exc) from None
 
+    @contextmanager
+    def snapshot(self) -> Iterator[None]:
+        """One read transaction: every ``query`` inside sees the database as of the first one
+        (WAL), so a writer between two reads can neither make a row vanish nor make two reads
+        disagree. Only for a read-only store."""
+        try:
+            self.con.execute("BEGIN")
+        except sqlite3.Error as exc:
+            raise _translate(exc) from None
+        try:
+            yield
+        finally:
+            try:
+                self.con.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass  # a read transaction holds nothing to undo; the connection closes next
+
     def has_policy(self, policy: str) -> bool:
         """Whether ``policy`` has a stored row or a recorded decision (a removed policy is known
         to ``set`` only through this)."""
@@ -618,13 +657,13 @@ class Store:
         """A ``meta`` value as text (cut to the text cap), or None when absent or not text."""
         try:
             found = self.con.execute(
-                f"SELECT substr(value, 1, {_TEXT_SQL}) FROM meta"  # noqa: S608
+                f"SELECT {cut_sql('value')} FROM meta"  # noqa: S608
                 " WHERE key = ? AND typeof(value) = 'text'",
                 (key,),
             ).fetchone()
         except sqlite3.Error as exc:
             raise _translate(exc) from None
-        return sanitize(found[0], _TEXT_CAP) if found is not None else None
+        return sanitize(str(uncut(found[0])), _TEXT_CAP) if found is not None else None
 
     def effective(
         self, policy: str, scope: str, initial: str, *, indeterminate: bool = False

@@ -343,3 +343,54 @@ def test_an_error_while_streaming_keeps_what_was_written_and_prints_the_envelope
     out = capsys.readouterr().out
     assert code == 1
     assert out.startswith("first\n") and '"code":"internal"' in out
+
+
+# --- round 1 ------------------------------------------------------------------------------------
+
+
+def test_an_empty_line_is_counted_as_one_skipped_record(
+    capsys: pytest.CaptureFixture[str], state_dir: Path
+) -> None:
+    write_lines(state_dir / "audit.jsonl", rec(ts(1), n=1), "", rec(ts(2), n=2))
+    code, lines, err = export(capsys)
+    assert code == 0 and len(lines) == 2
+    assert err == "gatectl: warning export: 1 line skipped (not valid records)\n"
+
+
+def test_a_write_failure_other_than_a_closed_pipe_exits_1(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], state_dir: Path
+) -> None:
+    """``gatectl export > /dev/full`` must not look like a success."""
+    import errno
+
+    write_lines(state_dir / "audit.jsonl", *[rec(ts(1), n=n) for n in range(5)])
+    calls: list[str] = []
+
+    class Full(io.StringIO):
+        def write(self, text: str) -> int:
+            calls.append(text)
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr("sys.stdout", Full())
+    assert main(["export"]) == 1
+    assert len(calls) == 1  # it stops at the first failure
+    err = capsys.readouterr().err
+    assert err == "gatectl: internal: cannot write to stdout\n"
+
+
+@pytest.mark.parametrize("failure", [OSError(9, "bad fd"), OSError(32, "pipe"), ValueError("x")])
+def test_a_closed_or_invalid_stdout_still_exits_0_quietly(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    state_dir: Path,
+    failure: Exception,
+) -> None:
+    write_lines(state_dir / "audit.jsonl", rec(ts(1)))
+
+    class Closed(io.StringIO):
+        def write(self, text: str) -> int:
+            raise failure
+
+    monkeypatch.setattr("sys.stdout", Closed())
+    assert main(["export"]) == 0
+    assert capsys.readouterr().err == ""

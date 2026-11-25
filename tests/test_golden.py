@@ -31,8 +31,10 @@ COMMAND_OF = {
     "stats": "stats",
     # set is real (#14): see tests/test_set.py::test_set_shadow_prints_the_golden_output
     # policies-static is real (#11): see tests/test_policies.py::test_the_output_is_golden.
-    # policies (stored view) is real (#15): see tests/test_policies_stored.py; its records are
-    # todo(#29) until stats lands
+    # policies (stored view) is real (#15): see tests/test_policies_stored.py::
+    # test_the_stored_view_is_golden. Its golden no longer pins a populated ``records`` item
+    # (records stay empty until stats lands).
+    # todo(#29): restore a populated records item in the policies golden when stats lands
     # validate is real (#10): see test_validate_prints_its_golden_files_byte_for_byte
     # todo(#32): replace the stub with the real reconcile output
     "reconcile": "reconcile",

@@ -129,7 +129,14 @@ def put_outcome(
             )
 
 
-def put_cache(state_dir: Path, key: str, decision_id: str | None) -> None:
+def put_cache(
+    state_dir: Path,
+    key: str,
+    decision_id: str | None,
+    *,
+    when: str = T0,
+    expires_at: str = "2099-01-01T00:00:00.000000Z",
+) -> None:
     s = store.open_store(state_dir, create=True)
     assert s is not None
     with s:
@@ -137,7 +144,7 @@ def put_cache(state_dir: Path, key: str, decision_id: str | None) -> None:
             s.con.execute(
                 "INSERT INTO agent_cache(key, time, expires_at, artifact_json, decision_id)"
                 " VALUES(?, ?, ?, '{}', ?)",
-                (key, T0, "2099-01-01T00:00:00.000000Z", decision_id),
+                (key, when, expires_at, decision_id),
             )
 
 
