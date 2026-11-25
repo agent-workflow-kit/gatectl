@@ -143,9 +143,7 @@ def test_matcher_stops_early_when_no_position_is_live() -> None:
 
 def test_matcher_does_not_use_re() -> None:
     source = (Path(rules.__file__)).read_text()
-    imports = [
-        n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Import | ast.ImportFrom)
-    ]
+    imports = [n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Import | ast.ImportFrom)]
     names = {a.name for n in imports for a in n.names} | {
         n.module for n in imports if isinstance(n, ast.ImportFrom) and n.module
     }
@@ -413,7 +411,7 @@ def test_eq_and_ne_compare_arrays_and_objects_whole() -> None:
 def test_nan_is_never_equal_and_never_raises() -> None:
     nan = float("nan")
     assert one("k", "eq", {"k": nan}, value=1) == ("false", None)
-    assert one("k", "eq", {"k": nan}, value=nan if False else 1.5) == ("false", None)
+    assert one("k", "eq", {"k": nan}, value=1.5) == ("false", None)
     assert one("k", "ne", {"k": nan}, value=1)[0] == "true"
     assert one("k", "in", {"k": nan}, value=[1, None])[0] in ("true", "false", "error")
 
@@ -592,7 +590,8 @@ def test_no_hostile_value_ever_raises_and_results_are_deterministic() -> None:
             conditions.append(cond(path, "glob", value=pattern))
     for _ in range(120):
         obj = {
-            rng.choice(["a", "b", "0", "c-d"]): _hostile_values(rng) for _ in range(rng.randint(0, 4))
+            rng.choice(["a", "b", "0", "c-d"]): _hostile_values(rng)
+            for _ in range(rng.randint(0, 4))
         }
         for c in conditions:
             first = evaluate([c], obj)

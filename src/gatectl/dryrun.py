@@ -14,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from gatectl import fingerprint as fingerprint_mod
-from gatectl import inputs, plan
+from gatectl import inputs, plan, rules
 from gatectl import store as store_mod
 from gatectl.config import load_for_command
 from gatectl.config_models import (
@@ -50,12 +50,11 @@ def parse_timeout(text: str | None) -> float | None:
 
 
 def applies(conditions: Sequence[Condition], obj: Mapping[str, Any]) -> bool:
-    """Whether ``applies_when`` holds for the input.
+    """Whether ``applies_when`` holds for the input (Check order step 4a).
 
-    TODO(#17, #19): evaluate the conditions with the rule evaluator. Until it lands every
-    policy applies, which is the fail-closed answer of Check order step 4a.
+    Only a false condition ends the check; an error counts as applicable (fail closed).
     """
-    return True
+    return rules.applies(conditions, obj)
 
 
 def _usable(decl: InputDecl | None, obj: Mapping[str, Any]) -> bool:
