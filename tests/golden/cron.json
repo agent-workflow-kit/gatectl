@@ -1,0 +1,1 @@
+{"action":"install","dry_run":true,"changed":false,"entries":["*/15 * * * * gatectl reconcile --quiet","17 3 * * * gatectl prune --quiet"]}

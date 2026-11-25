@@ -1,6 +1,6 @@
-.PHONY: verify test lint fmt fmt-check typecheck mdlint
+.PHONY: verify test lint fmt fmt-check typecheck mdlint schemacheck
 
-verify: lint fmt-check typecheck test mdlint
+verify: lint fmt-check typecheck test mdlint schemacheck
 
 test:
 	uv run pytest
@@ -19,3 +19,6 @@ typecheck:
 
 mdlint:
 	uv run pymarkdown --config .pymarkdown.json scan -r --respect-gitignore .
+
+schemacheck:
+	uv run check-jsonschema --schemafile schemas/config.json config.example.yaml
