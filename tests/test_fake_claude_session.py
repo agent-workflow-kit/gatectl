@@ -848,12 +848,17 @@ def test_a_signal_to_the_wrapper_is_forwarded_to_a_child_that_ignores_sigterm(
 ) -> None:
     fake.scenario = "hang_ignore_term"
     info = started(fake)
-    proc = fake.popen(*fake.exec_args(info), FAKE_CS_HANG_MAX="1.5")
+    proc = fake.popen(*fake.exec_args(info), FAKE_CS_HANG_MAX="10")
+    child_pid = 0
     try:
         wait_until(lambda: status(fake, info)["run"]["child_pid"], "the child")
+        child_pid = status(fake, info)["run"]["child_pid"]
         proc.send_signal(signal.SIGTERM)
         time.sleep(0.3)
         assert proc.poll() is None  # the child ignored it; the wrapper waits for the child
+        # End the child explicitly (the pid recorded in status) rather than by its hang limit.
+        assert status(fake, info)["run"]["child_pid"] == child_pid
+        os.kill(child_pid, signal.SIGKILL)
         out, _ = proc.communicate(timeout=10)
     finally:
         stop_process(proc)
@@ -880,7 +885,7 @@ def test_a_sigint_after_a_stop_request_is_still_a_forwarded_int(fake: FakeSessio
 def test_hang_ignoring_sigterm_survives_it_and_ends_by_its_limit(fake: FakeSession) -> None:
     fake.scenario = "hang_ignore_term_wrapper"
     info = started(fake)
-    proc = fake.popen(*fake.exec_args(info), FAKE_CS_HANG_MAX="3")
+    proc = fake.popen(*fake.exec_args(info), FAKE_CS_HANG_MAX="5")
     try:
         wait_until(lambda: status(fake, info)["state"] == "working", "the session phase")
         proc.send_signal(signal.SIGTERM)
