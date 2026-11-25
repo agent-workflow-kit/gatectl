@@ -290,11 +290,15 @@ def _uri(path: Path, query: str) -> str:
     return f"file:{quote(str(path))}?{query}"
 
 
-def _first(con: sqlite3.Connection, sql: str) -> tuple[object, ...] | None:
+def _first(
+    con: sqlite3.Connection, sql: str, deadline: float | None = None
+) -> tuple[object, ...] | None:
     """One row of ``sql``. A reader that races a writer (the first use of a WAL, a checkpoint,
     recovery) is answered with a busy-class code, SQLITE_PROTOCOL or an extended busy code such
-    as 261; that is transient and is retried with short sleeps, bounded by ``_BUSY_WAIT``."""
-    deadline = time.monotonic() + _BUSY_WAIT
+    as 261; that is transient and is retried with short sleeps, bounded by ``deadline``
+    (default: ``_BUSY_WAIT`` from now)."""
+    if deadline is None:
+        deadline = time.monotonic() + _BUSY_WAIT
     attempt = 0
     while True:
         try:
@@ -309,10 +313,11 @@ def _first(con: sqlite3.Connection, sql: str) -> tuple[object, ...] | None:
 def _read_version(con: sqlite3.Connection) -> int | None | bool:
     """The ``schema_version``; None when the database has no tables; False when it has tables
     but no usable schema_version row (a foreign or damaged database)."""
-    if _first(con, "SELECT 1 FROM sqlite_master LIMIT 1") is None:
+    deadline = time.monotonic() + _BUSY_WAIT  # one bound for both reads
+    if _first(con, "SELECT 1 FROM sqlite_master LIMIT 1", deadline) is None:
         return None
     try:
-        row = _first(con, "SELECT value FROM meta WHERE key = 'schema_version'")
+        row = _first(con, "SELECT value FROM meta WHERE key = 'schema_version'", deadline)
     except sqlite3.OperationalError as exc:
         if _primary(exc) == _SQLITE_ERROR and "no such table: meta" in str(exc):
             return False
@@ -345,7 +350,7 @@ def _peek(path: Path) -> int | None | bool:
         return _read_version(con)
     except sqlite3.Error as exc:
         if _primary(exc) == _SQLITE_NOTADB:
-            return False  # no valid SQLite header: no schema_version row (interface.md)
+            return False  # "not a database" (bad header): no schema_version row
         raise _translate(exc) from None
     finally:
         con.close()
@@ -477,10 +482,11 @@ class Store:
 
     # Text columns are cut in SQL so a huge tampered value is never read whole.
     _COLUMNS = (
-        f"substr(policy, 1, {_TEXT_SQL}), substr(scope, 1, {_TEXT_SQL}),"
-        f" substr(state, 1, {_TEXT_SQL}), substr(set_by, 1, {_TEXT_SQL}),"
-        f" substr(set_at, 1, {_TEXT_SQL}), substr(cause, 1, {_TEXT_SQL}),"
-        f" substr(fingerprint, 1, {_TEXT_SQL}), rev FROM policy_state"
+        ", ".join(
+            f"CASE WHEN typeof({c}) = 'text' THEN substr({c}, 1, {_TEXT_SQL}) ELSE {c} END"
+            for c in ("policy", "scope", "state", "set_by", "set_at", "cause", "fingerprint")
+        )
+        + ", rev FROM policy_state"
     )
 
     def rows(self, policy: str) -> list[StateRow]:

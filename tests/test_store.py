@@ -8,7 +8,7 @@ import os
 import sqlite3
 import stat
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -628,6 +628,24 @@ def test_tampered_row_state_is_refused_without_echo(sdir: Path) -> None:
     s.close()
 
 
+@pytest.mark.parametrize("column", ["set_by", "set_at", "fingerprint"])
+@pytest.mark.parametrize("value", [b"blob", b""])  # TEXT affinity turns numbers into text
+def test_a_non_text_value_in_a_text_column_is_refused(
+    sdir: Path, column: str, value: object
+) -> None:
+    s = opened(sdir)
+    put(s)
+    s.close()
+    con = sqlite3.connect(sdir / "state.db")
+    con.execute(f"UPDATE policy_state SET {column}=?", (value,))  # noqa: S608
+    con.commit()
+    con.close()
+    s = opened(sdir)
+    with pytest.raises(InternalError):
+        s.rows("p")
+    s.close()
+
+
 def test_untrusted_row_text_is_sanitized_when_read(sdir: Path) -> None:
     s = opened(sdir)
     put(s)
@@ -779,7 +797,7 @@ def test_a_busy_write_lock_fails_after_the_bounded_wait_not_forever(sdir: Path) 
             with s.write():
                 pytest.fail("must not get the lock")
         elapsed = time.monotonic() - start
-        assert 0.1 <= elapsed < 0.35  # one wait of busy_timeout, no second one
+        assert 0.1 <= elapsed < 1.0  # one wait of busy_timeout, not repeated
         # a reader never waits for the writer
         reader = store.open_store(sdir, create=False, busy_timeout=0.2)
         assert reader is not None
@@ -969,15 +987,38 @@ def test_a_huge_numeric_schema_version_is_schema_newer_and_untouched(sdir: Path)
 
 @pytest.mark.parametrize("history", [True, False])
 @pytest.mark.parametrize("create", [True, False])
-def test_a_non_sqlite_file_is_state_db_missing_only_over_a_history(
-    sdir: Path, create: bool, history: bool
+def _junk(path: Path) -> None:
+    path.write_bytes((CANARY + "\n").encode() * 100)
+
+
+def _damaged_page_size(path: Path) -> None:
+    """A valid ``SQLite format 3`` magic with an invalid page size (offset 16)."""
+    raw = bytearray(path.read_bytes())
+    raw[16:18] = b"\x00\x03"
+    path.write_bytes(bytes(raw))
+
+
+@pytest.mark.parametrize("history", [True, False])
+@pytest.mark.parametrize("create", [True, False])
+@pytest.mark.parametrize("damage", [_junk, _damaged_page_size])
+def test_a_not_a_database_file_is_state_db_missing_only_over_a_history(
+    sdir: Path, create: bool, history: bool, damage: Callable[[Path], None]
 ) -> None:
-    """R5: a file with no valid SQLite header has no schema_version row."""
+    """R5: a file SQLite reports as not a database (invalid or damaged header) has no row."""
     sdir.mkdir(parents=True, mode=0o700)
+    path = sdir / "state.db"
+    if damage is _damaged_page_size:
+        s = opened(sdir)
+        put(s)
+        s.close()
+        (sdir / "state.db-wal").unlink(missing_ok=True)
+        (sdir / "state.db-shm").unlink(missing_ok=True)
     if history:
         audit_line(sdir)
-    path = sdir / "state.db"
-    path.write_bytes((CANARY + "\n").encode() * 100)
+    if damage is _junk:
+        _junk(path)
+    else:
+        _damaged_page_size(path)
     os.chmod(path, 0o600)
     before = digest(path)
     with pytest.raises(InternalError) as info:

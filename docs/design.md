@@ -149,7 +149,7 @@ The effective outcome of a decision is computed from its outcomes (Outcomes); it
 
 ## Concurrency
 
-Commands that cron or a caller run concurrently are safe: decisions and outcomes are independent rows, state changes are single transactions, and agent slots are leases (holder PID plus start time decide liveness; expiry is informational, so a clock step never frees a live slot). A write waits at most `defaults.record_reserve` for the lock, in one attempt (the store does not retry; the single retry of the whole step-8 transaction, state re-read included, is the caller's) and a reader never waits. `reconcile` and `prune` take a lease row each; a second caller exits 0 with `already_running`. Script checks of different `check` processes do not coordinate; only agent runs are capped.
+Commands that cron or a caller run concurrently are safe: decisions and outcomes are independent rows, state changes are single transactions, and agent slots are leases (holder PID plus start time decide liveness; expiry is informational, so a clock step never frees a live slot). A write waits at most `defaults.record_reserve` for the lock, in one attempt (the store does not retry; the single retry of the whole step-8 transaction, state re-read included, is the caller's) and a reader never takes the write lock and never blocks on a writer in the steady state (WAL); it retries transient busy-class errors for a short bounded time, at most about 2 s in the worst case. `reconcile` and `prune` take a lease row each; a second caller exits 0 with `already_running`. Script checks of different `check` processes do not coordinate; only agent runs are capped.
 
 ## Error handling
 
