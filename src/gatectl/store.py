@@ -13,8 +13,9 @@ Upgrades). This module owns how it is opened and what is in it:
   (``state_db_missing``): gatectl never starts a fresh database over an existing history.
 * Text read from the database is untrusted: it is validated and sanitized, and error messages
   are fixed text that never echo it.
-* A write waits at most ``busy_timeout`` for the lock, once (retrying the whole transaction is
-  the caller's business); a reader opens the database read-only and never waits for a writer
+* A write waits at most ``busy_timeout`` for the lock; ``transact`` retries the whole transaction
+  once when the lock was never obtained (a busy error later, at the commit included, is not
+  retried); a reader opens the database read-only and never waits for a writer
   (WAL). Busy-class errors are recognised by their primary code (``code & 0xFF``): Python
   reports SQLite's extended codes (261 is ``SQLITE_BUSY_RECOVERY``).
 
@@ -149,7 +150,8 @@ def latest_version() -> int:
 
 
 class StoreBusyError(InternalError):
-    """The write lock was not obtained within the bounded wait (exit 1; a retry was made)."""
+    """The write lock was not obtained within the bounded wait, or a commit found the database busy
+    (exit 1). ``transact`` retries only a lock that was never obtained."""
 
 
 class AuditWriteError(InternalError):
@@ -433,6 +435,9 @@ class Store:
         except sqlite3.Error as exc:
             self._rollback()
             raise _translate(exc) from None
+        except BaseException:
+            self._rollback()
+            raise
 
     def _commit(self) -> None:
         self.con.execute("COMMIT")
@@ -448,7 +453,7 @@ class Store:
             raise RuntimeError("an audit line is appended inside a write transaction")
         try:
             audit.append_audit(record, state_dir=self.path.parent)
-        except (OSError, audit.RecordTooLargeError):
+        except (OSError, audit.RecordTooLargeError, TypeError, ValueError):
             raise AuditWriteError("audit.jsonl cannot be written") from None
 
     def transact(self, body: Callable[[], T]) -> T:
