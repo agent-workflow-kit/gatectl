@@ -1625,3 +1625,27 @@ def test_applies_when_and_a_rule_when_report_the_same_code_for_a_bad_list(
     [rule_code] = {c for c, _ in found(rule_payload, "problems")}
     [applies_code] = {c for c, _ in found(applies_payload, "problems")}
     assert rule_code == applies_code == "invalid_rule"
+
+
+@pytest.mark.parametrize(
+    ("applies_when", "code", "path"),
+    [
+        ([], "invalid_rule", "repos.example.com/o/r.policies.p.applies_when"),
+        (
+            [{"path": "a", "op": "eq"}],
+            "invalid_rule",
+            "repos.example.com/o/r.policies.p.applies_when.0.value",
+        ),
+        (
+            [{"path": "a", "op": "glob", "value": "a" * 129}],
+            "glob_too_long",
+            "repos.example.com/o/r.policies.p.applies_when.0.value",
+        ),
+    ],
+)
+def test_a_bad_applies_when_in_a_repo_override_is_a_problem_at_the_override_path(
+    env: Env, applies_when: Any, code: str, path: str
+) -> None:
+    repos = {"example.com/o/r": {"policies": {"p": {"applies_when": applies_when}}}}
+    exit_code, payload = env.run(env.base(policies={"p": good_policy()}, repos=repos))
+    assert exit_code == 2 and (code, path) in found(payload, "problems")
