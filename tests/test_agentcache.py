@@ -445,7 +445,6 @@ def test_a_tampered_artifact_text_is_never_echoed(st: store.Store) -> None:
         {"time": "yesterday"},
         {"time": 5},
         {"expires": "tomorrow"},
-        {"expires": None},
         {"time": "2026-03-04T05:06:07Z"},  # not the fixed-width form
         {"decision": "not-an-id"},
         {"decision": 7},
@@ -455,8 +454,6 @@ def test_a_tampered_artifact_text_is_never_echoed(st: store.Store) -> None:
 def test_tampered_times_or_producer_are_a_fixed_text_error(
     st: store.Store, fields: dict[str, Any]
 ) -> None:
-    if fields.get("expires", 1) is None:
-        pytest.skip("expires_at is NOT NULL")
     raw_row(st, key(), **fields)
     with pytest.raises(InternalError) as info:
         get(st)
