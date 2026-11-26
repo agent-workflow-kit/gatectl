@@ -34,4 +34,20 @@ def start_time(pid: int) -> str | None:
         return None
 
 
+def proc_state(pid: int) -> str | None:
+    """The one-letter process state (``R``, ``S``, ``Z`` ...) from ``/proc/<pid>/stat``, or
+    ``None`` when the process is gone or the platform has no ``/proc``."""
+    try:
+        with open(f"/proc/{int(pid)}/stat", "rb") as f:
+            data = f.read()
+        return data[data.rindex(b")") + 2 :].split()[0].decode("ascii")
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def is_zombie(pid: int) -> bool:
+    """True for an exited, unreaped process (``Z``) or one being torn down (``X``)."""
+    return proc_state(pid) in ("Z", "X")
+
+
 # TODO(#37): the macOS method for a process start time (and its boot id).
