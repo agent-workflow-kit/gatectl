@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from gatectl import agent, agentcache, agentjudge, engine
+from gatectl import store as store_mod
 from tests.fake_session import FAKE, FakeSession
 from tests.proc_util import Tracker
 
@@ -63,6 +64,39 @@ class Fake:
 
     def unforgotten(self) -> list[dict[str, Any]]:
         return [r for r in self.records() if not r["forgotten"]]
+
+
+WRAPPER = """\
+import json, os, subprocess, sys
+VERBS = ("start", "exec", "status", "list", "stop", "forget")
+verb = next(a for a in sys.argv[1:] if a in VERBS)
+patch = json.loads(os.environ.get("WRAP_PATCH", "{}")).get(verb)
+done = subprocess.run(sys.argv[1:], capture_output=True)
+out = done.stdout
+if patch is not None:
+    if "raw" in patch:
+        out = patch["raw"].encode("utf-8", "surrogateescape")
+    else:
+        obj = json.loads(out)
+        if "append" in patch:
+            for key, item in patch["append"].items():
+                obj[key] = [*obj[key], item]
+        else:
+            obj = patch["replace"] if "replace" in patch else {**obj, **patch["update"]}
+        out = json.dumps(obj).encode()
+sys.stdout.buffer.write(out)
+sys.stderr.buffer.write(done.stderr)
+sys.exit(patch.get("exit", done.returncode) if patch else done.returncode)
+"""
+
+
+def patched_cmd(root: Path, fake: Fake, patch: dict[str, Any]) -> list[str]:
+    """``session_cmd`` that runs the fake and then rewrites one verb's stdout (and exit code):
+    ``{verb: {"update": {...}} | {"replace": obj} | {"append": {key: item}} | {"raw": text}}``,
+    each optionally with ``"exit": n``."""
+    script = root / "wrap.py"
+    script.write_text(WRAPPER, encoding="utf-8")
+    return [ENV_BIN, f"WRAP_PATCH={json.dumps(patch)}", sys.executable, str(script), *fake.cmd]
 
 
 def agent_check(name: str = "a", **extra: Any) -> dict[str, Any]:
@@ -139,3 +173,10 @@ def judged(
 def tmp_entries(state_dir: Path) -> list[str]:
     folder = state_dir / "tmp"
     return sorted(os.listdir(folder)) if folder.is_dir() else []
+
+
+def state_store() -> store_mod.Store:
+    """The state database of the isolated state directory, opened for writing."""
+    store = store_mod.open_store(create=True)
+    assert store is not None
+    return store
