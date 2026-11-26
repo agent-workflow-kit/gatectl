@@ -21,7 +21,6 @@ import pytest
 from gatectl import commands, config, validate
 from gatectl.cli import main
 from gatectl.config import load_config
-from gatectl.errors import InternalError
 from tests import schema_util
 from tests.config_util import good_policy, write
 
@@ -523,14 +522,6 @@ def test_a_missing_explicit_config_is_unreadable_exit_1(
 ) -> None:
     assert main(["validate", "--json", "--config", str(env.tmp / "nope.yaml")]) == 1
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "internal"
-
-
-def test_probe_is_parsed_and_not_yet_implemented(env: Env) -> None:
-    # TODO(#26): the probe itself. Until then --probe on a valid config fails loudly (exit 1)
-    # instead of printing a result that looks like a skipped probe.
-    env.write(env.base())
-    assert main(["validate", "--json", "--probe", "--config", str(env.path())]) == 1
-    assert json.loads(env.capsys.readouterr().out)["error"]["code"] == "internal"
 
 
 def test_probe_with_an_invalid_config_still_reports_the_problems(env: Env) -> None:
@@ -1557,23 +1548,6 @@ def test_the_result_is_deterministic(env: Env) -> None:
 
 def test_validate_is_registered() -> None:
     assert commands.HANDLERS["validate"] is validate.handle
-
-
-def test_the_handler_raises_internal_error_for_probe_on_a_valid_config(env: Env) -> None:
-    env.write(env.base())
-    ctx = commands.Context(
-        command="validate",
-        args=__import__("argparse").Namespace(probe=True),
-        json=True,
-        config=str(env.path()),
-        verbose=False,
-        quiet=False,
-        actor=None,
-        decision_ids=(),
-        stdin_tty=False,
-    )
-    with pytest.raises(InternalError):
-        validate.handle(ctx)
 
 
 def test_unused_names_from_config_stay_importable() -> None:

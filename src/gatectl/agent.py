@@ -187,6 +187,11 @@ class SessionResult:
 
     judgement: Judgement
     warnings: tuple[str, ...] = ()
+    # Closed facts for ``validate --probe``: ``exec``'s exit code (or the failed ``start``'s), an
+    # ``end_reason`` token and ``status``'s ``sandbox_active``; ``None`` when never learned.
+    exit_code: int | None = None
+    end_reason: str | None = None
+    sandbox_active: bool | None = None
 
 
 class _Fail(Exception):
@@ -227,6 +232,9 @@ class _Session:
     csession_id: str | None = None
     budget: _Budget | None = None
     warnings: list[str] = field(default_factory=list)
+    exit_code: int | None = None
+    end_reason: str | None = None
+    sandbox_active: bool | None = None
 
     # -- calls -----------------------------------------------------------------------------
 
@@ -350,6 +358,7 @@ class _Session:
                 if isinstance(end_reason, str) and _END_REASON.fullmatch(end_reason)
                 else None
             )
+            self.exit_code, self.end_reason = result.code, token
             raise _Fail(agentjudge.start_failed(result.code, token))
         raise _check_error("start timed out" if result.status == "timeout" else "start failed")
 
@@ -396,6 +405,8 @@ class _Session:
         body = None if result.stdout_truncated else parse_object(result.stdout)
         if body is not None and body.get("csession_id") != self.csession_id:
             body = None  # it does not describe our session: not an outcome
+        self.exit_code = result.code
+        self.end_reason = _token(body.get("end_reason")) if body is not None else None
         return result.code, body
 
     def _status(self) -> dict[str, Any]:
@@ -410,6 +421,9 @@ class _Session:
         )
         if body is None or body.get("csession_id") != self.csession_id:
             raise _check_error("status failed or unusable")
+        run = body.get("run")
+        active = run.get("sandbox_active") if isinstance(run, dict) else None
+        self.sandbox_active = active if isinstance(active, bool) else None
         return body
 
     # -- stopping and forgetting -------------------------------------------------------------
@@ -500,6 +514,10 @@ class _Session:
 def _session_id(body: Mapping[str, Any] | None) -> str | None:
     value = body.get("csession_id") if body is not None else None
     return value if isinstance(value, str) and SESSION_ID.fullmatch(value) else None
+
+
+def _token(value: object) -> str | None:
+    return value if isinstance(value, str) and _END_REASON.fullmatch(value) else None
 
 
 def _is_run(value: object) -> bool:
@@ -647,4 +665,10 @@ def run_session(
         judgement = agentjudge.escalate("check_error", "agent run failed")
     finally:
         session.finish()
-    return SessionResult(judgement, tuple(dict.fromkeys(session.warnings)))
+    return SessionResult(
+        judgement,
+        tuple(dict.fromkeys(session.warnings)),
+        session.exit_code,
+        session.end_reason,
+        session.sandbox_active,
+    )
