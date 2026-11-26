@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from gatectl import audit, ids, store
+from gatectl import audit, engine, ids, probe, store
 from gatectl.config import (
     ConfigProblem,
     LoadedConfig,
@@ -34,7 +34,7 @@ from gatectl.config import (
 )
 from gatectl.config_models import AgentCheck, ScriptCheck
 from gatectl.context import Context, Result
-from gatectl.errors import ConfigInvalidError, InternalError
+from gatectl.errors import ConfigInvalidError
 from gatectl.fingerprint import INSTRUCTION_CAP, bundled_plugin_dir, plugin_name_of
 from gatectl.sanitize import sanitize
 
@@ -558,17 +558,42 @@ def validate_config(
 # --- the command ---------------------------------------------------------------------------------
 
 
-def _text(report: Report) -> str:
+PROBE_GAP = (
+    "probe note: the probe covers the agent: block only; per-check overrides of sandbox, skill, "
+    "permission_profile, setting_sources, env_allowlist and model are not covered "
+    "(validate still checks them)"
+)
+
+
+def _probe_lines(result: probe.ProbeResult) -> list[str]:
+    facts = (
+        f"exit_code {_shown(result.exit_code)} end_reason {_shown(result.end_reason)} "
+        f"sandbox_active {_shown(result.sandbox_active)}"
+    )
+    head = "probe: ok" if result.ok else f"probe: failed {sanitize(result.failed, 2048)}"
+    return [f"{head} ({facts})", PROBE_GAP]
+
+
+def _shown(value: object) -> str:
+    if value is None:
+        return "unknown"
+    return str(value).lower() if isinstance(value, bool) else sanitize(str(value), 64)
+
+
+def _text(report: Report, ran: probe.ProbeResult | None = None) -> str:
     lines = [f"problem {p.code} {p.path}: {p.message}" for p in report.problems]
     lines += [f"warning {w.code} {w.path}: {w.message}" for w in report.warnings]
     if report.session_cmd_known:
         shown = sanitize(report.session_cmd, 256) if report.session_cmd else "not found"
         lines.append(f"session_cmd: {shown}")
+    if ran is not None:
+        lines += _probe_lines(ran)
     lines.append("invalid" if report.problems else "valid")
     return "\n".join(lines)
 
 
 def handle(ctx: Context) -> Result:
+    loaded: LoadedConfig | None = None
     try:
         loaded = load_config(ctx.config)
     except ConfigInvalidError as exc:
@@ -579,13 +604,14 @@ def handle(ctx: Context) -> Result:
         )
     else:
         report = validate_config(loaded, environ=os.environ)
-    if getattr(ctx.args, "probe", False) and not report.problems:
-        # TODO(#26): run the probe and fill the ``probe`` member; exit 12 when it fails.
-        raise InternalError("validate --probe is not implemented yet")
+    ran = None
+    if getattr(ctx.args, "probe", False) and loaded is not None and not report.problems:
+        ran = probe.run_probe(loaded, engine.default_env())
     payload = {
         "valid": not report.problems,
         "problems": [p.as_dict() for p in report.problems],
         "warnings": [w.as_dict() for w in report.warnings],
-        "probe": None,
+        "probe": ran.as_dict() if ran is not None else None,
     }
-    return Result(payload=payload, text=_text(report), exit_code=2 if report.problems else 0)
+    exit_code = 2 if report.problems else (12 if ran is not None and not ran.ok else 0)
+    return Result(payload=payload, text=_text(report, ran), exit_code=exit_code)

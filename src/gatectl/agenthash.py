@@ -1,6 +1,6 @@
 """The hash of the current agent configuration (interface.md, State changes, hint 1).
 
-``validate --probe`` (TODO(#26)) stores this value as ``probe_agent_hash`` after a successful
+``validate --probe`` (``probe.py``) stores this value as ``probe_agent_hash`` after a successful
 probe, and ``set ... enforced`` compares it to decide whether to hint at running the probe. It is
 the SHA-256 of the canonical JSON of the ``agent:`` block, the resolved ``session_cmd`` (null when
 it does not resolve) and the gatectl version, so changing any of them makes the old probe stale.
