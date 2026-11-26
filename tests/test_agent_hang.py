@@ -27,7 +27,14 @@ from tests.proc_util import Tracker
 
 INPUT = {"ci": "ok", "repo": REPO}
 # n = 3 s, the guard 1 s: the run is overdue after one second of a three second hang.
-SHORT = agent.Limits(call_timeout=1.5, exec_margin=-2.0, cleanup_budget=6.0, kill_grace=0.5)
+SHORT = agent.Limits(
+    call_timeout=1.5,
+    exec_margin=-2.0,
+    cleanup_budget=6.0,
+    kill_grace=0.5,
+    stop_grace=0.2,
+    forget_floor=0.2,
+)
 
 
 @pytest.fixture
@@ -159,7 +166,14 @@ def test_an_exhausted_cleanup_budget_leaves_the_rest_to_reconcile(
     tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path, "hang", FAKE_CS_HANG_MAX="30", FAKE_CS_BEHAVIOR_STOP="hang")
-    spent = agent.Limits(call_timeout=1.5, exec_margin=-2.0, cleanup_budget=1.0, kill_grace=0.5)
+    spent = agent.Limits(
+        call_timeout=1.5,
+        exec_margin=-2.0,
+        cleanup_budget=1.0,
+        kill_grace=0.5,
+        stop_grace=0.2,
+        forget_floor=0.2,
+    )
     limits_env(monkeypatch, tracker, spent)
     doc, _ = run_check(tmp_path, capsys, cfg_for(fake))
     assert doc["checks"][0]["reason"] == "timeout"
@@ -236,3 +250,39 @@ def test_a_sigkilled_gatectl_leaves_a_session_a_reconcile_sweep_can_find_by_labe
     assert slot == [(decision, record["id"])]
     assert (state / "tmp" / decision).is_dir()
     assert json.loads(json.dumps(record["labels"])) == record["labels"]
+
+
+def test_a_slow_list_still_leaves_a_stop_that_can_finish_its_grace_and_a_forget(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+) -> None:
+    """A ``list`` that uses its whole timeout must not starve the later ``stop --grace 2s`` (it
+    needs its grace plus a second) or the ``forget`` that follows."""
+    fake = Fake(tmp_path, "hang", FAKE_CS_HANG_MAX="30", FAKE_CS_BEHAVIOR_LIST="hang")
+    real_limits = agent.Limits(
+        call_timeout=5.0, exec_margin=-2.0, cleanup_budget=10.0, kill_grace=2.0
+    )
+    limits_env(monkeypatch, tracker, real_limits)
+    timeouts: list[tuple[str, float]] = []
+    real_run = agent.runner.run_process
+
+    def spy(gw: Any, spec: Any, **kw: Any) -> Any:
+        verb = next((a for a in spec.argv if a in ("list", "stop", "forget")), "")
+        timeouts.append((verb, spec.timeout))
+        return real_run(gw, spec, **kw)
+
+    monkeypatch.setattr(agent.runner, "run_process", spy)
+    doc, elapsed = run_check(tmp_path, capsys, cfg_for(fake))
+    assert doc["checks"][0]["reason"] == "timeout"
+    verbs = fake.verbs()
+    assert verbs.index("list") < len(verbs) - 1 - verbs[::-1].index("stop") < verbs.index("forget")
+    assert verbs.count("forget") == 1
+    for call in stops(fake):
+        assert call[2:] == ["--grace", "2s", "--actor", "auto:gatectl"]
+    last_stop = [t for v, t in timeouts if v == "stop"][-1]
+    assert last_stop >= 3.0  # its own --grace 2s plus a second
+    assert elapsed < 30  # generous: at least twice what the 10 s budget plus the guard needs
+    assert tmp_entries(sdir) == []

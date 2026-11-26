@@ -353,7 +353,7 @@ def test_an_unusable_list_falls_back_to_the_one_known_session(
     listing: dict[str, Any],
 ) -> None:
     fake = Fake(tmp_path, FAKE_CS_BEHAVIOR_EXEC="hang", FAKE_CS_HANG_MAX="3")
-    limits_env(monkeypatch, limits=agent.Limits(1.5, -2.0, 5.0, 0.5))
+    limits_env(monkeypatch, limits=agent.Limits(1.5, -2.0, 5.0, 0.5, 0.2, 0.2))
     cmd = patched_cmd(tmp_path, fake, {"list": listing})
     path = config_file(tmp_path, config(None, session_cmd=cmd, checks=[agent_check(timeout="3s")]))
     _, doc, _ = do_check(capsys, path, "p", "--input", write_input(tmp_path, INPUT))
@@ -385,7 +385,7 @@ def test_a_failed_list_stops_then_forgets_the_known_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = Fake(tmp_path, FAKE_CS_BEHAVIOR_EXEC="hang", FAKE_CS_HANG_MAX="3")
-    limits_env(monkeypatch, limits=agent.Limits(1.5, -2.0, 5.0, 0.5))
+    limits_env(monkeypatch, limits=agent.Limits(1.5, -2.0, 5.0, 0.5, 0.2, 0.2))
     cmd = patched_cmd(tmp_path, fake, {"list": {"exit": 12}})
     path = config_file(tmp_path, config(None, session_cmd=cmd, checks=[agent_check(timeout="3s")]))
     do_check(capsys, path, "p", "--input", write_input(tmp_path, INPUT))
@@ -412,21 +412,87 @@ def test_a_maximal_legal_outcome_and_status_body_fits_the_caps_and_parses() -> N
         assert agent.parse_object(data) == body
 
 
-def test_the_cleanup_call_budget_sets_the_kill_grace_aside() -> None:
-    now = [100.0]
+def _session(now: list[float]) -> agent._Session:
     limits = agent.Limits(call_timeout=5.0, exec_margin=10.0, cleanup_budget=10.0, kill_grace=2.0)
-    session = agent._Session(
+    return agent._Session(
         gw=None, launch=None, nonce="", threshold=0.0, store=None, slot=None,  # type: ignore[arg-type]
         env={}, limits=limits, monotonic=lambda: now[0], cancel=None,
     )  # fmt: skip
+
+
+def test_the_cleanup_call_budget_sets_the_kill_grace_aside() -> None:
+    now = [100.0]
+    session = _session(now)
+    limits = session.limits
     assert session._bounded() == 5.0  # min(cap 5, 10 - 2)
     now[0] = 106.0
     assert session._bounded() == 2.0  # 4 s left, 2 s of it kill grace
+    assert session._bounded(reserve=1.0) == 1.0
     now[0] = 108.0
     assert session._bounded() <= 0  # nothing left but the grace: the call is skipped
     # a call that ignores SIGTERM runs timeout + grace: never past the budget end (110)
     now[0] = 106.0
     assert now[0] + session._bounded() + limits.kill_grace <= 110.0
+    # a floor lifts a short timeout, but only when it fits at all
+    assert session._bounded(floor=3.0) == 0.0  # 2 s of timeout room: cannot fit
+    now[0] = 103.0
+    assert session._bounded(floor=3.0, reserve=4.0) == 3.0  # 5 s of room: the floor wins
+
+
+def _clean_up(
+    now: list[float], spent: float, *, hostile: bool, list_takes_all: bool
+) -> list[tuple[str, float]]:
+    """Walk list, stop, forget the way ``_finish`` allocates them, each call using its whole
+    timeout (``hostile``: and then the kill grace too). Returns the (verb, timeout) calls."""
+    session = _session(now)
+    session._shared()  # the budget starts with the first clean-up call
+    now[0] += spent  # what the overdue exec path already charged
+    steps = (
+        ("list", session._list_timeout),
+        ("stop", session._stop_timeout),
+        ("forget", session._forget_timeout),
+    )
+    calls: list[tuple[str, float]] = []
+    for verb, allot in steps:
+        timeout = allot()
+        if timeout <= 0:
+            continue
+        calls.append((verb, timeout))
+        used = timeout if (hostile or (verb == "list" and list_takes_all)) else 0.1
+        now[0] += used + (session.limits.kill_grace if hostile else 0.0)
+    return calls
+
+
+def test_the_cleanup_budget_is_shared_out_across_list_stop_and_forget() -> None:
+    # full budget, everything quick: all three run
+    now = [100.0]
+    calls = _clean_up(now, 0.0, hostile=False, list_takes_all=False)
+    assert [v for v, _ in calls] == ["list", "stop", "forget"]
+    assert dict(calls)["list"] == 4.0  # 10 - 2 grace - 3 (stop: grace + 1) - 1 (forget)
+    # full budget, a list that takes its whole timeout: stop still gets grace + 1, forget runs
+    now = [100.0]
+    calls = _clean_up(now, 0.0, hostile=False, list_takes_all=True)
+    assert [v for v, _ in calls] == ["list", "stop", "forget"]
+    assert dict(calls)["stop"] >= 3.0 and dict(calls)["forget"] >= 1.0
+    assert now[0] <= 110.0
+    # 8 s remain after the exec path stopped the session; a slow list
+    now = [100.0]
+    calls = _clean_up(now, 2.0, hostile=False, list_takes_all=True)
+    assert [v for v, _ in calls] == ["list", "stop", "forget"]
+    assert dict(calls)["list"] == 2.0 and dict(calls)["stop"] >= 3.0
+    assert now[0] <= 110.0
+    # everything hangs and ignores SIGTERM: never past the budget end
+    for spent in (0.0, 2.0, 5.0, 8.0):
+        now = [100.0]
+        _clean_up(now, spent, hostile=True, list_takes_all=True)
+        assert now[0] <= 110.0, spent
+    # low budget (5 s left): no list; the stop is still given its grace plus a second
+    now = [100.0]
+    calls = _clean_up(now, 5.0, hostile=False, list_takes_all=True)
+    assert calls[0][0] == "stop" and calls[0][1] >= 3.0
+    # too low for even the grace plus the kill grace: nothing
+    now = [100.0]
+    assert _clean_up(now, 7.5, hostile=False, list_takes_all=True) == []
 
 
 def test_an_outcome_that_names_another_session_is_dropped_before_the_judge(
@@ -521,7 +587,7 @@ def test_a_cancelled_run_stops_forgets_and_reports_a_check_error(
         nonce="a" * 32,
         threshold=0.8,
         environ=dict(os.environ),
-        limits=agent.Limits(1.5, 10.0, 5.0, 0.5),
+        limits=agent.Limits(1.5, 10.0, 5.0, 0.5, 0.2, 0.2),
         cancel=cancel,
     )
     assert (result.judgement.verdict, result.judgement.reason) == ("escalate", "check_error")

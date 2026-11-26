@@ -25,7 +25,14 @@ from tests.proc_util import Tracker
 ENV_BIN = "/usr/bin/env"
 POLICY = "p"
 # Short limits so a hung fake call costs a second, not five. The argv the fake sees is the same.
-FAST = agent.Limits(call_timeout=1.5, exec_margin=1.0, cleanup_budget=5.0, kill_grace=0.5)
+FAST = agent.Limits(
+    call_timeout=1.5,
+    exec_margin=1.0,
+    cleanup_budget=5.0,
+    kill_grace=0.5,
+    stop_grace=0.2,
+    forget_floor=0.2,
+)
 DECISION = agentcache.Verdict("allow", 0.95, ("looks fine",))
 
 

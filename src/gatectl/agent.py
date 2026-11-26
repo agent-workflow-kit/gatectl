@@ -55,6 +55,7 @@ from gatectl.store import Store
 ACTOR = "auto:gatectl"
 OUTCOME_NAME = "outcome.json"
 GRACE = "2s"
+
 SESSION_ENV_ALLOW = (
     "PATH",
     "HOME",
@@ -97,6 +98,8 @@ class Limits:
     exec_margin: float = 10.0  # ``exec`` is waited for ``n`` plus this
     cleanup_budget: float = 10.0  # list, stop, signals, second stop and forget share it
     kill_grace: float = 2.0  # SIGTERM to SIGKILL for a call's process group
+    stop_grace: float = 2.0  # the ``--grace`` of a stop (GRACE in seconds): its timeout floor
+    forget_floor: float = 1.0  # the least timeout of a forget, and the margin over a stop's grace
 
 
 DEFAULT_LIMITS = Limits()
@@ -256,11 +259,35 @@ class _Session:
             self.budget = _Budget(self.monotonic() + self.limits.cleanup_budget, self.monotonic)
         return self.budget
 
-    def _bounded(self) -> float:
+    def _bounded(self, *, floor: float = 0.0, reserve: float = 0.0) -> float:
         """The timeout of a clean-up call: the smaller of the cap and what is left once the
-        runner's SIGKILL grace is set aside, so a call that ignores SIGTERM still ends inside
-        the shared budget (<= 0: skip the call)."""
-        return min(self.limits.call_timeout, self._shared().remaining() - self.limits.kill_grace)
+        runner's SIGKILL grace and ``reserve`` (what later calls need) are set aside, so a call
+        that ignores SIGTERM still ends inside the shared budget (<= 0: skip the call). With a
+        ``floor`` the result is at least that when it fits in what is left after the grace
+        (``reserve`` may be dipped into for it), else 0."""
+        room = self._shared().remaining() - self.limits.kill_grace
+        timeout = min(self.limits.call_timeout, room - reserve)
+        if floor > 0:
+            return max(timeout, floor) if room >= floor else 0.0
+        return timeout
+
+    def _list_timeout(self) -> float:
+        """``list`` leaves one stop (grace + 1 s) and one forget (1 s) their minimum."""
+        lim = self.limits
+        return self._bounded(reserve=lim.stop_grace + 2 * lim.forget_floor)
+
+    def _stop_timeout(self) -> float:
+        """At least grace + 1 s when that fits (leaving a forget its second if possible), else
+        what is left if it is still the stop's own grace, else 0."""
+        lim = self.limits
+        timeout = self._bounded(floor=lim.stop_grace + lim.forget_floor, reserve=lim.forget_floor)
+        if timeout > 0:
+            return timeout
+        left = self._bounded()
+        return left if left >= lim.stop_grace else 0.0
+
+    def _forget_timeout(self) -> float:
+        return self._bounded(floor=self.limits.forget_floor)
 
     @staticmethod
     def _ok(result: runner.RunResult) -> bool:
@@ -384,7 +411,7 @@ class _Session:
     # -- stopping and forgetting -------------------------------------------------------------
 
     def _stop(self, session_id: str) -> bool:
-        timeout = self._bounded()
+        timeout = self._stop_timeout()
         if timeout <= 0:
             return False
         tail = ["stop", session_id, "--grace", GRACE, "--actor", ACTOR]
@@ -399,7 +426,7 @@ class _Session:
             self.warnings.append("stop_failed")
 
     def _forget(self, session_id: str, *, shared: bool) -> bool:
-        timeout = self._bounded() if shared else self.limits.call_timeout
+        timeout = self._forget_timeout() if shared else self.limits.call_timeout
         if timeout <= 0:
             return False
         tail = ["forget", session_id, "--actor", ACTOR, "--decision-id", self.launch.decision_id]
@@ -407,7 +434,7 @@ class _Session:
 
     def _list(self) -> dict[str, bool] | None:
         """The sessions with our label: id -> whether its run is final. ``None``: no answer."""
-        timeout = self._bounded()
+        timeout = self._list_timeout()
         if timeout <= 0:
             return None
         label = f"decision={self.launch.decision_id}"
