@@ -102,6 +102,30 @@ Spikes ran against Claude Code with claude-session from this repository set, on 
 
 Still to verify: a live sandbox containment attack, the lifeline watchdog handshake, true same-second parallel launches, `start` plus `exec --session-id` and `stop` of a pending run from a headless caller, whether a changed `SKILL.md` changes the fingerprint, how many turns a run takes (to decide whether `agent.max_turns` earns a key), the macOS method for process start time (slot liveness), whether `os.waitid` with `WNOWAIT` exists on macOS (otherwise `kqueue`), slot liveness across a reboot (boot id), and a macOS run of everything above.
 
+### Live test map
+
+The `live` tests of the agent checks (issue #27) are in `tests/live/`; their support code and its default-suite tests are `tests/live_util.py` and `tests/test_agent_live_support.py`. They start the real claude-session and a real model, are deselected by default (`addopts = -m 'not live'`), are never selected by a CI job, and run only with `make live GATECTL_LIVE=1` (the target refuses without the variable; a run that lacks the variable, claude-session, `claude`, the sandbox prerequisites or a login skips with a message naming each gap). They use a private `HOME` and private XDG directories (`GATECTL_LIVE_HOME=real` keeps only `HOME`, for a subscription login), model `haiku` (`GATECTL_LIVE_MODEL`), and stop at 24 model runs (`GATECTL_LIVE_MAX_RUNS`). The whole suite costs about 20 small runs. Acceptance of #27 depends on a human run of them (issue #36).
+
+| Row of the live verification table | Test |
+|---|---|
+| A headless `gate-check` round trip | `test_round_trip_with_the_bundled_skill_gives_an_allow_and_leaves_nothing`, `test_start_exec_status_list_forget_shapes_of_a_done_run` |
+| exits 0 with outcome `done` for a missing skill | `test_a_missing_skill_exits_0_with_an_unusable_artifact` |
+| Confidence is not calibrated | printed by the round trip and the injection test (confidence is in the artifact, not asserted) |
+| Under `dontAsk` | `test_round_trip_with_the_bundled_skill_gives_an_allow_and_leaves_nothing` (the run reports) |
+| A sandboxed run needs placeholder files | `test_validate_probe_passes_against_the_real_session_and_stores_both_markers` (`sandbox: required`, `sandbox_active`) |
+| `claude-session --dry-run` reports the sandbox available | `test_validate_probe_passes_against_the_real_session_and_stores_both_markers` (the probe is a real run) |
+| A run with no report ends exit 14 | `test_a_run_that_never_reports_ends_exit_14`, `test_a_tiny_timeout_ends_exit_16` |
+| Three to six parallel runs | `test_three_parallel_runs_finish_without_interference_within_max_parallel`, `test_max_parallel_one_serializes_two_runs` |
+| A sandboxed injection attempt | `test_the_injection_input_is_never_allowed_and_containment_is_recorded`, `test_hostile_input_cannot_induce_the_agent_or_task_tool` |
+| `forget` hides the session at once | `test_start_exec_status_list_forget_shapes_of_a_done_run` |
+| After a SIGKILL of gatectl | `test_killing_gatectl_mid_run_leaves_labelled_sessions_that_reconcile_clears` |
+| claude-session `start --json` prints | `test_start_then_stop_of_a_pending_run_from_a_headless_caller`, `test_exec_adopts_the_session_from_a_headless_caller_and_stop_grace_timing` |
+| A single Read of a large one-line file | `test_a_60_kib_input_with_hostile_text_at_the_end_is_not_allowed`, and without a model `test_a_500_kb_input_is_input_invalid_and_no_session_is_ever_started`, `test_a_60_kib_input_with_hostile_text_last_is_accepted_and_fenced_to_the_end` |
+
+Other behaviors the fake only assumes, each probed live: the realpath of the artifact under a symlinked state home (`test_a_symlinked_state_home_still_yields_an_artifact_path_the_judge_accepts`), exit 12 `claude_not_found` (`test_a_missing_claude_binary_is_tool_missing_without_a_model_run`), exit 12 `unsafe_setting_sources` (`test_unsafe_setting_sources_is_refused_by_the_real_session`), and whether the API key alone suffices for the adopting `exec` (`test_the_narrow_login_environment_is_enough_for_an_api_key_run`, D-28: if it does, open an issue to narrow the allowlist). `test_hostile_input_cannot_induce_the_agent_or_task_tool` carries the #21 decision: if a run uses Agent or Task, switch the bundled profile to `readonly`. Without a model: a changed `SKILL.md` changes the fingerprint (`test_editing_the_real_bundled_skill_changes_the_fingerprint_of_a_check_using_it`), and the marker, the `make live` guard and the skip logic are tested in `tests/test_agent_live_support.py`.
+
+Not probed live, by design: an end reason `timeout` on a `done` run and exit 13 (the runs cannot be induced on demand; the fake plays them), exit 12 `sandbox_unavailable` (needs a host without a working sandbox; the macOS and WSL1 checklist covers it), gatectl's interactive mode (it is always headless), and the hung `exec` that ignores SIGTERM (a process test with the fake covers the group kill).
+
 ## Modules
 
 | Module | Responsibility |
