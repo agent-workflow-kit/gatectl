@@ -218,7 +218,7 @@ def _write_payload(dir_fd: int, payload: bytes) -> None:
 
 
 def _write_new(dir_fd: int, name: str, data: bytes) -> None:
-    """Create ``name`` exclusively (a link or an existing file is an error), mode 0600, and fill it."""
+    """Create ``name`` exclusively (a link or existing file is an error), mode 0600, and fill it."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
     fd = os.open(name, flags, 0o600, dir_fd=dir_fd)  # ours from here: removed again on failure
     try:
