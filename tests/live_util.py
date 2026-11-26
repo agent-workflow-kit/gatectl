@@ -43,9 +43,22 @@ REAL_ENV: Mapping[str, str] = dict(os.environ)
 
 LOGIN_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
 PROVIDER_FLAGS = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
-# What gatectl's own allowlist lets through to claude-session besides the basics (D-28).
-FORWARD_PREFIXES = ("ANTHROPIC_", "CLAUDE_", "AWS_", "GOOGLE_")
-FORWARD_NAMES = ("CLOUD_ML_REGION", "PATH", "LANG", "TERM", "USER", "LOGNAME", "TMPDIR")
+# What gatectl's own allowlist lets through to claude-session besides the basics (D-28), as an
+# explicit list: never a CLAUDE_ prefix, which would forward CLAUDE_CONFIG_DIR (it bypasses the
+# private HOME) and CLAUDE_CODE_ENTRYPOINT.
+FORWARD_PREFIXES = ("ANTHROPIC_", "AWS_", "GOOGLE_")
+FORWARD_NAMES = (
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLOUD_ML_REGION",
+    "PATH",
+    "LANG",
+    "TERM",
+    "USER",
+    "LOGNAME",
+    "TMPDIR",
+)
 
 # The rows of the live verification table (docs/design.md) that belong to agent checks. The
 # docs test checks each appears in both the table and the live test map.
@@ -82,6 +95,51 @@ def _resolve(environ: Mapping[str, str]) -> list[str] | None:
 
 def real_home_mode(environ: Mapping[str, str]) -> bool:
     return environ.get(HOME_VAR) == "real"
+
+
+def real_home_warning(environ: Mapping[str, str]) -> str | None:
+    """The text printed when ``GATECTL_LIVE_HOME=real`` is active; ``None`` otherwise."""
+    if not real_home_mode(environ):
+        return None
+    home = environ.get("HOME", "~")
+    return (
+        f"GATECTL_LIVE_HOME=real: the live tests use your REAL home {home}. Transcripts of "
+        "hostile inputs are written under ~/.claude/projects; ~/.claude.json and an OAuth "
+        "refresh-token rotation may sign out your real install; the tool-induction test reads "
+        "your recent real transcripts. On macOS the login is in the Keychain, so real mode "
+        "skips there. Prefer an API key with the private home."
+    )
+
+
+def session_version(command: str, environ: Mapping[str, str]) -> str:
+    """``claude-session --version`` for the prerequisites output (``unknown`` if it cannot run)."""
+    try:
+        done = subprocess.run(
+            [command, "--version"],
+            env={"PATH": environ.get("PATH", ""), "HOME": "/nonexistent"},
+            capture_output=True,
+            text=True,
+            timeout=30,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return (done.stdout.strip() or "unknown")[:80]
+
+
+def live_summary(*, passed: int, skipped: int, failed: int) -> tuple[str, bool]:
+    """The closing note of a live run and whether to force a failing exit status: a run in
+    which live tests were selected but none passed (all skipped) proves nothing."""
+    if passed + skipped + failed == 0:
+        return "", False
+    note = (
+        f"live summary: {passed} passed, {skipped} skipped, {failed} failed. Skipped live "
+        "tests prove nothing: read the skip reasons (-rs)."
+    )
+    if passed == 0 and failed == 0:
+        return note + " NO live test passed: failing this run on purpose.", True
+    return note, False
 
 
 def missing_prerequisites(
@@ -162,6 +220,10 @@ class BudgetExceeded(Exception):
     pass
 
 
+class BudgetConfigError(ValueError):
+    pass
+
+
 @dataclass
 class RunBudget:
     """A hard cap on model runs for the whole session; one ``spend`` per run a test may start."""
@@ -172,11 +234,19 @@ class RunBudget:
 
     @classmethod
     def from_environ(cls, environ: Mapping[str, str]) -> RunBudget:
+        if BUDGET_VAR not in environ:
+            return cls(DEFAULT_MAX_RUNS)
+        raw = environ[BUDGET_VAR]
         try:
-            cap = int(environ.get(BUDGET_VAR, ""))
+            cap = int(raw)
         except ValueError:
-            cap = DEFAULT_MAX_RUNS
-        return cls(cap if cap > 0 else DEFAULT_MAX_RUNS)
+            cap = 0
+        if cap <= 0:
+            raise BudgetConfigError(
+                f"{BUDGET_VAR}={raw!r} is not a positive integer; unset it for the default "
+                f"({DEFAULT_MAX_RUNS}) or give the cap of model runs you accept"
+            )
+        return cls(cap)
 
     def spend(self, runs: int, what: str) -> None:
         if self.used + runs > self.cap:
@@ -262,8 +332,8 @@ def run(
     stdin: bytes | None = None,
     cwd: str = "/",
 ) -> Proc:
-    """Run ``argv`` headless (no tty, own process group). On timeout, signal exactly the group
-    of the child this call started, then reap it."""
+    """Run ``argv`` headless (no tty, own process group). On timeout or an interrupt, signal
+    exactly the group of the child this call started, then reap it."""
     began = time.monotonic()
     child = subprocess.Popen(
         list(argv),
@@ -280,6 +350,9 @@ def run(
     except subprocess.TimeoutExpired:
         timed_out = True
         out, err = stop_group(child)
+    except BaseException:  # noqa: BLE001 - KeyboardInterrupt too: never leave the child running
+        stop_group(child)
+        raise
     return Proc(
         list(argv),
         child.returncode,
@@ -291,7 +364,8 @@ def run(
 
 
 def stop_group(child: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
-    """SIGTERM then SIGKILL to the group of a child we started and have not yet reaped."""
+    """SIGTERM then SIGKILL to the group of a child we started and have not yet reaped. Prints
+    the pid and pgid when the child is still not reaped after SIGKILL."""
     out = err = b""
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
@@ -303,7 +377,58 @@ def stop_group(child: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
             return out, err
         except subprocess.TimeoutExpired:
             continue
+    print(
+        f"[live] LEFTOVER: child pid {child.pid} (pgid {child.pid}) did not end after SIGTERM "
+        "and SIGKILL; stop it by hand (exact pid, never by pattern)"
+    )
     return out, err
+
+
+def _proc_stat(pid: int) -> tuple[str, int] | None:
+    """(state, pgrp) of ``pid`` from /proc, or ``None`` when it is gone or unreadable."""
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    rest = raw.rsplit(")", 1)[-1].split()
+    try:
+        return rest[0], int(rest[2])
+    except (IndexError, ValueError):
+        return None
+
+
+def pid_alive(pid: int) -> bool:
+    """Whether ``pid`` is a live (non-zombie) process; reads /proc, sends no signal."""
+    stat = _proc_stat(pid)
+    return stat is not None and stat[0] != "Z"
+
+
+def group_members(pgid: int) -> list[int]:
+    """Pids whose process group is exactly ``pgid`` (read from /proc, no signal sent)."""
+    found: list[int] = []
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return found
+    for name in names:
+        if name.isdigit():
+            stat = _proc_stat(int(name))
+            if stat is not None and stat[1] == pgid:
+                found.append(int(name))
+    return sorted(found)
+
+
+def label_problems(labels: Sequence[str], *, policy: str, state_tag: str) -> list[str]:
+    """What is missing among the labels gatectl puts on every session it starts."""
+    have = set(labels)
+    problems = [
+        f"{label} missing" for label in ("owner=gatectl", f"policy={policy}") if label not in have
+    ]
+    if not any(label.startswith("decision=") and len(label) > 9 for label in have):
+        problems.append("decision=<id> missing")
+    if f"state={state_tag}" not in have:
+        problems.append(f"state={state_tag} missing")
+    return problems
 
 
 class Live:
@@ -393,6 +518,71 @@ class Live:
         """One call of the real claude-session with the allowlisted login environment."""
         return run([self.session_cmd, *argv], env if env is not None else self.env, timeout=timeout)
 
+    def manual(self, *argv: str) -> str:
+        """The exact command a human runs by hand against this test's private state."""
+        pairs = " ".join(
+            f"{k}={self.env[k]}"
+            for k in (
+                "HOME",
+                "XDG_CONFIG_HOME",
+                "XDG_DATA_HOME",
+                "XDG_STATE_HOME",
+                "XDG_CACHE_HOME",
+            )
+        )
+        return f"env {pairs} {self.session_cmd} {' '.join(argv)}"
+
+    def sweep(self) -> list[str]:
+        """Stop then forget every gatectl-labelled session left in the private state, print what
+        happened, and return one ``LEFTOVER`` line per session that did not end or whose list
+        could not be read (empty: nothing is left)."""
+        left: list[str] = []
+        listed = self.session("list", "--label", "owner=gatectl", "--json", timeout=60)
+        try:
+            body = listed.json()
+        except ValueError:
+            body = None
+        if listed.code != 0 or not isinstance(body, dict):
+            line = (
+                f"LEFTOVER: could not list sessions (exit {listed.code}); state dir "
+                f"{self.state_dir}; list by hand: {self.manual('list', '--label', 'owner=gatectl')}"
+            )
+            print(f"[live] {line}")
+            return [line]
+        for entry in body.get("sessions", []):
+            sid = entry.get("csession_id") if isinstance(entry, dict) else None
+            if not isinstance(sid, str):
+                continue
+            labels = [x for x in entry.get("labels", []) if isinstance(x, str)]
+            decision = next((x[9:] for x in labels if x.startswith("decision=")), "")
+            pids = self.pids(sid)
+            stopped = self.session(
+                "stop", sid, "--grace", "2s", "--actor", "auto:gatectl", "--json"
+            )
+            forget = ["forget", sid, "--actor", "auto:gatectl"]
+            if decision:
+                forget += ["--decision-id", decision]
+            forgot = self.session(*forget, "--json")
+            print(f"[live] sweep {sid}: stop exit {stopped.code}, forget exit {forgot.code}")
+            if stopped.code != 0 or forgot.code != 0:
+                line = (
+                    f"LEFTOVER {sid}: stop exit {stopped.code}, forget exit {forgot.code}; pids "
+                    f"{pids}; state dir {self.state_dir}; stop by hand: "
+                    f"{self.manual('stop', sid, '--grace', '2s', '--actor', 'auto:gatectl')}"
+                )
+                print(f"[live] {line}")
+                left.append(line)
+        return left
+
+    def pids(self, sid: str) -> dict[str, Any]:
+        try:
+            body = self.session("status", sid, "--json", timeout=30).json()
+        except (ValueError, OSError):
+            return {}
+        run_ = body.get("run") if isinstance(body, dict) else None
+        run_ = run_ if isinstance(run_, dict) else {}
+        return {"wrapper_pid": run_.get("wrapper_pid"), "child_pid": run_.get("child_pid")}
+
     def check(
         self, config: str, input_file: str, *, timeout: float = 300
     ) -> tuple[Proc, dict[str, Any]]:
@@ -427,6 +617,7 @@ class Direct:
     files: Any
     start: Proc
     body: dict[str, Any]
+    problems: list[str] = field(default_factory=list)
 
     @property
     def session_id(self) -> str:
@@ -467,14 +658,20 @@ class Direct:
         )  # fmt: skip
 
     def cleanup(self) -> None:
-        """Best effort: stop a run that is not final, then forget (never raises)."""
+        """Stop a run that is not final, then forget. Never raises (it must not hide the test's
+        own failure) but records and prints every failure in ``problems``."""
         if not self.session_id:
             return
-        try:
-            self.stop()
-            self.forget()
-        except Exception:  # noqa: BLE001 - cleanup must not hide the test's own failure
-            pass
+        for name, call in (("stop", self.stop), ("forget", self.forget)):
+            try:
+                done = call()
+            except Exception as exc:  # noqa: BLE001
+                self.problems.append(f"{name} of {self.session_id} raised {exc!r}")
+                continue
+            if done.code != 0:
+                self.problems.append(f"{name} of {self.session_id} exit {done.code}")
+        for problem in self.problems:
+            print(f"[live] CLEANUP FAILED: {problem}; state dir {self.live.state_dir}")
 
 
 def direct_start(

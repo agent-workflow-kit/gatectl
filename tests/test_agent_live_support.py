@@ -18,6 +18,7 @@ import re
 import shutil
 import stat
 import subprocess
+import time
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -64,7 +65,7 @@ def test_every_live_test_carries_the_marker_and_nothing_else_is_in_the_live_dire
 def test_no_ci_workflow_and_no_default_make_target_selects_live() -> None:
     for path in (ROOT / ".github" / "workflows").glob("*.yml"):
         text = path.read_text(encoding="utf-8")
-        assert "live" not in text.lower().replace("deliver", ""), path.name
+        assert re.search(r"\blive\b", text, re.IGNORECASE) is None, path.name
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     verify = next(line for line in makefile.splitlines() if line.startswith("verify:"))
     assert "live" not in verify
@@ -83,13 +84,15 @@ def stub_uv(tmp_path: Path) -> tuple[Path, Path]:
     return bin_dir, marker
 
 
-def make_live(tmp_path: Path, **env: str) -> tuple[subprocess.CompletedProcess[str], Path]:
+def make_live(
+    tmp_path: Path, *flags: str, **env: str
+) -> tuple[subprocess.CompletedProcess[str], Path]:
     bin_dir, marker = stub_uv(tmp_path)
-    environ = {k: v for k, v in os.environ.items() if not k.startswith("GATECTL_")}
+    environ = {k: v for k, v in os.environ.items() if not k.startswith(("GATECTL_", "MAKEFLAGS"))}
     environ.update(env)
     environ["PATH"] = f"{bin_dir}:{environ.get('PATH', '/usr/bin:/bin')}"
     done = subprocess.run(
-        ["make", "-C", str(ROOT), "live"],
+        ["make", "-C", str(ROOT), *flags, "live"],
         env=environ,
         capture_output=True,
         text=True,
@@ -101,13 +104,57 @@ def make_live(tmp_path: Path, **env: str) -> tuple[subprocess.CompletedProcess[s
 
 @pytest.mark.skipif(shutil.which("make") is None, reason="make is not installed")
 @pytest.mark.parametrize("value", [None, "", "0", "yes", "true", "11"])
+@pytest.mark.parametrize(
+    "flags, makeflags",
+    [((), None), (("-i",), None), (("-k",), None), (("-B",), None), (("-i", "-k"), None),
+     ((), "i"), ((), "ik")],
+)  # fmt: skip
 def test_make_live_refuses_without_the_explicit_confirmation(
-    tmp_path: Path, value: str | None
+    tmp_path: Path, value: str | None, flags: tuple[str, ...], makeflags: str | None
 ) -> None:
-    done, marker = make_live(tmp_path, **({} if value is None else {live_util.LIVE_VAR: value}))
+    env: dict[str, str] = {} if value is None else {live_util.LIVE_VAR: value}
+    if makeflags is not None:
+        env["MAKEFLAGS"] = makeflags
+    done, marker = make_live(tmp_path, *flags, **env)
     assert done.returncode != 0
     assert not marker.exists(), "make live reached the test runner without GATECTL_LIVE=1"
     assert live_util.LIVE_VAR in done.stdout + done.stderr
+    assert "BILLED" in done.stdout + done.stderr
+
+
+@pytest.mark.skipif(shutil.which("make") is None, reason="make is not installed")
+@pytest.mark.parametrize("flags", [("-i",), ("-k",), ("-B",), ("-e",)])
+def test_make_live_refuses_with_the_variable_set_to_the_wrong_value_under_any_flag(
+    tmp_path: Path, flags: tuple[str, ...]
+) -> None:
+    done, marker = make_live(tmp_path, *flags, **{live_util.LIVE_VAR: "2"})
+    assert done.returncode != 0 and not marker.exists()
+
+
+@pytest.mark.skipif(shutil.which("make") is None, reason="make is not installed")
+def test_make_live_dry_run_without_the_confirmation_runs_nothing(tmp_path: Path) -> None:
+    done, marker = make_live(tmp_path, "-n")
+    assert done.returncode != 0 and not marker.exists()
+
+
+@pytest.mark.skipif(shutil.which("make") is None, reason="make is not installed")
+def test_make_live_dry_run_with_the_confirmation_only_prints(tmp_path: Path) -> None:
+    done, marker = make_live(tmp_path, "-n", **{live_util.LIVE_VAR: "1"})
+    assert done.returncode == 0 and not marker.exists()
+
+
+@pytest.mark.skipif(shutil.which("make") is None, reason="make is not installed")
+@pytest.mark.parametrize(
+    "flags, env",
+    [((), {"GATECTL_LIVE": "1"}), (("-e",), {"GATECTL_LIVE": "1"}), (("GATECTL_LIVE=1",), {}),
+     (("GATECTL_LIVE=1 ",), {})],
+)  # fmt: skip
+def test_make_live_accepts_the_confirmation_from_the_environment_and_the_command_line(
+    tmp_path: Path, flags: tuple[str, ...], env: dict[str, str]
+) -> None:
+    done, marker = make_live(tmp_path, *flags, **env)
+    assert done.returncode == 0, done.stderr
+    assert marker.exists()
 
 
 @pytest.mark.skipif(shutil.which("make") is None, reason="make is not installed")
@@ -119,7 +166,24 @@ def test_make_live_with_the_confirmation_runs_only_the_live_marker_and_warns(
     args = marker.read_text(encoding="utf-8").split()
     assert args[:2] == ["run", "pytest"]
     assert args[args.index("-m") + 1] == "live"
+    assert "-rs" in args
     assert "BILLED" in done.stdout
+    assert "not measured" in done.stdout
+    assert "skipped" in done.stdout and "prove nothing" in done.stdout
+
+
+@pytest.mark.skipif(shutil.which("make") is None, reason="make is not installed")
+def test_make_live_keeps_the_exit_code_of_the_test_run(tmp_path: Path) -> None:
+    bin_dir, marker = stub_uv(tmp_path)
+    (bin_dir / "uv").write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
+    environ = {k: v for k, v in os.environ.items() if not k.startswith("GATECTL_")}
+    environ["PATH"] = f"{bin_dir}:{environ.get('PATH', '/usr/bin:/bin')}"
+    environ[live_util.LIVE_VAR] = "1"
+    done = subprocess.run(
+        ["make", "-C", str(ROOT), "live"],
+        env=environ, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+    )  # fmt: skip
+    assert done.returncode != 0
 
 
 # --- skip logic -------------------------------------------------------------------------------
@@ -263,21 +327,40 @@ def test_the_private_environment_keeps_the_real_home_and_state_out_of_reach(
     real = {
         "HOME": "/home/someone",
         "PATH": "/usr/bin",
+        "LANG": "C.UTF-8",
+        "TERM": "dumb",
         "XDG_STATE_HOME": "/home/someone/.local/state",
         "XDG_CONFIG_HOME": "/home/someone/.config",
         "ANTHROPIC_API_KEY": "k",
         "AWS_REGION": "r",
+        "CLOUD_ML_REGION": "us",
+        "GOOGLE_APPLICATION_CREDENTIALS": "/x",
+        "CLAUDE_CODE_OAUTH_TOKEN": "t",
+        "CLAUDE_CODE_USE_BEDROCK": "1",
+        "CLAUDE_CODE_USE_VERTEX": "1",
+        "CLAUDE_CONFIG_DIR": "/home/someone/.claude",
+        "CLAUDE_CODE_ENTRYPOINT": "cli",
         "SECRET_TOKEN": "nope",
         "GATECTL_LIVE": "1",
+        "GATECTL_LIVE_HOME": "private",
+        "GATECTL_LIVE_MODEL": "m",
         "CSESSION_STATE": "/home/someone/state",
     }
     env = live_util.private_env(tmp_path, real)
     assert env["HOME"] == str(tmp_path / "home")
     for name in ("XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"):
         assert env[name].startswith(str(tmp_path))
-    assert env["ANTHROPIC_API_KEY"] == "k" and env["AWS_REGION"] == "r"
-    assert "SECRET_TOKEN" not in env and "GATECTL_LIVE" not in env
-    assert "CSESSION_STATE" not in env  # never inherit the user's claude-session state
+    for name in (
+        "PATH", "LANG", "TERM", "ANTHROPIC_API_KEY", "AWS_REGION", "CLOUD_ML_REGION",
+        "GOOGLE_APPLICATION_CREDENTIALS", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+    ):  # fmt: skip
+        assert env[name] == real[name], f"{name} must be forwarded"
+    for name in (
+        "SECRET_TOKEN", "GATECTL_LIVE", "GATECTL_LIVE_HOME", "GATECTL_LIVE_MODEL",
+        "CSESSION_STATE", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_ENTRYPOINT",
+    ):  # fmt: skip
+        assert name not in env, f"{name} must not be forwarded"
 
 
 def test_real_home_mode_keeps_only_home_and_scratches_every_xdg_directory(tmp_path: Path) -> None:
@@ -300,12 +383,268 @@ def test_a_run_budget_stops_the_suite_at_the_cap() -> None:
 def test_the_default_budget_comes_from_the_environment() -> None:
     assert live_util.RunBudget.from_environ({}).cap == live_util.DEFAULT_MAX_RUNS
     assert live_util.RunBudget.from_environ({"GATECTL_LIVE_MAX_RUNS": "3"}).cap == 3
-    assert live_util.RunBudget.from_environ({"GATECTL_LIVE_MAX_RUNS": "x"}).cap == (
-        live_util.DEFAULT_MAX_RUNS
-    )
-    assert live_util.RunBudget.from_environ({"GATECTL_LIVE_MAX_RUNS": "-4"}).cap == (
-        live_util.DEFAULT_MAX_RUNS
-    )
+
+
+@pytest.mark.parametrize("value", ["x", "-4", "0", "", " ", "1.5", "2x"])
+def test_an_invalid_run_cap_is_rejected_instead_of_replaced_by_the_default(value: str) -> None:
+    with pytest.raises(live_util.BudgetConfigError) as err:
+        live_util.RunBudget.from_environ({"GATECTL_LIVE_MAX_RUNS": value})
+    assert "GATECTL_LIVE_MAX_RUNS" in str(err.value)
+
+
+def test_real_home_mode_names_the_concrete_risk_and_private_mode_has_no_warning() -> None:
+    assert live_util.real_home_warning({"GATECTL_LIVE_HOME": "private"}) is None
+    assert live_util.real_home_warning({}) is None
+    text_ = live_util.real_home_warning({"GATECTL_LIVE_HOME": "real", "HOME": "/h"}) or ""
+    for word in ("~/.claude/projects", "~/.claude.json", "refresh", "/h"):
+        assert word in text_
+
+
+def test_the_summary_says_when_nothing_passed_and_forces_a_failure() -> None:
+    note, force = live_util.live_summary(passed=0, skipped=18, failed=0)
+    assert force and "prove nothing" in note and "18" in note
+    note, force = live_util.live_summary(passed=3, skipped=15, failed=0)
+    assert not force and "prove nothing" in note
+    note, force = live_util.live_summary(passed=0, skipped=0, failed=0)
+    assert not force  # no live test selected at all: nothing to say
+    note, force = live_util.live_summary(passed=0, skipped=2, failed=1)
+    assert not force  # the failure already fails the run
+
+
+# --- process safety and leftovers ----------------------------------------------------------------
+
+
+def proc(code: int, out: str = "{}") -> live_util.Proc:
+    return live_util.Proc(["x"], code, out, "", 0.1)
+
+
+def world(tmp_path: Path) -> live_util.Live:
+    real = {"HOME": str(tmp_path), "PATH": "/usr/bin"}
+    return live_util.Live(tmp_path, live_util.RunBudget(5), real)
+
+
+def fake_session(
+    sessions: list[dict[str, Any]], *, stop_code: int = 0, forget_code: int = 0
+) -> tuple[Any, list[list[str]]]:
+    calls: list[list[str]] = []
+
+    def call(*argv: str, **kw: Any) -> live_util.Proc:
+        calls.append(list(argv))
+        if argv[0] == "list":
+            return proc(0, json.dumps({"sessions": sessions}))
+        if argv[0] == "status":
+            return proc(0, json.dumps({"run": {"wrapper_pid": 111, "child_pid": 222}}))
+        if argv[0] == "stop":
+            return proc(stop_code, "{}")
+        return proc(forget_code, "{}")
+
+    return call, calls
+
+
+def item(sid: str, decision: str = "d1") -> dict[str, Any]:
+    return {"csession_id": sid, "labels": ["owner=gatectl", f"decision={decision}"]}
+
+
+def test_sweep_stops_then_forgets_exactly_the_listed_sessions(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    w = world(tmp_path)
+    call, calls = fake_session([item("cs-aaaaaaaa"), item("cs-bbbbbbbb", "d2")])
+    w.session = call  # type: ignore[method-assign]
+    assert w.sweep() == []
+    verbs = [(c[0], c[1]) for c in calls if c[0] in ("stop", "forget")]
+    assert verbs == [
+        ("stop", "cs-aaaaaaaa"), ("forget", "cs-aaaaaaaa"),
+        ("stop", "cs-bbbbbbbb"), ("forget", "cs-bbbbbbbb"),
+    ]  # fmt: skip
+    assert "LEFTOVER" not in capsys.readouterr().out
+
+
+def test_sweep_prints_a_leftover_with_ids_pids_state_dir_and_the_manual_command(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    w = world(tmp_path)
+    call, _ = fake_session([item("cs-aaaaaaaa")], stop_code=12, forget_code=1)
+    w.session = call  # type: ignore[method-assign]
+    left = w.sweep()
+    out = capsys.readouterr().out
+    assert len(left) == 1
+    for word in ("LEFTOVER", "cs-aaaaaaaa", "111", "222", str(w.state_dir), "stop cs-aaaaaaaa"):
+        assert word in out, word
+    assert "stop exit 12" in out and "forget exit 1" in out
+
+
+def test_sweep_reports_a_list_that_failed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    w = world(tmp_path)
+    w.session = lambda *a, **k: proc(1, "not json")  # type: ignore[method-assign]
+    assert len(w.sweep()) == 1
+    assert "LEFTOVER" in capsys.readouterr().out
+
+
+def fake_direct(w: live_util.Live) -> live_util.Direct:
+    launch = type("L", (), {"decision_id": "d"})()
+    return live_util.Direct(w, launch, None, proc(0), {"csession_id": "cs-aaaaaaaa"})
+
+
+def test_direct_cleanup_records_and_prints_a_failure_instead_of_swallowing_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    w = world(tmp_path)
+
+    def boom(*a: Any, **k: Any) -> live_util.Proc:
+        raise OSError("no such program")
+
+    w.session = boom  # type: ignore[method-assign]
+    d = fake_direct(w)
+    d.cleanup()
+    assert d.problems and "no such program" in d.problems[0]
+    assert "CLEANUP FAILED" in capsys.readouterr().out
+
+
+def test_cleanup_records_a_nonzero_stop_or_forget(tmp_path: Path) -> None:
+    w = world(tmp_path)
+    call, _ = fake_session([], stop_code=12, forget_code=1)
+    w.session = call  # type: ignore[method-assign]
+    d = fake_direct(w)
+    d.cleanup()
+    assert len(d.problems) == 2
+
+
+def test_group_members_lists_the_process_group_of_a_child_we_started() -> None:
+    child = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        assert live_util.group_members(child.pid) == [child.pid]
+        assert live_util.pid_alive(child.pid)
+    finally:
+        child.kill()
+        child.wait(timeout=10)
+    assert not live_util.pid_alive(child.pid)
+    assert live_util.group_members(child.pid) == []
+
+
+def test_pid_alive_is_false_for_a_zombie() -> None:
+    child = subprocess.Popen(["true"])
+    for _ in range(200):
+        if not live_util.pid_alive(child.pid):
+            break
+        time.sleep(0.05)
+    assert not live_util.pid_alive(child.pid)  # exited, not yet reaped: a zombie
+    child.wait(timeout=10)
+
+
+class StuckChild:
+    pid = 424242
+    returncode = None
+
+    def communicate(self, *a: Any, **k: Any) -> tuple[bytes, bytes]:
+        raise subprocess.TimeoutExpired("x", 1)
+
+
+def test_stop_group_prints_pid_and_pgid_when_sigkill_does_not_take_effect(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: sent.append((pgid, sig)))
+    live_util.stop_group(StuckChild())  # type: ignore[arg-type]
+    assert len(sent) == 2 and {p for p, _ in sent} == {424242}
+    out = capsys.readouterr().out
+    assert "424242" in out and "pgid" in out and "did not end" in out
+
+
+def test_run_stops_the_group_of_its_child_on_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stopped: list[Any] = []
+
+    class Fake:
+        pid = 1
+        returncode = None
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        def communicate(self, *a: Any, **k: Any) -> tuple[bytes, bytes]:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(live_util.subprocess, "Popen", Fake)
+    monkeypatch.setattr(live_util, "stop_group", lambda child: stopped.append(child) or (b"", b""))
+    with pytest.raises(KeyboardInterrupt):
+        live_util.run(["x"], {}, timeout=5)
+    assert len(stopped) == 1
+
+
+def test_label_problems_names_each_missing_label() -> None:
+    ok = ["owner=gatectl", "policy=p", "decision=D1", "state=abc", "kind=gate-check"]
+    assert live_util.label_problems(ok, policy="p", state_tag="abc") == []
+    bad = live_util.label_problems(["owner=other", "policy=q"], policy="p", state_tag="abc")
+    assert len(bad) == 4
+    assert live_util.label_problems(ok, policy="p", state_tag="zzz") == ["state=zzz missing"]
+
+
+def test_session_version_reads_the_version_flag_and_survives_a_missing_program(
+    tmp_path: Path,
+) -> None:
+    stub = tmp_path / "cs"
+    stub.write_text("#!/bin/sh\necho claude-session 9.9.9\n", encoding="utf-8")
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    assert live_util.session_version(str(stub), {"PATH": "/usr/bin:/bin"}) == "claude-session 9.9.9"
+    assert live_util.session_version(str(tmp_path / "missing"), {}) == "unknown"
+
+
+# --- the slot sampler of the parallel tests ------------------------------------------------------
+
+
+def slot_db(live: live_util.Live, *, table: bool) -> None:
+    import sqlite3
+
+    live.state_dir.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(live.state_dir / "state.db")
+    if table:
+        con.execute("CREATE TABLE agent_slots (holder_pid INTEGER)")
+        con.executemany("INSERT INTO agent_slots VALUES (?)", [(1,), (2,)])
+    else:
+        con.execute("CREATE TABLE other (x INTEGER)")
+    con.commit()
+    con.close()
+
+
+def test_slot_rows_surfaces_a_sqlite_error_instead_of_returning_zero(tmp_path: Path) -> None:
+    import sqlite3
+
+    from tests.live.helpers import slot_rows
+
+    w = world(tmp_path)
+    assert slot_rows(w) == 0  # no database yet
+    slot_db(w, table=False)
+    with pytest.raises(sqlite3.Error):
+        slot_rows(w)
+
+
+def test_slot_sampler_keeps_the_peak_and_records_errors_after_the_first_good_read(
+    tmp_path: Path,
+) -> None:
+    from tests.live.helpers import SlotSampler
+
+    w = world(tmp_path)
+    slot_db(w, table=True)
+    sampler = SlotSampler(w)
+    sampler.sample()
+    assert sampler.peak == 2 and sampler.errors == []
+    (w.state_dir / "state.db").write_bytes(b"not a database" * 100)
+    sampler.sample()
+    assert len(sampler.errors) == 1
+
+
+def test_slot_sampler_tolerates_a_missing_table_before_the_first_good_read(tmp_path: Path) -> None:
+    from tests.live.helpers import SlotSampler
+
+    w = world(tmp_path)
+    slot_db(w, table=False)
+    sampler = SlotSampler(w)
+    sampler.sample()
+    assert sampler.errors == [] and sampler.peak == 0
 
 
 # --- the transcript reader ----------------------------------------------------------------------
@@ -412,6 +751,30 @@ def test_the_map_names_each_agent_row_of_the_live_verification_table() -> None:
     table = design.split("## Live verification", 1)[1].split("\n## ", 1)[0]
     for row in live_util.AGENT_TABLE_ROWS:
         assert row in table, f"AGENT_TABLE_ROWS names a row the table no longer has: {row}"
+
+
+def test_the_map_records_the_limits_of_what_the_live_tests_prove() -> None:
+    section = map_section()
+    for phrase in (
+        "not measured",
+        "GATECTL_LIVE_HOME=real",
+        "refresh-token",
+        "Keychain",
+        "0.45.2",
+        "/tmp/csession-<uid>/",
+        "Four to six parallel runs are not probed live",
+        "--env-allowlist-only ''",
+        "`ended: false`",
+        "INCONCLUSIVE",
+        "does not prove",
+        "pretty-printed",
+    ):
+        assert phrase in section, phrase
+    design = (ROOT / "docs" / "design.md").read_text(encoding="utf-8")
+    still = design.split("Still to verify:", 1)[1].split("\n", 1)[0]
+    for gone in ("lifeline watchdog handshake", "whether a changed `SKILL.md`"):
+        assert gone not in still
+    assert "Live test map" in still
 
 
 # --- no model needed: the fingerprint of the bundled skill -------------------------------------

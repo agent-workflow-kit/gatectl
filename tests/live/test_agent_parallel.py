@@ -5,32 +5,16 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import threading
 import time
 from typing import Any
 
 import pytest
 
 from tests import live_util
-from tests.live.helpers import CLEAR_POLICY, entry, leftovers, slot_rows, tmp_left
+from tests.live.helpers import CLEAR_POLICY, SlotSampler, entry, leftovers, slot_rows, tmp_left
 from tests.live_util import Live, observe
 
 pytestmark = pytest.mark.live
-
-
-class SlotSampler(threading.Thread):
-    """Samples the slot rows of ``state.db`` (read only) until stopped; keeps the maximum."""
-
-    def __init__(self, live: Live) -> None:
-        super().__init__(daemon=True)
-        self.live = live
-        self.stop_flag = threading.Event()
-        self.peak = 0
-
-    def run(self) -> None:
-        while not self.stop_flag.is_set():
-            self.peak = max(self.peak, slot_rows(self.live))
-            time.sleep(0.2)
 
 
 def launch_all(live: Live, count: int, config: str) -> list[dict[str, Any]]:
@@ -90,13 +74,15 @@ def test_three_parallel_runs_finish_without_interference_within_max_parallel(liv
     observe("three parallel", results=seen, peak_slots=sampler.peak,
             seconds=round(time.monotonic() - began, 1))  # fmt: skip
     assert seen == [("allow", None)] * 3, f"parallel runs interfered: {seen}"
-    assert sampler.peak <= 3
+    assert sampler.errors == [], f"slot sampling failed: {sampler.errors}"
+    assert 2 <= sampler.peak <= 3, f"peak slots {sampler.peak}: expected overlap (2) up to 3"
     assert leftovers(live) == [] and tmp_left(live) == [] and slot_rows(live) == 0
 
 
 def test_max_parallel_one_serializes_two_runs(live: Live) -> None:
-    """With ``agent.max_parallel: 1`` two simultaneous checks never hold two slots: the second
-    waits (or is ``busy``); both end with a usable answer and nothing is left."""
+    """With ``agent.max_parallel: 1`` two simultaneous checks never hold two slots: the peak is
+    exactly 1 and both end ``allow``. A second ``busy`` is NOT taken as proof of serialization (it
+    would only show the slot was refused, not waited for): the test skips loudly instead."""
     live.spend(2, "max_parallel 1")
     config = live.write_config(CLEAR_POLICY, agent={"max_parallel": 1}, timeout="400s")
     sampler = SlotSampler(live)
@@ -107,8 +93,11 @@ def test_max_parallel_one_serializes_two_runs(live: Live) -> None:
         sampler.stop_flag.set()
         sampler.join(5)
     seen = [(entry(d).get("verdict"), entry(d).get("reason")) for d in docs]
-    observe("max_parallel 1", results=seen, peak_slots=sampler.peak)
+    observe("max_parallel 1", results=seen, peak_slots=sampler.peak, errors=sampler.errors)
+    assert sampler.errors == [], f"slot sampling failed: {sampler.errors}"
     assert sampler.peak <= 1, f"max_parallel=1 held {sampler.peak} slots at once"
-    assert all(v in ("allow", "escalate") for v, _ in seen)
-    assert all(r in (None, "busy", "budget_exhausted") for _, r in seen), seen
+    if any(r == "busy" for _, r in seen):
+        pytest.skip(f"INCONCLUSIVE: a check was `busy` ({seen}); waiting was not shown")
+    assert seen == [("allow", None)] * 2, f"expected both allowed after waiting: {seen}"
+    assert sampler.peak == 1, f"peak slots {sampler.peak}: the runs never held a slot"
     assert leftovers(live) == [] and slot_rows(live) == 0

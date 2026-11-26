@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
+import time
 from typing import Any
 
 from tests import live_util
@@ -41,16 +43,50 @@ def leftovers(live: Live) -> list[Any]:
 
 
 def slot_rows(live: Live) -> int:
+    """Rows of ``agent_slots`` (0 when there is no database yet). A sqlite error is NOT hidden:
+    it propagates so the test fails with the real message."""
     db = live.state_dir / "state.db"
     if not db.exists():
         return 0
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
         return int(con.execute("SELECT count(*) FROM agent_slots").fetchone()[0])
-    except sqlite3.Error:
-        return 0
     finally:
         con.close()
+
+
+class SlotSampler(threading.Thread):
+    """Samples the slot rows of ``state.db`` (read only) until stopped; keeps the maximum.
+
+    Errors are kept in ``errors`` (a test asserts it is empty). Before the first good read a
+    database that is not there yet or has no ``agent_slots`` table is normal (the store is
+    created by the first check) and is not recorded."""
+
+    def __init__(self, live: Live) -> None:
+        super().__init__(daemon=True)
+        self.live = live
+        self.stop_flag = threading.Event()
+        self.peak = 0
+        self.reads = 0
+        self.errors: list[str] = []
+
+    def sample(self) -> None:
+        try:
+            rows = slot_rows(self.live)
+        except sqlite3.Error as exc:
+            early = self.reads == 0 and (
+                "no such table" in str(exc) or "unable to open" in str(exc)
+            )
+            if not early:
+                self.errors.append(f"{type(exc).__name__}: {exc}")
+            return
+        self.reads += 1
+        self.peak = max(self.peak, rows)
+
+    def run(self) -> None:
+        while not self.stop_flag.is_set():
+            self.sample()
+            time.sleep(0.2)
 
 
 def tmp_left(live: Live) -> list[str]:

@@ -88,9 +88,15 @@ def test_start_exec_status_list_forget_shapes_of_a_done_run(live: Live, direct) 
     assert after["sessions"] == [], "forget did not hide the session at once"
 
 
-def test_a_missing_skill_exits_0_with_an_unusable_artifact(live: Live, direct) -> None:  # type: ignore[no-untyped-def]
-    """BILLED (1 run, may be cheap). The fake assumes exit 0, outcome done, and no valid
-    artifact. gatectl never sends a missing skill (preflight), so this reads claude-session."""
+def test_a_missing_skill_run_is_recorded_and_never_yields_a_usable_artifact(
+    live: Live, direct
+) -> None:  # type: ignore[no-untyped-def]
+    """BILLED (1 run, may be cheap). gatectl never sends a missing skill (preflight), so this only
+    reads what claude-session does with one. The observed exit code and end reason are recorded.
+    Asserted: the pair is in the documented set (exit 0, or exit 14 with end_reason ``no_report``)
+    and no verdict artifact carries this run's nonce. If one does, the model followed the prompt
+    instead of the missing skill: that is recorded and the test skips (not a skill problem).
+    A red result means the fake's missing-skill fixture must change to what is observed here."""
     live.spend(1, "missing skill")
     d = direct(skill="gatectl:no-such-skill-" + secrets.token_hex(3), timeout_s=60)
     if d.start.code != 0:
@@ -102,21 +108,24 @@ def test_a_missing_skill_exits_0_with_an_unusable_artifact(live: Live, direct) -
     ran = d.exec(timeout=150)
     status = d.status()
     run = status["run"]
+    end_reason = run.get("end_reason")
     observe("missing skill", exec_exit=ran.code, outcome=ran.out[-800:], state=run.get("outcome"),
-            end_reason=run.get("end_reason"), report=run.get("report"))  # fmt: skip
-    report = run.get("report") or {}
-    artifact = report.get("artifact")
-    usable = False
+            end_reason=end_reason, report=run.get("report"))  # fmt: skip
+    artifact = (run.get("report") or {}).get("artifact")
+    followed = False
     if artifact and artifact.get("name") == "verdict.json":
         try:
             body = json.loads(Path(artifact["path"]).read_text(encoding="utf-8"))
-            usable = isinstance(body, dict) and body.get("nonce") is not None
+            followed = isinstance(body, dict) and body.get("nonce") == d.files.nonce
         except (OSError, ValueError):
-            usable = False
-    assert not usable, "a missing skill produced a usable verdict artifact"
-    assert ran.code in (0, 13, 14, 16, 12), f"unexpected exit for a missing skill: {ran.code}"
-    if ran.code != 0:
-        pytest.fail(f"fake assumes exit 0 for a missing skill; real exit was {ran.code}")
+            followed = False
+    assert ran.code == 0 or (ran.code == 14 and end_reason == "no_report"), (
+        f"undocumented result for a missing skill: exit {ran.code}, end_reason {end_reason}; "
+        "the fake's fixture must change"
+    )
+    if followed:
+        pytest.skip("the model followed the prompt without the skill (nonce matched): recorded")
+    assert artifact is None or not followed
 
 
 def test_a_run_that_never_reports_ends_exit_14(live: Live, direct) -> None:  # type: ignore[no-untyped-def]
@@ -206,6 +215,15 @@ def test_exec_adopts_the_session_from_a_headless_caller_and_stop_grace_timing(
         )
         assert took < 20, f"stop --grace 2s took {took:.1f} s"
         assert_schema("stop", body)
+        if body.get("already_final") is True:
+            pytest.skip("the run was already final before stop: the live stop path was not probed")
+        assert body.get("already_final") is False
+        observe("stop result", ended=body.get("ended"), exit=stopped.code,
+                run_exit_code=body.get("run_exit_code"))  # fmt: skip
+        # Pinned stop schema: exit 0 when the run ended, exit 12 with ended false when not.
+        assert (stopped.code, body.get("ended")) in {(0, True), (12, False)}, (
+            f"stop exit {stopped.code}, ended {body.get('ended')}: outside the documented pairs"
+        )
         child.communicate(timeout=60)
         observe("exec after stop", exit=child.returncode)
     finally:
@@ -214,18 +232,37 @@ def test_exec_adopts_the_session_from_a_headless_caller_and_stop_grace_timing(
 
 
 def test_the_narrow_login_environment_is_enough_for_an_api_key_run(live: Live, direct) -> None:  # type: ignore[no-untyped-def]
-    """BILLED (1 run). D-28: does ``exec`` work with ONLY the API key variable (plus PATH, HOME,
-    XDG_*) instead of gatectl's ANTHROPIC_*, CLAUDE_*, AWS_*, CLOUD_ML_REGION, GOOGLE_*? If yes,
-    open an issue to narrow the allowlist. Skips unless the login is an API key."""
+    """BILLED (1 run) plus a control that starts no model. D-28: does ``exec`` work with ONLY the
+    API key variable (plus PATH, HOME, LANG, TERM, XDG_*) instead of gatectl's wide allowlist?
+
+    - pass: the narrow set is enough, so open an issue to narrow the allowlist.
+    - fail: the narrow set is not enough, so the wide allowlist is needed: record why in D-28.
+    - skip: the login is not an API key, or the narrowing dropped nothing (it would prove nothing).
+
+    The control runs ``exec`` with the same narrow set WITHOUT the key: it must fail (no login, so
+    no model run); if it succeeds the narrowing proves nothing."""
     if not live.real.get("ANTHROPIC_API_KEY"):
         pytest.skip("only an ANTHROPIC_API_KEY login can be narrowed by this probe")
     if live.real.get("CLAUDE_CODE_USE_BEDROCK") or live.real.get("CLAUDE_CODE_USE_VERTEX"):
         pytest.skip("a Bedrock or Vertex provider flag is set: the narrow set is not an API key")
+    narrow = {k: v for k, v in live.env.items() if k in ("PATH", "HOME", "LANG", "TERM")}
+    narrow.update({k: v for k, v in live.env.items() if k.startswith("XDG_")})
+    dropped = sorted(set(live.env) - set(narrow))
+    observe("names the narrowing dropped", names=dropped)
+    if not dropped:
+        pytest.skip("the wide environment is already the narrow one: the narrowing proves nothing")
+    control = direct(timeout_s=60)
+    assert control.start.code == 0
+    refused = control.exec(timeout=120, env=narrow)
+    observe(
+        "control: narrow environment WITHOUT the key", exit=refused.code, out=refused.out[-500:]
+    )
+    assert refused.code != 0, (
+        "exec succeeded with no login at all: the narrowing proves nothing (and a model ran)"
+    )
     live.spend(1, "narrow login environment")
     d = direct(timeout_s=120)
     assert d.start.code == 0
-    narrow = {k: v for k, v in live.env.items() if k in ("PATH", "HOME", "LANG", "TERM")}
-    narrow.update({k: v for k, v in live.env.items() if k.startswith("XDG_")})
     narrow["ANTHROPIC_API_KEY"] = live.real["ANTHROPIC_API_KEY"]
     ran = d.exec(timeout=250, env=narrow)
     observe(
@@ -236,7 +273,7 @@ def test_the_narrow_login_environment_is_enough_for_an_api_key_run(live: Live, d
         env_inherit=d.body.get("env_inherit"),
     )
     assert ran.code == 0, (
-        "the API key alone is NOT enough for the adopting exec: keep the wide allowlist (D-28). "
-        f"exit {ran.code}"
+        "the API key alone is NOT enough for the adopting exec: keep the wide allowlist (D-28) and "
+        f"record why. exit {ran.code}"
     )
     observe("conclusion", note="API key alone suffices: open an issue to narrow the env allowlist")
