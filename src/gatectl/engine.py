@@ -28,8 +28,8 @@ check starts only while it is above 0 and gets the smaller of its own timeout an
 
 Agent checks (``_agent_entry``) follow Deadline: cache lookup, ``agent.min_start_budget``, slot
 wait, the same budget test again, then the run (``agent.run_session``). Every failure on the way
-is an ``escalate`` entry; a verdict is only as good as ``agentjudge.judge`` (TODO(#25): until it
-lands every completed run escalates ``check_error``). A validated verdict of a ``done`` run is
+is an ``escalate`` entry; a verdict is only as good as ``agentjudge.judge``, the one place that
+can turn a run into an ``allow``. A validated verdict of a ``done`` run is
 written to the cache after the decision is recorded (``_record``), under that decision's id.
 
 Seams: SIGTERM, SIGINT and SIGHUP (TODO(#35)), and the detached ``post-decision`` hook supervisor

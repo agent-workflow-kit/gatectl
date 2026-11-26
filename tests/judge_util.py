@@ -110,7 +110,7 @@ def good_run(
     status = status_doc(copy.deepcopy(entry))
     if mutate is not None:
         mutate(outcome, status)
-    return agentjudge.RawRun(0, outcome, status, nonce)
+    return agentjudge.RawRun(0, outcome, status, nonce, 1)
 
 
 END_REASONS = (

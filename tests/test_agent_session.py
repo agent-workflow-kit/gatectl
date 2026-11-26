@@ -268,9 +268,10 @@ def test_a_start_that_names_an_unusable_session_id_is_never_acted_on(
     sdir: Path,
     monkeypatch: pytest.MonkeyPatch,
     bad: Any,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     cmd = patched_cmd(tmp_path, fake, {"start": {"update": {"csession_id": bad}}})
     doc = run_check(tmp_path, capsys, cmd)
     assert doc["checks"][0]["reason"] == "check_error"
@@ -287,9 +288,10 @@ def test_a_start_with_an_unusable_run_number_is_check_error(
     sdir: Path,
     monkeypatch: pytest.MonkeyPatch,
     bad: Any,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     cmd = patched_cmd(tmp_path, fake, {"start": {"update": {"run": bad}}})
     doc = run_check(tmp_path, capsys, cmd)
     assert doc["checks"][0]["reason"] == "check_error"
@@ -313,9 +315,10 @@ def test_a_list_that_names_foreign_sessions_never_touches_them(
     sdir: Path,
     monkeypatch: pytest.MonkeyPatch,
     labels: Any,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path, FAKE_CS_BEHAVIOR_START="hang_after_allocate")
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     prompt = str(fake.session.prompt)
     made = fake.session.run(
         "start", "--kind", "gate-check", "--mode", "headless", "--skill", "x:y",
@@ -366,9 +369,10 @@ def test_an_id_that_a_successful_list_did_not_return_is_never_stopped_or_forgott
     capsys: pytest.CaptureFixture[str],
     sdir: Path,
     monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     unlisted = "cs-bbbbbbbb"
     cmd = patched_cmd(tmp_path, fake, {"start": {"update": {"csession_id": unlisted}}})
     doc = run_check(tmp_path, capsys, cmd)
@@ -496,10 +500,14 @@ def test_the_cleanup_budget_is_shared_out_across_list_stop_and_forget() -> None:
 
 
 def test_an_outcome_that_names_another_session_is_dropped_before_the_judge(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     seen: list[agentjudge.RawRun] = []
 
     def spy(raw: agentjudge.RawRun, *, threshold: float) -> agentjudge.Judgement:
@@ -513,10 +521,14 @@ def test_an_outcome_that_names_another_session_is_dropped_before_the_judge(
 
 
 def test_a_start_error_envelope_that_names_a_session_is_forgotten_by_that_id(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path, "sandbox_unavailable")
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     seen: list[tuple[Any, Any]] = []
     real = agentjudge.start_failed
 
@@ -537,9 +549,10 @@ def test_an_end_reason_outside_the_token_grammar_is_not_passed_on(
     sdir: Path,
     monkeypatch: pytest.MonkeyPatch,
     token: str,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path, "sandbox_unavailable")
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     seen: list[tuple[Any, Any]] = []
 
     def spy(code: int | None, end_reason: str | None) -> agentjudge.Judgement:
@@ -597,12 +610,16 @@ def test_a_cancelled_run_stops_forgets_and_reports_a_check_error(
 
 
 def test_the_pinned_schemas_accept_what_the_fake_prints_for_the_calls_we_make(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     """The fake is the stand-in for the real tool, so what we parse is what the pinned schemas
     describe (the live issue checks the fake against the real one)."""
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     objs: dict[str, Any] = {}
     real_parse = agent.parse_object
 

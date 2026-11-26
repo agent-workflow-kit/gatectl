@@ -1,5 +1,5 @@
 """Helpers for the agent run tests: the fake claude-session as ``session_cmd``, its call log and
-sessions, short limits, and a stand-in judge for what issue #25 owns.
+sessions, short limits, and a stand-in judge for tests that do not exercise the real one.
 
 Every agent test runs against the fake (``tests/fakebin/claude-session``); the real one is only
 for the live issue. The fake reads its scenario from ``FAKE_CS_*`` variables, which gatectl's
@@ -159,15 +159,15 @@ def judged(
     verdict: agentcache.Verdict | None = DECISION,
     threshold_from: Callable[[], float] | None = None,
 ) -> list[agentjudge.RawRun]:
-    """Stand in for issue #25's judge: every completed run is the validated ``verdict``.
+    """Stand in for the judge: every completed run is the validated ``verdict``.
 
-    Returns the list of the ``RawRun`` values the judge was given (what #25 will receive).
+    Returns the list of the ``RawRun`` values the judge was given (what the real judge receives).
     """
     seen: list[agentjudge.RawRun] = []
 
     def fake_judge(raw: agentjudge.RawRun, *, threshold: float) -> agentjudge.Judgement:
         seen.append(raw)
-        if raw.exec_code != 0 or raw.status is None:  # the table of #25, in one line
+        if raw.exec_code != 0 or raw.status is None:  # the outcome table, in one line
             return agentjudge.Judgement("escalate", "check_error", "stand-in")
         if verdict is None:
             return agentjudge.Judgement("escalate", "artifact_invalid", "stand-in")

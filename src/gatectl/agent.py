@@ -300,17 +300,21 @@ class _Session:
         self._record_csession()
         code, outcome = self._exec(run)
         if code != 0:
-            return self._judge(code, outcome, None)
+            return self._judge(code, outcome, None, run)
         status = self._status()
-        judgement = self._judge(0, outcome, status)
+        judgement = self._judge(0, outcome, status, run)
         self.clean = True
         return judgement
 
     def _judge(
-        self, code: int, outcome: Mapping[str, Any] | None, status: Mapping[str, Any] | None
+        self,
+        code: int,
+        outcome: Mapping[str, Any] | None,
+        status: Mapping[str, Any] | None,
+        run: int,
     ) -> Judgement:
         try:
-            raw = agentjudge.RawRun(code, outcome, status, self.nonce)
+            raw = agentjudge.RawRun(code, outcome, status, self.nonce, run)
             judgement = agentjudge.judge(raw, threshold=self.threshold)
             if not isinstance(judgement, Judgement):
                 raise TypeError("not a judgement")

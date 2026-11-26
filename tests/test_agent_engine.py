@@ -40,6 +40,7 @@ from tests.check_util import (
     write_input,
 )
 from tests.command_util import config_file
+from tests.proc_util import Tracker
 
 INPUT = {"ci": "ok", "repo": REPO}
 
@@ -80,9 +81,13 @@ def assert_refused_early(fake: Fake, sdir: Path) -> None:
 
 
 def test_a_session_cmd_that_is_not_found_is_tool_missing_with_the_install_command(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     _, doc, _ = check(tmp_path, capsys, config(None, session_cmd=["claude-session-nowhere"]))
     assert entry_of(doc) == ("escalate", "tool_missing")
     assert doc["checks"][0]["detail"] == "claude-session-nowhere not found"
@@ -95,10 +100,14 @@ def test_a_session_cmd_that_is_not_found_is_tool_missing_with_the_install_comman
 
 
 def test_a_missing_bundled_plugin_is_tool_missing(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     empty = tmp_path / "no-plugin"
     empty.mkdir()
     monkeypatch.setattr(fingerprint, "bundled_plugin_dir", lambda: str(empty))
@@ -109,10 +118,14 @@ def test_a_missing_bundled_plugin_is_tool_missing(
 
 
 def test_a_skill_whose_plugin_is_not_found_is_tool_missing(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     _, doc, _ = check(tmp_path, capsys, config(fake, checks=[agent_check(skill="ghost:review")]))
     assert entry_of(doc) == ("escalate", "tool_missing")
     assert doc["checks"][0]["detail"] == "plugin not found: ghost"
@@ -120,10 +133,14 @@ def test_a_skill_whose_plugin_is_not_found_is_tool_missing(
 
 
 def test_a_skill_whose_skill_md_is_missing_is_tool_missing(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     _, doc, _ = check(tmp_path, capsys, config(fake, checks=[agent_check(skill="gatectl:ghost")]))
     assert entry_of(doc) == ("escalate", "tool_missing")
     assert doc["checks"][0]["detail"] == "skill not found: gatectl:ghost"
@@ -131,14 +148,18 @@ def test_a_skill_whose_skill_md_is_missing_is_tool_missing(
 
 
 def test_a_skill_md_that_is_a_directory_or_a_fifo_is_not_found(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     other = tmp_path / "other"
     (other / ".claude-plugin").mkdir(parents=True)
     (other / ".claude-plugin" / "plugin.json").write_text('{"name": "other"}', encoding="utf-8")
     (other / "skills" / "dir" / "SKILL.md").mkdir(parents=True)  # a directory, not a file
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     cfg = config(
         fake,
         checks=[agent_check(skill="other:dir")],
@@ -156,9 +177,10 @@ def test_an_unreadable_instruction_file_is_tool_missing(
     sdir: Path,
     monkeypatch: pytest.MonkeyPatch,
     path: str,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     check_ = {"name": "a", "type": "agent", "instruction_file": path}
     _, doc, _ = check(tmp_path, capsys, config(fake, checks=[check_]))
     assert entry_of(doc) == ("escalate", "tool_missing")
@@ -168,12 +190,16 @@ def test_an_unreadable_instruction_file_is_tool_missing(
 
 
 def test_an_instruction_file_that_changed_since_the_fingerprint_is_tool_missing(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     instruction = tmp_path / "instruction.md"
     instruction.write_text("Be careful.\n", encoding="utf-8")
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     monkeypatch.setattr(fingerprint, "read_instruction_file", lambda _p: b"Be reckless.\n")
     check_ = {"name": "a", "type": "agent", "instruction_file": str(instruction)}
     _, doc, _ = check(tmp_path, capsys, config(fake, checks=[check_]))
@@ -182,10 +208,14 @@ def test_an_instruction_file_that_changed_since_the_fingerprint_is_tool_missing(
 
 
 def test_a_definition_that_changed_since_the_fingerprint_is_refused(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     calls: list[int] = []
     real = fingerprint.fingerprint_of
 
@@ -203,10 +233,14 @@ def test_a_definition_that_changed_since_the_fingerprint_is_refused(
 
 
 def test_an_input_too_large_for_an_agent_check_is_refused_before_any_slot(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     cfg = config(fake, agent_block={"input_max_bytes": 1024})
     _, doc, _ = check(tmp_path, capsys, cfg, obj={**INPUT, "blob": ["x" * 40] * 60})
     assert entry_of(doc) == ("escalate", "input_invalid")
@@ -215,10 +249,14 @@ def test_an_input_too_large_for_an_agent_check_is_refused_before_any_slot(
 
 
 def test_a_line_over_16_kib_is_refused(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     cfg = config(fake, agent_block={"input_max_bytes": 65536})
     _, doc, _ = check(tmp_path, capsys, cfg, obj={**INPUT, "line": "x" * 20000})
     assert doc["checks"][0]["detail"] == "line too long for an agent check"
@@ -230,10 +268,14 @@ def test_a_line_over_16_kib_is_refused(
 
 
 def test_too_little_time_left_is_budget_exhausted_with_no_slot_and_no_session(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     cfg = config(fake, timeout="8s", agent_block={"min_start_budget": "5s"})  # L = 2.8 s < 5 s
     _, doc, _ = check(tmp_path, capsys, cfg)
     assert entry_of(doc) == ("escalate", "budget_exhausted")
@@ -278,10 +320,14 @@ def test_a_deadline_passed_before_the_definition_is_read_again_is_budget_exhaust
 
 
 def test_slot_starvation_is_busy(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     cfg = config(fake, timeout="8s", agent_block={"max_parallel": 1, "min_start_budget": "1s"})
     config_path = config_file(tmp_path, cfg)
     do_check(capsys, config_path, "p", "--input", write_input(tmp_path, INPUT))  # creates state
@@ -322,9 +368,10 @@ def test_a_file_that_cannot_be_written_is_check_error_without_the_error_text(
     sdir: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: Exception,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
 
     def boom(*_a: Any, **_k: Any) -> None:
         raise failure
@@ -339,10 +386,14 @@ def test_a_file_that_cannot_be_written_is_check_error_without_the_error_text(
 
 
 def test_a_decision_directory_that_cannot_be_created_is_check_error(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
 
     def boom(*_a: Any, **_k: Any) -> Path:
         raise OSError(errno.EACCES, "denied")
@@ -354,10 +405,14 @@ def test_a_decision_directory_that_cannot_be_created_is_check_error(
 
 
 def test_the_files_hold_the_fenced_input_and_the_nonce_only_while_the_run_lives(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     seen: dict[str, Any] = {}
     stand_in = judged(monkeypatch)
     real = agentjudge.judge
@@ -387,10 +442,14 @@ def test_the_files_hold_the_fenced_input_and_the_nonce_only_while_the_run_lives(
 
 
 def test_a_slot_that_was_lost_mid_run_never_breaks_the_check(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
     real = agentjudge.judge
 
@@ -406,10 +465,14 @@ def test_a_slot_that_was_lost_mid_run_never_breaks_the_check(
 
 
 def test_files_that_cannot_be_deleted_never_change_the_verdict(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
 
     def boom(_self: Any) -> None:
@@ -425,10 +488,14 @@ def test_files_that_cannot_be_deleted_never_change_the_verdict(
 
 
 def test_a_failing_delete_still_removes_the_outcome_file(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
     removed: list[list[str]] = []
     real = tmptree.remove_private_files
@@ -449,10 +516,14 @@ def test_a_failing_delete_still_removes_the_outcome_file(
 
 
 def test_two_agent_checks_each_get_their_own_session_and_files(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
     cfg = config(fake, checks=[agent_check("one"), agent_check("two", instruction="Other.")])
     _, doc, _ = check(tmp_path, capsys, cfg)
@@ -463,10 +534,14 @@ def test_two_agent_checks_each_get_their_own_session_and_files(
 
 
 def test_an_agent_check_after_a_deny_or_an_escalate_is_skipped_and_starts_nothing(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
     deny = {
         "name": "r",
@@ -489,10 +564,14 @@ def test_an_agent_check_after_a_deny_or_an_escalate_is_skipped_and_starts_nothin
 
 
 def test_a_complete_run_with_a_valid_artifact_allows_and_cleans_up(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     _, doc, _ = check(tmp_path, capsys, config(fake))  # the real judge (issue #25)
     assert entry_of(doc) == ("allow", None)
     assert doc["checks"][0]["detail"] == "fake reason"
@@ -519,9 +598,10 @@ def test_a_judge_that_fails_or_returns_garbage_is_check_error(
     sdir: Path,
     monkeypatch: pytest.MonkeyPatch,
     bad: Any,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
 
     def broken(_raw: Any, *, threshold: float) -> Any:
         if bad == "raises":
@@ -537,10 +617,14 @@ def test_a_judge_that_fails_or_returns_garbage_is_check_error(
 
 
 def test_the_judge_gets_the_exec_outcome_and_the_status_of_this_session(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     seen = judged(monkeypatch)
     check(tmp_path, capsys, config(fake))
     [raw] = seen
@@ -563,9 +647,10 @@ def test_a_run_that_exits_non_zero_is_judged_without_asking_status(
     monkeypatch: pytest.MonkeyPatch,
     scenario: str,
     code: int,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path, scenario)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     seen = judged(monkeypatch)
     _, doc, _ = check(tmp_path, capsys, config(fake))
     assert entry_of(doc) == ("escalate", "check_error")
@@ -576,10 +661,14 @@ def test_a_run_that_exits_non_zero_is_judged_without_asking_status(
 
 
 def test_an_exec_that_prints_nothing_usable_reaches_the_judge_as_no_outcome(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path, FAKE_CS_BEHAVIOR_EXEC="garbage")
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     seen = judged(monkeypatch)
     check(tmp_path, capsys, config(fake))
     assert [r.outcome for r in seen] == [None]
@@ -598,10 +687,14 @@ def checks_of(sdir: Path, decision_id: str) -> list[dict[str, Any]]:
 
 
 def test_a_valid_artifact_is_cached_by_the_decision_that_produced_it_and_reused(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
     cfg = config(fake)
     _, first, _ = check(tmp_path, capsys, cfg)
@@ -624,10 +717,14 @@ def test_a_valid_artifact_is_cached_by_the_decision_that_produced_it_and_reused(
 
 
 def test_a_cache_hit_needs_no_budget_no_slot_and_no_session_cmd(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
     cfg = config(fake)
     check(tmp_path, capsys, cfg)
@@ -649,10 +746,14 @@ def test_a_cache_hit_needs_no_budget_no_slot_and_no_session_cmd(
 
 
 def test_no_cache_skips_the_lookup_but_still_writes_the_fresh_result(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
     cfg = config(fake)
     _, first, _ = check(tmp_path, capsys, cfg)
@@ -664,9 +765,13 @@ def test_no_cache_skips_the_lookup_but_still_writes_the_fresh_result(
 
 
 def test_a_failed_run_is_never_cached(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     real_judge = agentjudge.judge
     judged(monkeypatch)
     for scenario in ("unreported", "timeout", "failed", "sandbox_unavailable"):
@@ -683,10 +788,14 @@ def test_a_failed_run_is_never_cached(
 
 
 def test_a_deny_and_an_escalate_artifact_are_cached_too(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch, agentcache.Verdict("deny", 0.9, ("no",)))
     cfg = config(fake)
     check(tmp_path, capsys, cfg)
@@ -698,10 +807,14 @@ def test_a_deny_and_an_escalate_artifact_are_cached_too(
 
 
 def test_the_threshold_applies_to_a_reused_result_as_to_a_fresh_one(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch, agentcache.Verdict("allow", 0.5, ("unsure",)))
     cfg = config(fake)
     _, first, _ = check(tmp_path, capsys, cfg)
@@ -712,10 +825,14 @@ def test_the_threshold_applies_to_a_reused_result_as_to_a_fresh_one(
 
 
 def test_a_different_input_or_scope_or_check_does_not_hit(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
     cfg = config(fake)
     check(tmp_path, capsys, cfg)
@@ -725,10 +842,14 @@ def test_a_different_input_or_scope_or_check_does_not_hit(
 
 
 def test_volatile_input_keys_are_ignored_by_the_cache_key(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
     cfg = config(fake, input={"ignore": ["ts"]})
     check(tmp_path, capsys, cfg, obj={**INPUT, "ts": 1})
@@ -738,10 +859,14 @@ def test_volatile_input_keys_are_ignored_by_the_cache_key(
 
 
 def test_cache_ttl_zero_neither_reads_nor_writes(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
     cfg = config(fake, agent_block={"cache_ttl": 0})
     check(tmp_path, capsys, cfg)
@@ -751,10 +876,14 @@ def test_cache_ttl_zero_neither_reads_nor_writes(
 
 
 def test_cache_ttl_follows_check_then_policy_then_agent(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
     # the policy says 0 (no cache) over the agent block's 10 minutes
     check(tmp_path, capsys, config(fake, cache_ttl=0))
@@ -770,10 +899,14 @@ def test_cache_ttl_follows_check_then_policy_then_agent(
 
 
 def test_a_tampered_cache_row_fails_closed_never_as_a_verdict(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
     cfg = config(fake)
     check(tmp_path, capsys, cfg)
@@ -791,10 +924,14 @@ def test_a_tampered_cache_row_fails_closed_never_as_a_verdict(
 
 
 def test_a_cache_that_cannot_be_written_never_changes_the_decision(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
 
     def boom(*_a: Any, **_k: Any) -> bool:
@@ -807,10 +944,14 @@ def test_a_cache_that_cannot_be_written_never_changes_the_decision(
 
 
 def test_a_decision_that_was_not_recorded_writes_no_cache_row(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
     cfg = config(fake)
     config_path = config_file(tmp_path, cfg)
@@ -830,10 +971,14 @@ def test_a_decision_that_was_not_recorded_writes_no_cache_row(
 
 
 def test_a_bug_in_the_agent_step_is_check_error_not_an_exception(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
 
     def boom(*_a: Any, **_k: Any) -> Any:
         raise RuntimeError("boom /secret/path")
@@ -846,10 +991,14 @@ def test_a_bug_in_the_agent_step_is_check_error_not_an_exception(
 
 
 def test_an_interrupt_during_the_run_still_forgets_the_session_and_frees_everything(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
 
     def interrupted(_raw: Any, *, threshold: float) -> Any:
         raise KeyboardInterrupt
@@ -865,10 +1014,14 @@ def test_an_interrupt_during_the_run_still_forgets_the_session_and_frees_everyth
 
 
 def test_the_check_hands_run_session_the_resolved_settings(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
     seen: list[dict[str, Any]] = []
     real = engine.agent.run_session

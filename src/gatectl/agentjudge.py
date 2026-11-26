@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import stat
@@ -43,15 +44,14 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from gatectl import agentcache
-from gatectl.sanitize import sanitize
+from gatectl.sanitize import MARKER, sanitize
 
 DETAIL_CAP = 1024
 ARTIFACT_NAME = "verdict.json"
 ARTIFACT_MAX = 16 * 1024
-NOT_VALIDATED = "agent verdict not validated"
 _PATH_MAX = 4096
 _SHA = re.compile(r"[0-9a-f]{64}", re.ASCII)
-_TOKEN = re.compile(r"[a-z][a-z0-9_]{0,63}", re.ASCII)
+_REFUSAL_TOKENS = frozenset({"unsafe_setting_sources", "sandbox_unavailable", "claude_not_found"})
 _KEYS = frozenset({"schema_version", "nonce", "decision", "confidence", "reasons"})
 
 Verdict = Literal["allow", "deny", "escalate"]
@@ -71,6 +71,8 @@ class RawRun:
     outcome: Mapping[str, Any] | None
     status: Mapping[str, Any] | None
     nonce: str = field(repr=False)
+    # The run number ``start`` returned: the run both ``exec`` and ``status`` must describe.
+    run: int = 0
 
 
 @dataclass(frozen=True)
@@ -87,8 +89,19 @@ class Judgement:
     cacheable: bool = False
 
     def __post_init__(self) -> None:
-        if self.verdict == "allow" and (self.validated is None or self.reason is not None):
-            raise ValueError("an allow needs a validated artifact and no reason")
+        if self.verdict == "allow":
+            validated = self.validated
+            confidence = self.confidence
+            if (
+                not isinstance(validated, agentcache.Verdict)
+                or validated.decision != "allow"
+                or self.reason is not None
+                or confidence is None
+                or type(confidence) not in (int, float)
+                or not math.isfinite(confidence)
+                or confidence != validated.confidence
+            ):
+                raise ValueError("an allow needs its own validated allow artifact and no reason")
         if self.verdict not in ("allow", "deny", "escalate"):
             raise ValueError("unknown verdict")
         if self.cacheable and self.validated is None:
@@ -109,10 +122,16 @@ def from_verdict(
     is the reasons joined with ``; ``, sanitized and cut to 1024 characters. ``cacheable`` is
     for the caller that holds a valid artifact of a ``done`` run (a cache hit passes False).
     """
+    if (
+        type(threshold) not in (int, float)
+        or not math.isfinite(threshold)
+        or not 0 <= threshold <= 1
+    ):
+        raise ValueError("threshold must be a number in [0, 1]")
     detail = sanitize("; ".join(verdict.reasons), DETAIL_CAP) or None
     decision = verdict.decision
     if decision == "allow":
-        if verdict.confidence < threshold:
+        if not verdict.confidence >= threshold:
             return Judgement(
                 "escalate", "low_confidence", detail, verdict.confidence, verdict, cacheable
             )
@@ -187,7 +206,7 @@ def read_artifact(entry: Mapping[str, Any]) -> bytes:
         raise _invalid("artifact size unusable or over 16 KiB")
     try:
         fd = _open_leaf(path)
-    except OSError:
+    except (OSError, ValueError):  # ValueError: UnicodeEncodeError, an embedded NUL
         raise _invalid("artifact not readable") from None
     try:
         before = os.fstat(fd)
@@ -239,7 +258,8 @@ def parse_artifact(data: bytes, nonce: str) -> agentcache.Verdict:
     object with exactly ``schema_version`` (the int 1), ``nonce`` (equal to ``nonce``, compared
     in constant time), ``decision`` (allow, deny or escalate), ``confidence`` (an int or float in
     [0, 1], not a bool) and ``reasons`` (a list of at most 10 strings of at most 500 characters).
-    ``reasons`` are sanitized (the one-for-one replacement of ``sanitize``) before they are kept.
+    ``reasons`` are sanitized (the one-for-one replacement of ``sanitize``) before they are kept,
+    and a model-echoed ``nonce`` in one is replaced by the marker.
     """
     if type(data) is not bytes:
         raise _invalid("artifact is not bytes")
@@ -277,7 +297,7 @@ def parse_artifact(data: bytes, nonce: str) -> agentcache.Verdict:
         return agentcache.Verdict(
             doc["decision"],
             float(confidence) if type(confidence) in (int, float) else confidence,
-            tuple(sanitize(r, agentcache.MAX_REASON_CHARS) for r in reasons),
+            tuple(sanitize(r.replace(nonce, MARKER), agentcache.MAX_REASON_CHARS) for r in reasons),
         )
     except (ValueError, TypeError, OverflowError):
         raise _invalid("artifact decision, confidence or reasons invalid") from None
@@ -296,7 +316,7 @@ def _int(value: object) -> bool:
     return type(value) is int
 
 
-def _usable_run(outcome: object, status: object) -> Mapping[str, Any]:
+def _usable_run(outcome: object, status: object, launched: object) -> Mapping[str, Any]:
     """Check an exit-0 run's ``exec`` outcome and ``status`` agree that it is an explicit,
     done report with an artifact; return ``status``'s artifact object, or raise."""
     if not isinstance(outcome, Mapping):
@@ -320,7 +340,12 @@ def _usable_run(outcome: object, status: object) -> Mapping[str, Any]:
         raise _invalid("status has no run")
     if run.get("outcome") != "done" or not (_int(run.get("exit_code")) and run["exit_code"] == 0):
         raise _invalid("status does not report a done run")
-    if not (_int(run.get("run")) and _int(outcome.get("run")) and run["run"] == outcome["run"]):
+    if not (
+        _int(run.get("run"))
+        and _int(outcome.get("run"))
+        and _int(launched)
+        and run["run"] == outcome["run"] == launched
+    ):
         raise _invalid("status describes another run")
     rep = run.get("report")
     if (
@@ -364,7 +389,7 @@ def judge(raw: RawRun, *, threshold: float) -> Judgement:
     if code != 0:
         return _exec_failed(code, raw.outcome)
     try:
-        art = _usable_run(raw.outcome, raw.status)
+        art = _usable_run(raw.outcome, raw.status, raw.run)
         verdict = parse_artifact(read_artifact(art), raw.nonce)
     except _NoStatus:
         return escalate("check_error", "status unusable")
@@ -382,7 +407,7 @@ def start_failed(exit_code: int | None, end_reason: str | None) -> Judgement:
             return escalate("sandbox_unavailable", "the sandbox is unavailable")
         if end_reason == "claude_not_found":
             return escalate("tool_missing", "claude not found")
-        if isinstance(end_reason, str) and _TOKEN.fullmatch(end_reason):
-            return escalate("check_error", f"start refused: {end_reason}")
-        return escalate("check_error", "start refused")
+        if isinstance(end_reason, str) and end_reason in _REFUSAL_TOKENS:
+            return escalate("check_error", f"launch refused: {end_reason}")
+        return escalate("check_error", "launch refused")
     return escalate("check_error", "start failed")

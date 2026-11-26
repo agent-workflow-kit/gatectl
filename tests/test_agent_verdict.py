@@ -125,18 +125,23 @@ def test_exit_0_with_an_outcome_that_is_not_done_is_artifact_invalid(
     sdir: Path,
     monkeypatch: pytest.MonkeyPatch,
     outcome: str,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path, "exit0_not_done", FAKE_CS_EXIT0_OUTCOME=outcome)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     assert entry(run(tmp_path, capsys, config(fake))) == ("escalate", "artifact_invalid")
     assert cache_count(sdir) == 0
 
 
 def test_a_done_run_with_the_end_reason_timeout_is_used_as_a_verdict(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path, "done_timeout_end", FAKE_CS_DECISION="deny")
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     doc = run(tmp_path, capsys, config(fake))
     assert entry(doc) == ("deny", "check_denied")
     assert doc["checks"][0]["detail"] == "fake reason"
@@ -144,13 +149,17 @@ def test_a_done_run_with_the_end_reason_timeout_is_used_as_a_verdict(
 
 
 def test_the_unsafe_setting_sources_refusal_is_check_error_with_the_token_in_the_detail(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path, "unsafe_setting_sources")
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     doc = run(tmp_path, capsys, config(fake))
     assert entry(doc) == ("escalate", "check_error")
-    assert doc["checks"][0]["detail"] == "start refused: unsafe_setting_sources"
+    assert doc["checks"][0]["detail"] == "launch refused: unsafe_setting_sources"
 
 
 # --- decisions, confidence and the threshold ------------------------------------------------
@@ -178,17 +187,22 @@ def test_the_artifact_decision_stands_and_only_an_allow_is_gated_by_confidence(
     decision: str,
     confidence: str,
     want: tuple[str, str | None],
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path, FAKE_CS_DECISION=decision, FAKE_CS_CONFIDENCE=confidence)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     assert entry(run(tmp_path, capsys, config(fake))) == want
     assert cache_count(sdir) == 1  # a valid artifact of a done run, whatever it decided
 
 
 def test_a_per_check_threshold_overrides_the_agent_default(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     fake = Fake(tmp_path, FAKE_CS_CONFIDENCE="0.6")
     low = config(fake, agent_block={"threshold": 0.5}, checks=[agent_check(threshold=0.7)])
     assert entry(run(tmp_path, capsys, low)) == ("escalate", "low_confidence")
@@ -201,9 +215,13 @@ def test_a_per_check_threshold_overrides_the_agent_default(
 
 
 def test_a_deny_is_never_loosened_by_any_threshold(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     fake = Fake(tmp_path, FAKE_CS_DECISION="deny", FAKE_CS_CONFIDENCE="0")
     cfg = config(fake, checks=[agent_check(threshold=1.0)])
     doc = run(tmp_path, capsys, cfg)
@@ -211,21 +229,29 @@ def test_a_deny_is_never_loosened_by_any_threshold(
 
 
 def test_the_detail_is_the_sanitized_reasons_joined_and_capped(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     reasons = ["fine‮\x1b[0m", "second"]
     fake = Fake(tmp_path, FAKE_CS_REASONS=json.dumps(reasons))
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     doc = run(tmp_path, capsys, config(fake))
     detail = doc["checks"][0]["detail"]
     assert detail == "fine��[0m; second"
 
 
 def test_a_long_reasons_list_is_capped_at_1024(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path, FAKE_CS_REASONS=json.dumps(["r" * 500] * 10))
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     doc = run(tmp_path, capsys, config(fake))
     assert len(doc["checks"][0]["detail"]) == 1024
 
@@ -253,9 +279,10 @@ def test_a_bad_field_in_an_otherwise_valid_run_is_artifact_invalid_and_never_cac
     sdir: Path,
     monkeypatch: pytest.MonkeyPatch,
     env: dict[str, str],
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path, **env)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     doc = run(tmp_path, capsys, config(fake))
     assert entry(doc) == ("escalate", "artifact_invalid")
     assert doc["decision"] == "escalate" and cache_count(sdir) == 0
@@ -309,6 +336,7 @@ def test_a_hostile_status_object_is_artifact_invalid_even_with_a_valid_file_behi
     sdir: Path,
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
+    tracker: Tracker,
 ) -> None:
     import sys
 
@@ -316,7 +344,7 @@ def test_a_hostile_status_object_is_artifact_invalid_even_with_a_valid_file_behi
     script.write_text(REWRITE, encoding="utf-8")
     fake = Fake(tmp_path)
     cmd = [sys.executable, str(script), mode, *fake.cmd]
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     doc = run(tmp_path, capsys, config(None, session_cmd=cmd))
     assert entry(doc) == ("escalate", "artifact_invalid")
     assert cache_count(sdir) == 0 and doc["decision"] == "escalate"
@@ -329,11 +357,15 @@ def test_the_agentjudge_module_spawns_nothing() -> None:
 
 
 def test_an_allow_through_check_always_has_a_valid_artifact_behind_it(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     """Every scenario of the fake: an allow comes out of exactly the two scenarios whose run is
     done with a valid artifact."""
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     import re
 
     from tests.fake_session import FAKE
