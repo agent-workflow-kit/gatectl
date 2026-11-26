@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -37,22 +38,29 @@ def live(tmp_path: Path, budget: live_util.RunBudget) -> Iterator[live_util.Live
     world.sweep()  # stop then forget what the test left; prints LEFTOVER lines for the rest
 
 
+def count_live(stats: dict[str, list[Any]], kind: str) -> int:
+    """Live-test reports under ``kind``. A passed or skipped test counts once (its call or
+    setup phase, not the teardown that follows); failures and errors count in any phase, so a
+    teardown error (pytest files it under "error") is not lost."""
+    phases = (None, "call", "setup") if kind in ("passed", "skipped") else None
+    return sum(
+        1
+        for rep in stats.get(kind, [])
+        if "tests/live/" in str(getattr(rep, "nodeid", ""))
+        and (phases is None or getattr(rep, "when", None) in phases)
+    )
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Say loudly that skipped live tests prove nothing, and fail a run where none passed."""
     reporter = session.config.pluginmanager.get_plugin("terminalreporter")
     if reporter is None:
         return
-
-    def count(kind: str) -> int:
-        return sum(
-            1
-            for rep in reporter.stats.get(kind, [])
-            if "tests/live/" in str(getattr(rep, "nodeid", ""))
-            and rep.when in (None, "call", "setup")
-        )
-
+    stats = reporter.stats
     note, force = live_util.live_summary(
-        passed=count("passed"), skipped=count("skipped"), failed=count("failed") + count("error")
+        passed=count_live(stats, "passed"),
+        skipped=count_live(stats, "skipped"),
+        failed=count_live(stats, "failed") + count_live(stats, "error"),
     )
     if note:
         print(f"\n[live] {note}")

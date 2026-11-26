@@ -20,6 +20,7 @@ import stat
 import subprocess
 import time
 import tomllib
+import types
 from pathlib import Path
 from typing import Any
 
@@ -483,6 +484,45 @@ def test_sweep_reports_a_list_that_failed(
     assert "LEFTOVER" in capsys.readouterr().out
 
 
+def test_sweep_reports_no_leftover_when_a_failed_stop_still_ended_the_session(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    w = world(tmp_path)
+    present = [item("cs-aaaaaaaa")]
+    calls: list[list[str]] = []
+
+    def call(*argv: str, **kw: Any) -> live_util.Proc:
+        calls.append(list(argv))
+        if argv[0] == "list":
+            return proc(0, json.dumps({"sessions": list(present)}))
+        if argv[0] == "status":
+            return proc(0, json.dumps({"run": {}}))
+        if argv[0] == "stop":
+            present.clear()  # the session ended although stop reported failure
+            return proc(12, "{}")
+        return proc(1, "{}")
+
+    w.session = call  # type: ignore[method-assign]
+    assert w.sweep() == []
+    assert "LEFTOVER" not in capsys.readouterr().out
+
+
+def test_live_conftest_counts_teardown_errors_but_not_teardown_passes() -> None:
+    import importlib
+
+    conftest = importlib.import_module("tests.live.conftest")
+    reps = [
+        types.SimpleNamespace(nodeid="tests/live/t.py::a", when="call", outcome="passed"),
+        types.SimpleNamespace(nodeid="tests/live/t.py::a", when="teardown", outcome="passed"),
+        types.SimpleNamespace(nodeid="tests/live/t.py::b", when="teardown", outcome="failed"),
+        types.SimpleNamespace(nodeid="tests/other.py::c", when="teardown", outcome="failed"),
+    ]
+    stats = {"passed": [reps[0], reps[1]], "error": [reps[2], reps[3]]}  # pytest's own layout
+    assert conftest.count_live(stats, "passed") == 1
+    assert conftest.count_live(stats, "error") == 1  # the teardown failure counts as an error
+    assert conftest.count_live(stats, "failed") == 0
+
+
 def fake_direct(w: live_util.Live) -> live_util.Direct:
     launch = type("L", (), {"decision_id": "d"})()
     return live_util.Direct(w, launch, None, proc(0), {"csession_id": "cs-aaaaaaaa"})
@@ -534,6 +574,34 @@ def test_pid_alive_is_false_for_a_zombie() -> None:
     child.wait(timeout=10)
 
 
+def test_pid_alive_falls_back_to_a_zero_signal_when_proc_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(live_util, "PROC_ROOT", Path("/nonexistent-proc"))
+    sent: list[tuple[int, int]] = []
+
+    def fake_kill(pid: int, sig: int) -> None:
+        sent.append((pid, sig))
+        if pid == 2:
+            raise ProcessLookupError
+        if pid == 3:
+            raise PermissionError
+
+    monkeypatch.setattr(os, "kill", fake_kill)
+    assert live_util.pid_alive(1)
+    assert not live_util.pid_alive(2)  # gone
+    assert live_util.pid_alive(3)  # exists, owned by someone else
+    assert {sig for _, sig in sent} == {0}  # no real signal is ever sent
+
+
+def test_group_members_is_unknown_not_empty_when_proc_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(live_util, "PROC_ROOT", Path("/nonexistent-proc"))
+    assert live_util.group_members(123) is None
+    assert "unavailable" in live_util.GROUP_UNAVAILABLE_NOTE
+
+
 class StuckChild:
     pid = 424242
     returncode = None
@@ -562,6 +630,9 @@ def test_run_stops_the_group_of_its_child_on_keyboard_interrupt(
         pid = 1
         returncode = None
 
+        def poll(self) -> None:
+            return None
+
         def __init__(self, *a: Any, **k: Any) -> None:
             pass
 
@@ -573,6 +644,31 @@ def test_run_stops_the_group_of_its_child_on_keyboard_interrupt(
     with pytest.raises(KeyboardInterrupt):
         live_util.run(["x"], {}, timeout=5)
     assert len(stopped) == 1
+
+
+def test_run_does_not_signal_a_group_when_the_child_was_already_reaped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stopped: list[Any] = []
+
+    class Reaped:
+        pid = 1
+        returncode = 0
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        def communicate(self, *a: Any, **k: Any) -> tuple[bytes, bytes]:
+            raise KeyboardInterrupt
+
+        def poll(self) -> int:
+            return 0
+
+    monkeypatch.setattr(live_util.subprocess, "Popen", Reaped)
+    monkeypatch.setattr(live_util, "stop_group", lambda child: stopped.append(child) or (b"", b""))
+    with pytest.raises(KeyboardInterrupt):
+        live_util.run(["x"], {}, timeout=5)
+    assert stopped == []
 
 
 def test_label_problems_names_each_missing_label() -> None:

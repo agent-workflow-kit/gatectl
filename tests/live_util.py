@@ -351,7 +351,8 @@ def run(
         timed_out = True
         out, err = stop_group(child)
     except BaseException:  # noqa: BLE001 - KeyboardInterrupt too: never leave the child running
-        stop_group(child)
+        if child.poll() is None:  # never killpg a group whose leader was already reaped
+            stop_group(child)
         raise
     return Proc(
         list(argv),
@@ -384,10 +385,17 @@ def stop_group(child: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
     return out, err
 
 
+PROC_ROOT = Path("/proc")
+GROUP_UNAVAILABLE_NOTE = (
+    "process group listing unavailable on this platform (no /proc): survivors of the group "
+    "cannot be listed, only recorded pids are checked"
+)
+
+
 def _proc_stat(pid: int) -> tuple[str, int] | None:
     """(state, pgrp) of ``pid`` from /proc, or ``None`` when it is gone or unreadable."""
     try:
-        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+        raw = (PROC_ROOT / str(pid) / "stat").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
     rest = raw.rsplit(")", 1)[-1].split()
@@ -398,18 +406,28 @@ def _proc_stat(pid: int) -> tuple[str, int] | None:
 
 
 def pid_alive(pid: int) -> bool:
-    """Whether ``pid`` is a live (non-zombie) process; reads /proc, sends no signal."""
-    stat = _proc_stat(pid)
-    return stat is not None and stat[0] != "Z"
-
-
-def group_members(pgid: int) -> list[int]:
-    """Pids whose process group is exactly ``pgid`` (read from /proc, no signal sent)."""
-    found: list[int] = []
+    """Whether ``pid`` is a live (non-zombie) process. Uses /proc where it exists (a zombie is
+    dead); otherwise a zero signal, which only probes existence and sends nothing."""
+    if PROC_ROOT.is_dir():
+        stat = _proc_stat(pid)
+        return stat is not None and stat[0] != "Z"
     try:
-        names = os.listdir("/proc")
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def group_members(pgid: int) -> list[int] | None:
+    """Pids whose process group is exactly ``pgid`` (read from /proc, no signal sent), or
+    ``None`` (unknown, not "empty") where /proc does not exist."""
+    try:
+        names = os.listdir(PROC_ROOT)
     except OSError:
-        return found
+        return None
+    found: list[int] = []
     for name in names:
         if name.isdigit():
             stat = _proc_stat(int(name))
@@ -564,7 +582,7 @@ class Live:
                 forget += ["--decision-id", decision]
             forgot = self.session(*forget, "--json")
             print(f"[live] sweep {sid}: stop exit {stopped.code}, forget exit {forgot.code}")
-            if stopped.code != 0 or forgot.code != 0:
+            if (stopped.code != 0 or forgot.code != 0) and self.still_listed(sid):
                 line = (
                     f"LEFTOVER {sid}: stop exit {stopped.code}, forget exit {forgot.code}; pids "
                     f"{pids}; state dir {self.state_dir}; stop by hand: "
@@ -573,6 +591,18 @@ class Live:
                 print(f"[live] {line}")
                 left.append(line)
         return left
+
+    def still_listed(self, sid: str) -> bool:
+        """Whether ``sid`` is still present; any doubt counts as present."""
+        try:
+            body = self.session("list", "--label", "owner=gatectl", "--json", timeout=60).json()
+        except (ValueError, OSError):
+            return True
+        if not isinstance(body, dict):
+            return True
+        return any(
+            isinstance(e, dict) and e.get("csession_id") == sid for e in body.get("sessions", [])
+        )
 
     def pids(self, sid: str) -> dict[str, Any]:
         try:

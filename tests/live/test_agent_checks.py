@@ -256,9 +256,13 @@ def test_killing_gatectl_mid_run_leaves_labelled_sessions_that_reconcile_clears(
         child.kill()  # SIGKILL of the PID this test started
         child.wait(timeout=30)
         time.sleep(3)
-        survivors = [p for p in members if p != child_pid and live_util.pid_alive(p)]
-        observe("group members of gatectl still alive after SIGKILL (listed, not signalled)",
-                pids=survivors, group=members)  # fmt: skip
+        if members is None:
+            print(f"[live] NOTE: {live_util.GROUP_UNAVAILABLE_NOTE}")
+            observe("group members of gatectl after SIGKILL", note=live_util.GROUP_UNAVAILABLE_NOTE)
+        else:
+            survivors = [p for p in members if p != child_pid and live_util.pid_alive(p)]
+            observe("group members of gatectl still alive after SIGKILL (listed, not signalled)",
+                    pids=survivors, group=members)  # fmt: skip
         after = leftovers(live)
         observe("sessions after SIGKILL of gatectl", sessions=after, tmp=tmp_left(live))
         for item in [*seen, *after]:
