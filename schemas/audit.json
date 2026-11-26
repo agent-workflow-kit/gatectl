@@ -289,7 +289,7 @@
                   "null"
                 ],
                 "x-untrusted": true,
-                "description": "Untrusted: the --reason-file text, at most 1 KiB.",
+                "description": "Untrusted: the --reason-file text of the set call, or of the outcome that triggered an automatic drop (sanitized and cut), at most 1 KiB.",
                 "maxLength": 1024
               },
               "triggered_by": {

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import os
+import pwd
 import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -171,6 +172,19 @@ def actor_name(raw: object) -> str:
     if not isinstance(raw, str) or not raw:
         return "user"
     return _ACTOR_BAD_CHAR.sub("_", raw)[:64] or "user"
+
+
+def _os_user_name() -> str | None:
+    try:
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except (KeyError, OSError):
+        return None
+
+
+def default_actor_name(configured: str | None) -> str | None:
+    """The name a terminal actor gets: the configured ``me.name`` (even an empty one, which
+    ``actor_name`` turns into ``user``), else the OS user name, else ``None``."""
+    return _os_user_name() if configured is None else configured
 
 
 def resolve_actor(flag: str | None, *, stdin_tty: bool, name: str | None) -> ResolvedActor:

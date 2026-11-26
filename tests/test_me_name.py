@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from gatectl import cli, setcmd
+from gatectl import cli, ids
 from gatectl.config import load_for_command
 from gatectl.errors import ConfigInvalidError
 from tests.command_util import CANARY, config_file, isolate, rule, run
@@ -59,7 +59,7 @@ def test_the_default_actor_is_the_sanitized_me_name(
     expected: str,
 ) -> None:
     _tty(monkeypatch)
-    monkeypatch.setattr(setcmd, "_os_user_name", lambda: "osuser")
+    monkeypatch.setattr(ids, "_os_user_name", lambda: "osuser")
     code, _, err = do_set(capsys, _config(tmp_path, name), "p", "enforced")
     assert code == 0, err
     assert audit_lines(state_dir)[0]["actor"] == expected
@@ -72,7 +72,7 @@ def test_an_empty_me_name_is_user_not_the_os_user_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _tty(monkeypatch)
-    monkeypatch.setattr(setcmd, "_os_user_name", lambda: "osuser")
+    monkeypatch.setattr(ids, "_os_user_name", lambda: "osuser")
     do_set(capsys, _config(tmp_path, ""), "p", "shadow")
     assert audit_lines(state_dir)[0]["actor"] == "human:user"
 
@@ -84,7 +84,7 @@ def test_a_null_me_name_still_uses_the_os_user_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _tty(monkeypatch)
-    monkeypatch.setattr(setcmd, "_os_user_name", lambda: "osuser")
+    monkeypatch.setattr(ids, "_os_user_name", lambda: "osuser")
     do_set(capsys, _config(tmp_path, None), "p", "shadow")
     assert audit_lines(state_dir)[0]["actor"] == "human:osuser"
 

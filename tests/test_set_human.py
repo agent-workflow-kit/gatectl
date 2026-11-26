@@ -205,10 +205,10 @@ def test_a_tty_without_me_name_uses_the_sanitized_os_user_name(
     state_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from gatectl import setcmd
+    from gatectl import ids
 
     tty(monkeypatch)
-    monkeypatch.setattr(setcmd, "_os_user_name", lambda: "Dr Who\n")
+    monkeypatch.setattr(ids, "_os_user_name", lambda: "Dr Who\n")
     config = make_config(tmp_path)
     code, _, _ = do_set(capsys, config, "p", "enforced")
     assert code == 0

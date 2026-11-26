@@ -19,8 +19,7 @@ SCHEMAS = Path(__file__).resolve().parent.parent / "schemas"
 COMMAND_OF = {
     # the check goldens are real (#18): see tests/test_check_golden.py
     # check-dry-run is real (#11): see tests/test_dry_run.py::test_the_plan_is_golden
-    # todo(#28): replace the stub with the real outcome output
-    "outcome": "outcome",
+    # outcome is real (#28): see tests/test_outcome.py (golden output test)
     # decisions and show are real (#15): see tests/test_decisions.py and tests/test_show.py
     # todo(#29): replace the stub with the real stats output
     "stats": "stats",
