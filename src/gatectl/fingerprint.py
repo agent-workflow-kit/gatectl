@@ -35,9 +35,8 @@ FILE_CAP = 1024 * 1024
 INSTRUCTION_CAP = 64 * 1024
 _CHUNK = 64 * 1024
 # The permission profile used when neither the check nor the ``agent:`` block names one.
-# TODO(#21): the bundled profile file is added with the bundled plugin; confirm this name then.
-# Deferred (not blocking): the file does not exist until #21 ships the bundled plugin, so default
-# agent checks hash `unreadable` for it until then and their fingerprints change when it lands.
+# The file is plugin/permission-profile.json, a copy of claude-session's built-in `review` profile;
+# a drift test (tests/test_bundled_plugin.py) pins it.
 BUNDLED_PROFILE = "permission-profile.json"
 
 _ABSENT = (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.ENAMETOOLONG)

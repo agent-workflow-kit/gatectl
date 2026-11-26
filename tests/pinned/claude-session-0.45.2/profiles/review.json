@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Agent",
+      "Task",
+      "Skill"
+    ],
+    "deny": [
+      "WebFetch",
+      "WebSearch",
+      "mcp__*",
+      "Bash(gh:*)",
+      "Bash(glab:*)",
+      "Bash(agent-spawn:*)",
+      "Bash(memoctl add:*)"
+    ]
+  },
+  "sandbox": {
+    "network": {
+      "allowedDomains": []
+    }
+  }
+}
