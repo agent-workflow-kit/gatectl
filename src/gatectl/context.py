@@ -51,3 +51,7 @@ class Result:
     # Point descriptors 0, 1 and 2 at /dev/null once everything is printed (``check`` after it
     # recorded a decision: a hook must never inherit the caller's pipes).
     detach: bool = False
+    # Runs once after everything is printed and (for a real process) the descriptors were pointed
+    # at /dev/null: ``check`` starts its detached hook supervisor here. It never raises into the
+    # exit code (the dispatcher swallows what it raises).
+    after_detach: Callable[[], None] | None = None

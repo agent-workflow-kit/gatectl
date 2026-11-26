@@ -26,12 +26,23 @@ class FakeResult:
     running: bool = False  # True: poll() is None until a signal arrives or wait() is called
 
 
+class _RecordingStdin(io.BytesIO):
+    """A stdin pipe that keeps what was written to it after the code under test closes it."""
+
+    final: bytes = b""
+
+    def close(self) -> None:
+        if not self.closed:
+            self.final = self.getvalue()
+        super().close()
+
+
 class FakeChild:
     def __init__(self, spec: ChildSpec, result: FakeResult, pid: int) -> None:
         self.spec = spec
         self.pid = pid
         self.own_group = spec.own_group
-        self.stdin: IO[bytes] | None = io.BytesIO() if spec.stdin is Stdio.PIPE else None
+        self.stdin: IO[bytes] | None = _RecordingStdin() if spec.stdin is Stdio.PIPE else None
         self.stdout: IO[bytes] | None = (
             io.BytesIO(result.stdout) if spec.stdout is Stdio.PIPE else None
         )
@@ -41,6 +52,12 @@ class FakeChild:
         self.signals: list[int] = []
         self._exit_code: int | None = None if result.running else result.returncode
         self.reaped = False  # set by poll()/wait(); a reaped child no longer takes signals
+
+    @property
+    def stdin_written(self) -> bytes:
+        """Everything written to the stdin pipe, kept after it was closed."""
+        stdin = self.stdin
+        return stdin.final if isinstance(stdin, _RecordingStdin) else b""
 
     def poll(self) -> int | None:
         if self._exit_code is not None:

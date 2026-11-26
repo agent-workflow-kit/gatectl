@@ -6,7 +6,8 @@ Every child process gatectl starts goes through this module, so tests can substi
 string, and untrusted text travels on stdin or in files, never in argv or the environment.
 
 Descriptor rules for every child (interface.md, Hooks): stdin, stdout and stderr are each stated
-explicitly as ``/dev/null`` or a private pipe (there is no way to say "inherit"), and
+explicitly as ``/dev/null`` or a private pipe (stdin may also be a read-only file: a hook's
+payload; there is no way to say "inherit"), and
 ``close_fds`` is always on, so a child never holds a descriptor of the caller.
 
 This module only starts children and reads their output with a cap; the selector loop and the
