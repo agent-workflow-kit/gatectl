@@ -1,10 +1,10 @@
 """An agent check's run sequence against the fake claude-session: the argv of every call, the
 clean-up after every failure, the environment, and what is left behind (nothing).
 
-Issue #24. Judging the run (outcome table, artifact, threshold) is issue #25: until it lands the
-judge is a stub that escalates ``check_error`` for every completed run, so these tests look at
-the calls, the clean-up and the failure reasons the run sequence itself owns. ``judged`` stands
-in for the validated verdict where a test needs one.
+Issue #24. Judging the run (outcome table, artifact, threshold) is issue #25's
+(``test_agentjudge.py``, ``test_agent_verdict.py``): these tests look at the calls, the clean-up
+and the failure reasons the run sequence itself owns. ``judged`` stands in for the judge where a
+test needs a fixed verdict.
 """
 
 from __future__ import annotations
@@ -60,10 +60,14 @@ def slot_rows(sdir: Path) -> list[Any]:
 
 
 def test_the_calls_are_start_exec_status_forget_with_the_documented_argv(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     doc = run_check(tmp_path, capsys, config(fake, agent_block={"timeout": "30s"}))
     decision_id = doc["decision_id"]
     argvs = fake.argvs()
@@ -100,10 +104,14 @@ def test_the_calls_are_start_exec_status_forget_with_the_documented_argv(
 
 
 def test_the_timeout_is_the_smaller_of_the_check_timeout_and_the_launch_window(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     cfg = config(fake, checks=[agent_check(timeout="7s")])
     run_check(tmp_path, capsys, cfg)
     start = fake.argvs()[0]
@@ -111,10 +119,14 @@ def test_the_timeout_is_the_smaller_of_the_check_timeout_and_the_launch_window(
 
 
 def test_a_fractional_launch_window_rounds_up_to_whole_seconds(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     run_check(tmp_path, capsys, config(fake, timeout="12s", agent_block={"timeout": "300s"}))
     start = fake.argvs()[0]
     # R is just under 11.8 s and L = R - 5 just under 6.8 s: ceil gives 7, never 0 or 6.
@@ -122,10 +134,14 @@ def test_a_fractional_launch_window_rounds_up_to_whole_seconds(
 
 
 def test_model_repo_and_per_check_safety_settings_are_passed(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     profile = tmp_path / "profile.json"
     profile.write_text("{}", encoding="utf-8")
     check = agent_check(
@@ -146,16 +162,24 @@ def test_model_repo_and_per_check_safety_settings_are_passed(
 
 
 def test_a_check_without_a_repo_passes_no_repo_flag(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     run_check(tmp_path, capsys, config(fake), obj={"ci": "ok"})
     assert not any(a.startswith("--repo") for a in fake.argvs()[0])
 
 
 def test_a_skill_from_another_plugin_adds_that_one_plugin_dir(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     other = tmp_path / "other-plugin"
     (other / ".claude-plugin").mkdir(parents=True)
@@ -163,7 +187,7 @@ def test_a_skill_from_another_plugin_adds_that_one_plugin_dir(
     (other / "skills" / "review").mkdir(parents=True)
     (other / "skills" / "review" / "SKILL.md").write_text("# review\n", encoding="utf-8")
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     cfg = config(
         fake,
         checks=[agent_check(skill="other:review")],
@@ -177,10 +201,14 @@ def test_a_skill_from_another_plugin_adds_that_one_plugin_dir(
 
 
 def test_the_labels_a_reconcile_sweep_needs_are_on_the_session(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     doc = run_check(tmp_path, capsys, config(fake))
     labels = fake.records()[0]["labels"]
     # claude-session adds its own kind=<kind> label to the four gatectl gives
@@ -200,13 +228,17 @@ def test_the_labels_a_reconcile_sweep_needs_are_on_the_session(
 
 
 def test_session_calls_get_an_allowlisted_environment(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_secretsecret")
     monkeypatch.setenv("GATECTL_DEFAULTS__TIMEOUT", "99s")
     monkeypatch.setenv("SOME_PASSWORD", "x")
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     run_check(tmp_path, capsys, config(fake))
     calls = fake.calls()
     assert [c["argv"][0] for c in calls] == ["start", "exec", "status", "forget"]
@@ -223,10 +255,14 @@ def test_session_calls_get_an_allowlisted_environment(
 
 
 def test_after_a_run_the_session_is_forgotten_the_files_and_the_slot_are_gone(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     seen = judged(monkeypatch)
     doc = run_check(tmp_path, capsys, config(fake))
     assert doc["checks"][0]["verdict"] == "allow"
@@ -237,10 +273,14 @@ def test_after_a_run_the_session_is_forgotten_the_files_and_the_slot_are_gone(
 
 
 def test_the_slot_row_carries_the_csession_id_while_the_run_lives(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
     during: list[list[tuple[Any, ...]]] = []
     real = agentjudge.judge
@@ -266,9 +306,10 @@ def test_a_failing_or_unusable_start_is_check_error_and_never_an_allow(
     sdir: Path,
     monkeypatch: pytest.MonkeyPatch,
     behavior: str,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path, FAKE_CS_BEHAVIOR_START=behavior)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)  # a verdict must not be asked for: the run never got there
     doc = run_check(tmp_path, capsys, config(fake))
     entry = doc["checks"][0]
@@ -279,10 +320,14 @@ def test_a_failing_or_unusable_start_is_check_error_and_never_an_allow(
 
 
 def test_a_hung_start_is_abandoned_and_the_session_it_allocated_is_forgotten(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path, FAKE_CS_BEHAVIOR_START="hang_after_allocate")
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     doc = run_check(tmp_path, capsys, config(fake))
     entry = doc["checks"][0]
     assert (entry["verdict"], entry["reason"]) == ("escalate", "check_error")
@@ -304,9 +349,10 @@ def test_a_start_that_exits_12_after_allocating_a_session_still_forgets_it(
     sdir: Path,
     monkeypatch: pytest.MonkeyPatch,
     scenario: str,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path, scenario)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     doc = run_check(tmp_path, capsys, config(fake))
     assert doc["checks"][0]["verdict"] == "escalate"
     assert [r["state"] for r in fake.records()] == ["not-started"]  # it was allocated
@@ -316,10 +362,14 @@ def test_a_start_that_exits_12_after_allocating_a_session_still_forgets_it(
 
 
 def test_non_empty_setting_sources_end_in_a_forgotten_launch_failure(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     doc = run_check(tmp_path, capsys, config(fake, checks=[agent_check(setting_sources=["user"])]))
     start = fake.argvs()[0]
     assert start[start.index("--setting-sources") + 1] == "user"
@@ -337,9 +387,10 @@ def test_a_failing_timing_out_or_unusable_status_is_check_error(
     sdir: Path,
     monkeypatch: pytest.MonkeyPatch,
     behavior: str,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path, FAKE_CS_BEHAVIOR_STATUS=behavior, FAKE_CS_HANG_MAX="30")
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
     doc = run_check(tmp_path, capsys, config(fake))
     entry = doc["checks"][0]
@@ -350,12 +401,16 @@ def test_a_failing_timing_out_or_unusable_status_is_check_error(
 
 
 def test_a_status_that_names_another_session_is_unusable(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     from gatectl import agent
 
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
     real = agent.parse_object
 
@@ -381,9 +436,10 @@ def test_a_failing_forget_never_changes_the_verdict(
     sdir: Path,
     monkeypatch: pytest.MonkeyPatch,
     behavior: str,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path, FAKE_CS_BEHAVIOR_FORGET=behavior, FAKE_CS_HANG_MAX="30")
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
     doc = run_check(tmp_path, capsys, config(fake))
     entry = doc["checks"][0]
@@ -396,10 +452,14 @@ def test_a_failing_forget_never_changes_the_verdict(
 
 
 def test_nothing_a_session_prints_reaches_the_audit_log_or_detail(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     fake = Fake(tmp_path, FAKE_CS_BEHAVIOR_STATUS="garbage")
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     doc = run_check(tmp_path, capsys, config(fake))
     text = (sdir / "audit.jsonl").read_text(encoding="ascii")
     log = (sdir / "log.jsonl").read_text(encoding="ascii") if (sdir / "log.jsonl").exists() else ""
@@ -411,7 +471,11 @@ def test_nothing_a_session_prints_reaches_the_audit_log_or_detail(
 
 
 def test_huge_output_from_a_call_is_capped_not_buffered(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
 ) -> None:
     wrapper = tmp_path / "noisy"
     wrapper.write_text(  # floods stdout for `status` (50 MB), runs the fake for everything else
@@ -424,7 +488,7 @@ def test_huge_output_from_a_call_is_capped_not_buffered(
     )
     wrapper.chmod(0o755)
     fake = Fake(tmp_path)
-    limits_env(monkeypatch)
+    limits_env(monkeypatch, tracker)
     judged(monkeypatch)
     doc = run_check(tmp_path, capsys, config(None, session_cmd=[str(wrapper), *fake.cmd]))
     entry = doc["checks"][0]
