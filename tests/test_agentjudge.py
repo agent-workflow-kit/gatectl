@@ -20,8 +20,6 @@ from tests.judge_util import (
     NONCE,
     artifact_entry,
     good_run,
-    outcome_doc,
-    status_doc,
     verdict_bytes,
     verdict_doc,
 )
@@ -144,7 +142,9 @@ def test_the_end_reason_timeout_of_a_done_run_is_still_used(tmp_path: Path) -> N
     assert result(j) == ("allow", None) and j.cacheable
 
 
-@pytest.mark.parametrize("decision, reason", [("deny", "check_denied"), ("escalate", "check_escalated")])
+@pytest.mark.parametrize(
+    "decision, reason", [("deny", "check_denied"), ("escalate", "check_escalated")]
+)
 def test_a_deny_or_an_escalate_needs_a_valid_artifact_and_is_cacheable(
     tmp_path: Path, decision: str, reason: str
 ) -> None:
@@ -307,7 +307,9 @@ def test_a_valid_artifact_parses_to_a_verdict() -> None:
     v = agentjudge.parse_artifact(dump(GOOD), NONCE)
     assert v == agentcache.Verdict("allow", 0.95, ("looks fine",))
     assert agentjudge.parse_artifact(dump(verdict_doc(confidence=1)), NONCE).confidence == 1.0
-    assert isinstance(agentjudge.parse_artifact(dump(verdict_doc(confidence=0)), NONCE).confidence, float)
+    assert isinstance(
+        agentjudge.parse_artifact(dump(verdict_doc(confidence=0)), NONCE).confidence, float
+    )
     assert agentjudge.parse_artifact(dump(verdict_doc(reasons=[])), NONCE).reasons == ()
     pretty = json.dumps(GOOD, indent=2) + "\n"
     assert agentjudge.parse_artifact(pretty.encode(), NONCE).decision == "allow"
@@ -339,13 +341,16 @@ BAD_ARTIFACTS: dict[str, bytes] = {
     "huge negative exponent confidence": dump(GOOD).replace(b"0.95", b"-1e999"),
     "huge int": dump(GOOD).replace(b"0.95", b"9" * 5000),
     "duplicate key": dump(GOOD)[:-1] + b',"decision":"deny"}',
-    "duplicate key allow last": b'{"decision":"deny","schema_version":1,"nonce":"' + NONCE.encode()
+    "duplicate key allow last": b'{"decision":"deny","schema_version":1,"nonce":"'
+    + NONCE.encode()
     + b'","confidence":0.9,"reasons":[],"decision":"allow"}',
     "duplicate nonce": dump(GOOD)[:-1] + dump(NONCE).join([b',"nonce":', b"}"]),
     "deep nesting": b'{"a":' + b"[" * 7000 + b"]" * 7000 + b"}",
     "unknown key": dump({**GOOD, "extra": 1}),
     "unknown key null": dump({**GOOD, "x": None}),
-    "case-folded key": dump({**{k: v for k, v in GOOD.items() if k != "decision"}, "Decision": "allow"}),
+    "case-folded key": dump(
+        {**{k: v for k, v in GOOD.items() if k != "decision"}, "Decision": "allow"}
+    ),
     "padded key": dump({**{k: v for k, v in GOOD.items() if k != "nonce"}, "nonce ": NONCE}),
     "empty object": b"{}",
     "schema 2": dump(verdict_doc(schema_version=2)),
@@ -364,7 +369,8 @@ BAD_ARTIFACTS: dict[str, bytes] = {
     "nonce null": dump(verdict_doc(nonce=None)),
     "nonce list": dump(verdict_doc(nonce=[NONCE])),
     "nonce non-ascii": dump(verdict_doc(nonce="é" * 32)),
-    "nonce surrogate": b'{"schema_version":1,"nonce":"\\ud800","decision":"allow","confidence":1,"reasons":[]}',
+    "nonce surrogate": b'{"schema_version":1,"nonce":"\\ud800","decision":"allow",'
+    b'"confidence":1,"reasons":[]}',
     "decision maybe": dump(verdict_doc(decision="maybe")),
     "decision upper": dump(verdict_doc(decision="ALLOW")),
     "decision padded": dump(verdict_doc(decision="allow ")),
@@ -464,7 +470,7 @@ def test_detail_is_the_reasons_joined_and_cut_to_1024(tmp_path: Path) -> None:
     reasons = ["a" * 500] * 10
     j = judged(good_run(tmp_path, verdict_bytes(reasons=reasons)))
     assert j.detail == ("a" * 500 + "; " + "a" * 500 + "; " + "a" * 24)[:1024]
-    assert len(j.detail) == 1024
+    assert j.detail is not None and len(j.detail) == 1024
     two = judged(good_run(tmp_path / "t", verdict_bytes(reasons=["one", "two"])))
     assert two.detail == "one; two"
     none = judged(good_run(tmp_path / "n", verdict_bytes(reasons=[])))
@@ -510,7 +516,9 @@ def test_a_symlinked_directory_component_is_refused(tmp_path: Path) -> None:
     (tmp_path / "alias").symlink_to(tmp_path / "real")
     invalid_read(artifact_entry(tmp_path / "alias" / "verdict.json", data))
     # the same bytes through the real path are fine
-    assert agentjudge.read_artifact(artifact_entry(tmp_path / "real" / "verdict.json", data)) == data
+    assert (
+        agentjudge.read_artifact(artifact_entry(tmp_path / "real" / "verdict.json", data)) == data
+    )
 
 
 def test_a_fifo_is_refused_without_blocking(tmp_path: Path) -> None:
@@ -793,7 +801,9 @@ def test_adding_an_agent_check_can_only_tighten_the_combined_decision(seed: int)
         conf = rng.choice((0.0, 0.5, 0.8, 0.9, 1.0))
         threshold = rng.choice((0.0, 0.8, 1.0))
         j = agentjudge.from_verdict(agentcache.Verdict(verdict, conf, ()), threshold)
-        entry = engine.Entry("a", "agent", j.verdict, j.reason, j.detail, 0, confidence=j.confidence)
+        entry = engine.Entry(
+            "a", "agent", j.verdict, j.reason, j.detail, 0, confidence=j.confidence
+        )
         after = engine.combine([*others, entry]).decision
         assert SEVERITY[after] >= SEVERITY[before]
         # and the agent's own verdict never outranks the artifact's decision

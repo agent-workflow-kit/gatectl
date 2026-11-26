@@ -1,10 +1,10 @@
 """An agent check's run sequence against the fake claude-session: the argv of every call, the
 clean-up after every failure, the environment, and what is left behind (nothing).
 
-Issue #24. Judging the run (outcome table, artifact, threshold) is issue #25: until it lands the
-judge is a stub that escalates ``check_error`` for every completed run, so these tests look at
-the calls, the clean-up and the failure reasons the run sequence itself owns. ``judged`` stands
-in for the validated verdict where a test needs one.
+Issue #24. Judging the run (outcome table, artifact, threshold) is issue #25's
+(``test_agentjudge.py``, ``test_agent_verdict.py``): these tests look at the calls, the clean-up
+and the failure reasons the run sequence itself owns. ``judged`` stands in for the judge where a
+test needs a fixed verdict.
 """
 
 from __future__ import annotations

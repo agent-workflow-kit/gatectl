@@ -2,7 +2,8 @@
 input_invalid), the deadline steps (budget_exhausted, busy), the files and the slot, the cache
 (reuse, ``--no-cache``, what is never cached) and the rule that nothing unvalidated can allow.
 
-Issue #24. The judge is issue #25's: ``judged`` stands in for a validated verdict.
+Issue #24. ``judged`` stands in for a validated verdict (the judge is tested in
+``test_agentjudge.py`` and ``test_agent_verdict.py``).
 """
 
 from __future__ import annotations
@@ -294,7 +295,9 @@ def test_slot_starvation_is_busy(
         assert held is not None  # a live holder: this very process
     calls_before = len(fake.argvs())
     began = time.monotonic()
-    _, doc, _ = do_check(capsys, config_path, "p", "--input", write_input(tmp_path, INPUT))
+    _, doc, _ = do_check(
+        capsys, config_path, "p", "--input", write_input(tmp_path, INPUT), "--no-cache"
+    )  # the first run is cached now: skip the lookup to reach the slot
     assert entry_of(doc) == ("escalate", "busy")
     assert time.monotonic() - began < 6  # waited until L fell below min_start_budget
     assert len(fake.argvs()) == calls_before
@@ -485,15 +488,15 @@ def test_an_agent_check_after_a_deny_or_an_escalate_is_skipped_and_starts_nothin
 # --- nothing unvalidated can allow ---------------------------------------------------------
 
 
-def test_with_the_stub_judge_a_complete_run_never_allows(
+def test_a_complete_run_with_a_valid_artifact_allows_and_cleans_up(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = Fake(tmp_path)
     limits_env(monkeypatch)
-    _, doc, _ = check(tmp_path, capsys, config(fake))  # TODO(#25): real validation
-    assert entry_of(doc) == ("escalate", "check_error")
-    assert doc["checks"][0]["detail"] == agentjudge.NOT_VALIDATED
-    assert doc["decision"] == "escalate"
+    _, doc, _ = check(tmp_path, capsys, config(fake))  # the real judge (issue #25)
+    assert entry_of(doc) == ("allow", None)
+    assert doc["checks"][0]["detail"] == "fake reason"
+    assert doc["decision"] == "allow"
     assert fake.verbs() == ["start", "exec", "status", "forget"]
     nothing_left(sdir)
 
@@ -664,7 +667,7 @@ def test_a_failed_run_is_never_cached(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     limits_env(monkeypatch)
-    stub = agentjudge.judge
+    real_judge = agentjudge.judge
     judged(monkeypatch)
     for scenario in ("unreported", "timeout", "failed", "sandbox_unavailable"):
         check(tmp_path, capsys, config(Fake(tmp_path / scenario, scenario)))
@@ -673,9 +676,9 @@ def test_a_failed_run_is_never_cached(
     judged(monkeypatch, None)
     check(tmp_path, capsys, config(Fake(tmp_path / "refused")))
     assert cache_rows(sdir) == []
-    # and neither is the stub's verdict (nothing is validated yet)
-    monkeypatch.setattr(agentjudge, "judge", stub)
-    check(tmp_path, capsys, config(Fake(tmp_path / "stub")))
+    # and neither is a real run whose artifact is not valid
+    monkeypatch.setattr(agentjudge, "judge", real_judge)
+    check(tmp_path, capsys, config(Fake(tmp_path / "bad", "nonce_mismatch")))
     assert cache_rows(sdir) == []
 
 

@@ -323,7 +323,11 @@ def _usable_run(outcome: object, status: object) -> Mapping[str, Any]:
     if not (_int(run.get("run")) and _int(outcome.get("run")) and run["run"] == outcome["run"]):
         raise _invalid("status describes another run")
     rep = run.get("report")
-    if not isinstance(rep, Mapping) or rep.get("status") != "done" or rep.get("implicit") is not False:
+    if (
+        not isinstance(rep, Mapping)
+        or rep.get("status") != "done"
+        or rep.get("implicit") is not False
+    ):
         raise _invalid("status has no explicit done report")
     art = rep.get("artifact")
     if not isinstance(art, Mapping):
@@ -345,7 +349,9 @@ def _exec_failed(code: int, outcome: Mapping[str, Any] | None) -> Judgement:
     end = outcome.get("end_reason") if isinstance(outcome, Mapping) else None
     if code == 12:
         return start_failed(12, end if isinstance(end, str) else None)
-    return escalate("check_error", f"agent run failed (exit {code})" if 0 <= code < 1000 else "agent run failed")
+    return escalate(
+        "check_error", f"agent run failed (exit {code})" if 0 <= code < 1000 else "agent run failed"
+    )
 
 
 def judge(raw: RawRun, *, threshold: float) -> Judgement:
