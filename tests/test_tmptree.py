@@ -299,3 +299,43 @@ def test_the_script_dir_is_made_relative_to_the_held_decision_dir(tmp_path: Path
     with pytest.raises(UnsafeTree):
         make_script_dir(tmp_path / "tmp" / "swap", 1)
     assert make_script_dir(d, 2) == d / "s-2"
+
+
+# --- hook directories (#20) ---------------------------------------------------------------------
+
+
+def test_hook_dir_has_owner_and_a_private_payload(tmp_path: Path) -> None:
+    from gatectl.tmptree import create_hook_dir
+
+    d = create_hook_dir(tmp_path / "state", b'{"a":1}')
+    assert d.parent == tmp_path / "state" / "tmp"
+    assert d.name.startswith("hook-") and len(d.name) == len("hook-") + 16
+    assert mode(d) == 0o700
+    assert (d / "payload.json").read_bytes() == b'{"a":1}'
+    assert mode(d / "payload.json") == 0o600
+    assert json.loads((d / "owner").read_text())["pid"] == os.getpid()
+    assert sorted(p.name for p in d.iterdir()) == ["owner", "payload.json"]
+
+
+def test_hook_dirs_are_distinct_and_removable(tmp_path: Path) -> None:
+    from gatectl.tmptree import create_hook_dir
+
+    a = create_hook_dir(tmp_path, b"1")
+    b = create_hook_dir(tmp_path, b"2")
+    assert a != b
+    remove_tree(a)
+    assert not a.exists() and b.exists()
+
+
+def test_hook_dir_leaves_nothing_when_the_payload_cannot_be_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gatectl import tmptree
+
+    def boom(*a: object, **k: object) -> int:
+        raise OSError(28, "no space")
+
+    monkeypatch.setattr(tmptree, "_write_payload", boom)
+    with pytest.raises(OSError):
+        tmptree.create_hook_dir(tmp_path, b"x")
+    assert list((tmp_path / "tmp").iterdir()) == []

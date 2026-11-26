@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import stat
 import sys
 from pathlib import Path
@@ -156,6 +157,65 @@ def create_decision_dir(state_dir: Path, decision_id: str) -> Path:
         return path
     finally:
         os.close(tmp_fd)
+
+
+HOOK_PREFIX = "hook-"
+PAYLOAD = "payload.json"
+
+
+def create_hook_dir(state_dir: Path, payload: bytes) -> Path:
+    """Create ``tmp/hook-<random>/`` (mode 0700) with its ``owner`` file (the calling process:
+    the hook supervisor) and ``payload.json`` (mode 0600) holding ``payload``.
+
+    The name is 64 random bits, created exclusively (a clash retries). A failure leaves nothing.
+    """
+    tmp_fd = _state_tmp(state_dir)
+    try:
+        for _ in range(8):
+            name = HOOK_PREFIX + secrets.token_hex(8)
+            try:
+                os.mkdir(name, 0o700, dir_fd=tmp_fd)
+            except FileExistsError:
+                continue
+            break
+        else:
+            raise OSError("no unused hook directory name")
+        path = state_dir / "tmp" / name
+        fd = _open_dir(name, tmp_fd, str(path))
+        try:
+            _write_owner(fd, str(path))
+            _write_payload(fd, payload)
+        except BaseException:
+            for leftover in (PAYLOAD, OWNER):
+                try:
+                    os.unlink(leftover, dir_fd=fd)
+                except OSError:
+                    pass
+            os.close(fd)
+            fd = -1
+            try:
+                os.rmdir(name, dir_fd=tmp_fd)
+            except OSError:
+                pass
+            raise
+        finally:
+            if fd >= 0:
+                os.close(fd)
+        return path
+    finally:
+        os.close(tmp_fd)
+
+
+def _write_payload(dir_fd: int, payload: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open(PAYLOAD, flags, 0o600, dir_fd=dir_fd)
+    try:
+        os.fchmod(fd, 0o600)
+        view = memoryview(payload)
+        while view:
+            view = view[os.write(fd, view) :]
+    finally:
+        os.close(fd)
 
 
 def _write_owner(dir_fd: int, label: str) -> None:

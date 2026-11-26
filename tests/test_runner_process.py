@@ -477,3 +477,58 @@ def test_runs_do_not_leak_descriptors() -> None:
         assert len(os.listdir("/proc/self/fd")) == before
     finally:
         assert not own.teardown()
+
+
+# --- a file as stdin and output sent to /dev/null (detached hooks, #20) -------------------------
+
+
+def test_stdin_path_is_the_childs_stdin_and_output_goes_to_dev_null(
+    tracker: Tracker, tmp_path: Path
+) -> None:
+    payload = tmp_path / "payload.json"
+    payload.write_bytes(b'{"k": "v"}')
+    seen = tmp_path / "seen"
+    code = (
+        "import os, sys\n"
+        f"open({str(seen)!r}, 'w').write(sys.stdin.read() + '|' + "
+        "os.readlink('/proc/self/fd/1') + '|' + os.readlink('/proc/self/fd/2'))\n"
+        "print('noise'); sys.stderr.write('noise')"
+    )
+    r = run(tracker, spec(code, stdin_path=str(payload), capture_output=False))
+    assert (r.status, r.code) == ("exited", 0)
+    assert r.stdout == b""
+    assert seen.read_text() == '{"k": "v"}|/dev/null|/dev/null'
+
+
+def test_stdin_path_and_stdin_data_are_exclusive() -> None:
+    with pytest.raises(ValueError, match="stdin_path"):
+        spec("pass", stdin_path="/x", stdin_data=b"a")
+    with pytest.raises(ValueError, match="stdin_path"):
+        spec("pass", stdin_path="a\x00b")
+    with pytest.raises(ValueError, match="capture_output"):
+        spec("pass", capture_output=1)
+
+
+def test_a_missing_stdin_file_is_not_started(tracker: Tracker, tmp_path: Path) -> None:
+    r = run(tracker, spec("pass", stdin_path=str(tmp_path / "gone"), capture_output=False))
+    assert r.status == "not_started"
+
+
+def test_timeout_without_capture_still_ends_the_whole_group(
+    tracker: Tracker, tmp_path: Path
+) -> None:
+    code = (
+        "import os, signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"open({str(tmp_path / 'leader')!r}, 'w').write(str(os.getpid()))\n"
+        "if os.fork() == 0:\n"
+        f"    open({str(tmp_path / 'gc')!r}, 'w').write(str(os.getpid()))\n"
+        "    time.sleep(60)\n"
+        "time.sleep(60)"
+    )
+    r = run(tracker, spec(code, timeout=1.0, capture_output=False))
+    assert r.status == "timeout"
+    for name in ("leader", "gc"):
+        pid = read_pid(tmp_path / name)
+        tracker.track_pid(pid)
+        assert tracker.wait_dead(pid, 5.0)

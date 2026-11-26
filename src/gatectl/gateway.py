@@ -37,6 +37,8 @@ class Stdio(enum.Enum):
 
     DEVNULL = "devnull"
     PIPE = "pipe"
+    # stdin only: a read-only file, opened by the gateway (``ChildSpec.stdin_path``).
+    FILE = "file"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -48,6 +50,11 @@ class ChildSpec:
     stdout: Stdio
     stderr: Stdio
     own_group: bool = False
+    # stdin_path: the file behind ``stdin=Stdio.FILE`` (required exactly then).
+    stdin_path: str | None = None
+    # A new session (setsid): the child leads its own session and group, so a hangup of the
+    # caller's terminal or session never reaches it. Implies its own process group.
+    new_session: bool = False
     cwd: str | None = None
     # None: the environment of gatectl. Read-only, and kept out of repr (it may hold secrets).
     env: Mapping[str, str] | None = field(default=None, repr=False)
@@ -57,13 +64,24 @@ class ChildSpec:
         env = None if self.env is None else dict(self.env)
         return (
             _rebuild_spec,
-            (self.argv, self.stdin, self.stdout, self.stderr, self.own_group, self.cwd, env),
+            (
+                self.argv,
+                self.stdin,
+                self.stdout,
+                self.stderr,
+                self.own_group,
+                self.cwd,
+                env,
+                self.stdin_path,
+                self.new_session,
+            ),
         )
 
     def __hash__(self) -> int:
         env = None if self.env is None else tuple(sorted(self.env.items()))
         streams = (self.stdin, self.stdout, self.stderr)
-        return hash((self.argv, streams, self.own_group, self.cwd, env))
+        flags = (self.own_group, self.new_session, self.stdin_path)
+        return hash((self.argv, streams, flags, self.cwd, env))
 
     def __init__(
         self,
@@ -75,6 +93,8 @@ class ChildSpec:
         own_group: bool = False,
         cwd: str | None = None,
         env: Mapping[str, str] | None = None,
+        stdin_path: str | None = None,
+        new_session: bool = False,
     ) -> None:
         if isinstance(argv, str | bytes) or not isinstance(argv, Sequence):
             raise ValueError("argv must be a list or tuple of strings, never a shell string")
@@ -86,10 +106,17 @@ class ChildSpec:
         if not argv[0]:
             raise ValueError("argv[0] must not be empty")
         for name, value in (("stdin", stdin), ("stdout", stdout), ("stderr", stderr)):
-            if not isinstance(value, Stdio):
+            if not isinstance(value, Stdio) or (name != "stdin" and value is Stdio.FILE):
                 raise ValueError(f"{name} must be Stdio.DEVNULL or Stdio.PIPE, got {value!r}")
         if not isinstance(own_group, bool):
             raise ValueError(f"own_group must be a bool, got {own_group!r}")
+        if not isinstance(new_session, bool):
+            raise ValueError(f"new_session must be a bool, got {new_session!r}")
+        if (stdin is Stdio.FILE) != (stdin_path is not None) or (
+            stdin_path is not None
+            and (not isinstance(stdin_path, str) or not stdin_path or "\x00" in stdin_path)
+        ):
+            raise ValueError("stdin_path is a non-empty path string exactly when stdin is FILE")
         if cwd is not None and (not isinstance(cwd, str) or "\x00" in cwd):
             raise ValueError("cwd must be a string without NUL bytes, or None")
         if env is not None:
@@ -110,6 +137,8 @@ class ChildSpec:
         object.__setattr__(self, "stdout", stdout)
         object.__setattr__(self, "stderr", stderr)
         object.__setattr__(self, "own_group", own_group)
+        object.__setattr__(self, "stdin_path", stdin_path)
+        object.__setattr__(self, "new_session", new_session)
         object.__setattr__(self, "cwd", cwd)
         object.__setattr__(self, "env", None if env is None else MappingProxyType(dict(env)))
 
@@ -122,9 +151,19 @@ def _rebuild_spec(
     own_group: bool,
     cwd: str | None,
     env: dict[str, str] | None,
+    stdin_path: str | None,
+    new_session: bool,
 ) -> ChildSpec:
     return ChildSpec(
-        argv, stdin=stdin, stdout=stdout, stderr=stderr, own_group=own_group, cwd=cwd, env=env
+        argv,
+        stdin=stdin,
+        stdout=stdout,
+        stderr=stderr,
+        own_group=own_group,
+        cwd=cwd,
+        env=env,
+        stdin_path=stdin_path,
+        new_session=new_session,
     )
 
 
@@ -237,18 +276,31 @@ class SubprocessGateway:
     """The real gateway: ``subprocess.Popen`` with explicit streams and ``close_fds``."""
 
     def start(self, spec: ChildSpec) -> Child:
-        popen = subprocess.Popen(
-            list(spec.argv),
-            stdin=_STDIO[spec.stdin],
-            stdout=_STDIO[spec.stdout],
-            stderr=_STDIO[spec.stderr],
-            close_fds=True,
-            shell=False,
-            cwd=spec.cwd,
-            env=None if spec.env is None else dict(spec.env),
-            process_group=0 if spec.own_group else None,
-        )
-        return _Child(popen, spec.own_group)
+        stdin_fd = -1
+        stdin: int | None = _STDIO.get(spec.stdin)
+        if spec.stdin is Stdio.FILE:
+            assert spec.stdin_path is not None
+            # No link is followed, and the descriptor is the child's alone (close-on-exec,
+            # closed here once the child has it as fd 0).
+            stdin_fd = os.open(spec.stdin_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            stdin = stdin_fd
+        try:
+            popen = subprocess.Popen(
+                list(spec.argv),
+                stdin=stdin,
+                stdout=_STDIO[spec.stdout],
+                stderr=_STDIO[spec.stderr],
+                close_fds=True,
+                shell=False,
+                cwd=spec.cwd,
+                env=None if spec.env is None else dict(spec.env),
+                process_group=0 if spec.own_group and not spec.new_session else None,
+                start_new_session=spec.new_session,
+            )
+        finally:
+            if stdin_fd >= 0:
+                os.close(stdin_fd)
+        return _Child(popen, spec.own_group or spec.new_session)
 
 
 @dataclass(frozen=True)
