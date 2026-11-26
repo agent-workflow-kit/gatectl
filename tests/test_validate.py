@@ -1579,3 +1579,73 @@ def test_the_handler_raises_internal_error_for_probe_on_a_valid_config(env: Env)
 def test_unused_names_from_config_stay_importable() -> None:
     assert config.ConfigProblem is validate.ConfigProblem
     assert stat.S_ISREG(os.stat(__file__).st_mode)
+
+
+# --- applies_when is validated like a rule check's when -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("applies_when", "code", "path"),
+    [
+        ([], "invalid_rule", "policies.p.applies_when"),
+        ("x", "invalid_rule", "policies.p.applies_when"),
+        ([{"path": "a", "op": "eq"}], "invalid_rule", "policies.p.applies_when.0.value"),
+        (
+            [{"path": "a", "op": "exists", "value": 1}],
+            "invalid_rule",
+            "policies.p.applies_when.0.value",
+        ),
+        (
+            [{"path": "a", "op": "glob", "value": "a" * 129}],
+            "glob_too_long",
+            "policies.p.applies_when.0.value",
+        ),
+    ],
+)
+def test_a_bad_applies_when_is_a_problem_at_its_own_path(
+    env: Env, applies_when: Any, code: str, path: str
+) -> None:
+    exit_code, payload = env.run(env.base(policies={"p": good_policy(applies_when=applies_when)}))
+    assert (code, path) in found(payload, "problems") and exit_code == 2
+
+
+def test_a_good_applies_when_is_valid(env: Env) -> None:
+    cond = [{"path": "a", "op": "ne", "value": None}, {"path": "a", "op": "eq", "value": "x"}]
+    exit_code, payload = env.run(env.base(policies={"p": good_policy(applies_when=cond)}))
+    assert exit_code == 0 and payload["problems"] == []
+
+
+@pytest.mark.parametrize("bad", [[], "x"])
+def test_applies_when_and_a_rule_when_report_the_same_code_for_a_bad_list(
+    env: Env, bad: Any
+) -> None:
+    rule = {"name": "r", "type": "rule", "when": bad, "then": "deny"}
+    _, rule_payload = env.run(env.base(policies={"p": {"checks": [rule]}}))
+    _, applies_payload = env.run(env.base(policies={"p": good_policy(applies_when=bad)}))
+    [rule_code] = {c for c, _ in found(rule_payload, "problems")}
+    [applies_code] = {c for c, _ in found(applies_payload, "problems")}
+    assert rule_code == applies_code == "invalid_rule"
+
+
+@pytest.mark.parametrize(
+    ("applies_when", "code", "path"),
+    [
+        ([], "invalid_rule", "repos.example.com/o/r.policies.p.applies_when"),
+        (
+            [{"path": "a", "op": "eq"}],
+            "invalid_rule",
+            "repos.example.com/o/r.policies.p.applies_when.0.value",
+        ),
+        (
+            [{"path": "a", "op": "glob", "value": "a" * 129}],
+            "glob_too_long",
+            "repos.example.com/o/r.policies.p.applies_when.0.value",
+        ),
+    ],
+)
+def test_a_bad_applies_when_in_a_repo_override_is_a_problem_at_the_override_path(
+    env: Env, applies_when: Any, code: str, path: str
+) -> None:
+    repos = {"example.com/o/r": {"policies": {"p": {"applies_when": applies_when}}}}
+    exit_code, payload = env.run(env.base(policies={"p": good_policy()}, repos=repos))
+    assert exit_code == 2 and (code, path) in found(payload, "problems")
