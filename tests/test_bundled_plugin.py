@@ -253,6 +253,10 @@ def test_the_skill_front_matter_names_gate_check() -> None:
 
 # Sentences that are the required statement end with their punctuation, so a clause appended to
 # one ("... unless ...") no longer matches.
+SUBAGENT_SENTENCE = (
+    "Never use the Agent, Task or Skill tools and never fetch anything from the network: "
+    "the data needs none of them."
+)
 REQUIRED_STATEMENTS = {
     "reads the prompt file with Read": (
         "Read the prompt file named in your first message with the Read tool"
@@ -284,7 +288,7 @@ REQUIRED_STATEMENTS = {
         "claude-session report done --summary-file <that summary file> --artifact verdict.json"
     ),
     "no other command": "Run no other command, touch no other file and do not browse.",
-    "no subagent tools": "Never use the Agent, Task or Skill tools",
+    "no subagent tools": SUBAGENT_SENTENCE,
     "no network": "never fetch anything from the network",
 }
 
@@ -315,14 +319,38 @@ def test_a_rewrap_keeps_the_pins_and_an_appended_clause_breaks_one() -> None:
     assert missing_pins(weakened) == ["unsure escalates"]
 
 
+FALSE_DENIAL_CLAIM = re.compile(
+    r"(session|profile|sandbox) (denies|blocks|forbids) "
+    r"(them|the (Agent|Task|Skill)|Agent|Task|Skill)"
+    r"|denies them anyway"
+)
+TRUTHFUL_ALLOW_CLAIM = re.compile(r"profile (does )?(allow|permit)s?")
+
+
+def claims_subagent_tools_denied(text: str) -> bool:
+    return bool(FALSE_DENIAL_CLAIM.search(squash(text)))
+
+
+def states_subagent_tools_allowed(text: str) -> bool:
+    return bool(TRUTHFUL_ALLOW_CLAIM.search(squash(text)))
+
+
 def test_the_skill_does_not_claim_the_session_denies_the_subagent_tools() -> None:
-    # The profile ALLOWS Agent, Task and Skill, so the prohibition in the text is the only barrier.
+    # The profile ALLOWS Agent, Task and Skill, so the prohibition in the text is what bars them.
     allowed = load_json(PROFILE)["permissions"]["allow"]
     assert {"Agent", "Task", "Skill"} <= set(allowed)
-    flat = squash(skill_text())
-    assert not re.search(r"(session|profile|sandbox) (denies|blocks|forbids)[^.]*", flat)
-    assert not re.search(r"denies them anyway", flat)
-    assert "only barrier" in flat
+    text = skill_text()
+    assert not claims_subagent_tools_denied(text)
+    assert states_subagent_tools_allowed(text)
+
+
+def test_the_denial_claim_check_separates_the_false_claim_from_a_truthful_one() -> None:
+    assert not claims_subagent_tools_denied("Network access is denied by the profile.")
+    assert not claims_subagent_tools_denied("The profile denies network access.")
+    assert claims_subagent_tools_denied("The session denies the Agent, Task and Skill tools.")
+    assert claims_subagent_tools_denied("The profile denies them anyway.")
+    assert states_subagent_tools_allowed("The profile does allow the Agent tool.")
+    assert not states_subagent_tools_allowed("The profile denies network access.")
 
 
 def test_the_skill_artifact_keys_are_the_schema_keys() -> None:
@@ -350,16 +378,27 @@ def test_the_skill_artifact_keys_are_the_schema_keys() -> None:
 
 
 def denial_free(text: str) -> str:
-    """The text without the sentences that only deny a tool (they may name it)."""
-    sentences = re.split(r"(?<=[.:])\s+", squash(text))
-    return " ".join(s for s in sentences if not re.search(r"\b[Nn]ever (use|call)\b", s))
+    """The text without the one pinned subagent sentence (the only exempt sentence)."""
+    return squash(text).replace(squash(SUBAGENT_SENTENCE), "")
+
+
+FORBIDDEN_WORDS = (r"WebFetch", r"WebSearch", r"mcp__", r"\bEdit\b", r"\bgit\b")
+
+
+def forbidden_hits(text: str) -> list[str]:
+    body = denial_free(text)
+    return [word for word in FORBIDDEN_WORDS if re.search(word, body)]
+
+
+def test_a_denial_sentence_with_an_exception_is_not_exempt_from_the_scan() -> None:
+    assert forbidden_hits("Never use the Agent tool, except WebFetch is fine.") == ["WebFetch"]
+    assert forbidden_hits("Never call Edit on the input.") == [r"\bEdit\b"]
+    assert forbidden_hits(f"Run one thing. {SUBAGENT_SENTENCE}") == []
 
 
 def test_the_skill_never_grants_more_than_the_interface_allows() -> None:
     text = skill_text()
-    body = denial_free(text)
-    for forbidden in (r"WebFetch", r"WebSearch", r"mcp__", r"\bEdit\b", r"\bgit\b"):
-        assert not re.search(forbidden, body), forbidden
+    assert forbidden_hits(text) == []
     assert "<nonce>" not in text  # the nonce is never in the skill: it comes with each run
     assert not re.search(r"[0-9a-f]{32}", text)
     # The only claude-session command named is the report call, and Bash is granted for it alone.
@@ -388,8 +427,9 @@ NETWORK_FAILURE_MARKERS = (
     "failed to fetch",
     "dns error",
     "error sending request",
-    "connection",
-    "timed out",
+    "connection refused",
+    "connection reset",
+    "tcp connect error",
 )
 PASSED_THROUGH = (
     "HTTP_PROXY",
@@ -424,6 +464,10 @@ def test_the_network_failure_classifier_separates_the_two_kinds_of_stderr() -> N
     assert is_network_failure("Network was disabled")
     assert not is_network_failure("error: Failed to build `gatectl`\nModuleNotFoundError: x")
     assert not is_network_failure("hatchling: file not found: plugin/missing.json")
+    assert is_network_failure("error: tcp connect error: Connection refused (os error 111)")
+    assert is_network_failure("error: connection reset by peer while fetching the index")
+    assert not is_network_failure("error: build failed\nAssertionError: connection pool empty")
+    assert not is_network_failure("hook timed out after 30s while compiling the extension")
 
 
 def test_the_built_wheel_contains_the_placeholders_the_profile_and_the_skill(
