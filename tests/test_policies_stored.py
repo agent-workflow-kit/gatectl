@@ -69,6 +69,18 @@ def test_the_stored_view_is_golden(
             cause="set",
             fingerprint=fixed,
         )
+    from tests.history_util import did, put_decision, put_outcome
+
+    for n in (1, 2):  # two clean, human-confirmed allows: n = 2, k = 0
+        put_decision(
+            state_dir,
+            did(n),
+            policy="auto-merge",
+            fingerprint=fixed,
+            case_key=f"{n:064x}",
+            checks=[],
+        )
+        put_outcome(state_dir, did(n), "agree", actor="human:ann")
     assert main(["policies", "--config", config, "--json"]) == 0
     golden.assert_output("policies", capsys.readouterr().out)
 
@@ -263,14 +275,19 @@ def test_rows_of_a_removed_policy_are_not_listed_and_return_with_the_name(
     assert back["effective_state"] == "off" and back["initial_state"] == "shadow"
 
 
-def test_records_stay_empty_until_stats_lands(
+def test_records_come_from_the_decision_history(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], state_dir: Path
 ) -> None:
     from tests.history_util import put_decision
 
-    put_decision(state_dir, "gd-aakkkkkkkkkk", policy="p")
-    _, doc, _ = view(capsys, make(tmp_path))
-    assert only(doc)["records"] == []  # TODO(#29) fills them
+    config = make(tmp_path)
+    put_decision(
+        state_dir, "gd-aakkkkkkkkkk", policy="p", fingerprint=current_fingerprint(config, "p")
+    )
+    _, doc, _ = view(capsys, config)
+    (record,) = only(doc)["records"]
+    assert (record["policy"], record["repo"], record["current"]) == ("p", None, True)
+    assert record["recommend"] == "not_yet" and record["decisions"]["allow"] == 1
 
 
 def test_hostile_stored_text_in_a_state_row_is_refused_never_echoed(

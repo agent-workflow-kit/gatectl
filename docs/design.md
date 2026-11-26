@@ -150,7 +150,8 @@ Not probed live, by design: an end reason `timeout` on a `done` run and exit 13 
 | `slots.py` | agent slot leases: acquire (dead holders swept in the same `BEGIN IMMEDIATE`), bounded wait, release, renew, listing for `reconcile` |
 | `agentcache.py` | the agent result cache: key derivation (JSON-array encoding), `input.ignore` hashing, get/put with read-time expiry and strict validation of stored rows |
 | `store.py` | SQLite in WAL mode, additive-only migrations, decisions, outcomes, state rows with revisions, case keys, cache, slot leases and the maintenance leases of `reconcile` and `prune` |
-| `stats.py` | counts, the effective-outcome rule, the Clopper-Pearson bound by bisection |
+| `stats.py` | the Clopper-Pearson bound by bisection (stdlib only: the binomial CDF is the regularized incomplete beta function, a `lgamma` continued fraction; no scipy, no new dependency; tests pin it against an exact `fractions` reference) and the recommendation table |
+| `statscmd.py` | `stats` and the `policies` records: SQL aggregates over `state.db` (cases, effective outcomes through the one `_EFFECTIVE` expression of `history.py`), read-only |
 | `audit.py` | appends to `audit.jsonl` and `log.jsonl` |
 | `sanitize.py` | the untrusted-text sanitizer (marker replacement, length caps); the `Cn` (unassigned) category depends on the interpreter's Unicode database (Python 3.12 has 15.0, 3.13 has 15.1), a difference accepted for newly assigned code points |
 | `ids.py` | identifier grammars, decision-id generation and prefix parsing, actors, durations |

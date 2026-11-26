@@ -15,7 +15,7 @@ import argparse
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from gatectl import decisions, engine, export, outcomecmd, policies, setcmd, validate
+from gatectl import decisions, engine, export, outcomecmd, policies, setcmd, statscmd, validate
 from gatectl.context import Context, Result
 from gatectl.errors import InternalError
 
@@ -118,7 +118,7 @@ SPECS: tuple[CommandSpec, ...] = (
 )
 
 # Command name -> handler. A command with no entry fails with "command not implemented".
-# TODO(#29, #32, #33, #34): each implementing issue registers its
+# TODO(#32, #33, #34): each implementing issue registers its
 # handler here, one line per command.
 HANDLERS: dict[str, Handler] = {
     "check": engine.handle,
@@ -128,6 +128,7 @@ HANDLERS: dict[str, Handler] = {
     "policies": policies.handle,
     "set": setcmd.handle,
     "show": decisions.handle_show,
+    "stats": statscmd.handle,
     "validate": validate.handle,
 }
 
