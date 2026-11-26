@@ -664,6 +664,14 @@ class Store:
         except sqlite3.Error as exc:
             raise _translate(exc) from None
 
+    def execute(self, sql: str, args: Sequence[object] = ()) -> int:
+        """Run one write statement (inside ``write()``) and return the rows it changed. Fixed SQL
+        text and bound parameters only; a SQLite failure is a fixed-text error."""
+        try:
+            return self.con.execute(sql, args).rowcount
+        except sqlite3.Error as exc:
+            raise _translate(exc) from None
+
     @contextmanager
     def snapshot(self) -> Iterator[None]:
         """One read transaction: every ``query`` inside sees the database as of the first one

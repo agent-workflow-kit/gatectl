@@ -116,6 +116,8 @@ Still to verify: a live sandbox containment attack, the lifeline watchdog handsh
 | `tmptree.py` | `tmp/<decision_id>/` creation (0700, `owner` JSON file first: `pid`, `start`, `boot_id`), `s-<n>/` directories and the descriptor-walking removal that refuses anything unexpected (its parent is opened without following a link first; every failure is `UnsafeTree`, which `run_script_check` turns into `workdir_left`; the state directory is vetted like `store.py` vets it) |
 | `rules.py` | the closed rule evaluator, including the non-backtracking glob matcher and its size caps |
 | `agent.py` | the fenced input and prompt files, the claude-session calls (`start`, `exec --session-id`, `status`, `list`, `stop`, `forget`), artifact validation, the 64 KiB input cap, cache use, slots, cleanup, the probe |
+| `slots.py` | agent slot leases: acquire (dead holders swept in the same `BEGIN IMMEDIATE`), bounded wait, release, renew, listing for `reconcile` |
+| `agentcache.py` | the agent result cache: key derivation (JSON-array encoding), `input.ignore` hashing, get/put with read-time expiry and strict validation of stored rows |
 | `store.py` | SQLite in WAL mode, additive-only migrations, decisions, outcomes, state rows with revisions, case keys, cache, slot leases and the maintenance leases of `reconcile` and `prune` |
 | `stats.py` | counts, the effective-outcome rule, the Clopper-Pearson bound by bisection |
 | `audit.py` | appends to `audit.jsonl` and `log.jsonl` |
