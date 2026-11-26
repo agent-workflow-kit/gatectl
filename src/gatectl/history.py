@@ -17,8 +17,8 @@ automatic ``agree`` never counts.
 The check engine writes ``checks_json``. Its entries are the ``check_entry`` shape of
 ``schemas/defs.json``; an agent entry that reused a cached result also carries
 ``cache_key``, the ``agent_cache.key`` it read, which ``show`` follows to the decision that
-produced the result (``cache_source``) and never prints. TODO(#24): the agent run is the
-producer of ``cache_key``.
+produced the result (``cache_source``) and never prints. The engine (``_agent_entry``) writes
+it for a reused result only.
 """
 
 from __future__ import annotations

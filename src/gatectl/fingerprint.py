@@ -304,6 +304,12 @@ def definition(
     return result
 
 
+def fingerprint_of(defined: dict[str, Any]) -> str:
+    """``sha256:`` plus the SHA-256 of the canonical JSON of an effective ``definition``."""
+    text = canonical_input(defined)
+    return "sha256:" + hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
 def fingerprint(
     name: str,
     policy: Policy,
@@ -314,7 +320,7 @@ def fingerprint(
     monotonic: Callable[[], float] = time.monotonic,
 ) -> str:
     """``sha256:`` plus the SHA-256 of the canonical JSON of the effective definition."""
-    text = canonical_input(
+    return fingerprint_of(
         definition(
             name,
             policy,
@@ -324,7 +330,6 @@ def fingerprint(
             monotonic=monotonic,
         )
     )
-    return "sha256:" + hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
 def fingerprint_for(

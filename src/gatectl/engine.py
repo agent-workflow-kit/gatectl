@@ -26,9 +26,14 @@ Deadline. ``Context.started`` is the monotonic start of the process. ``R`` (``_b
 deadline minus now minus ``defaults.record_reserve``; a rule check never looks at it, a script
 check starts only while it is above 0 and gets the smaller of its own timeout and ``R``.
 
-Seams: agent checks are not implemented yet (TODO(#24): the run sequence; until then an agent
-check that would run escalates ``check_error``, never allows), and the detached ``post-decision``
-hook supervisor starts after the descriptors are pointed at ``/dev/null`` (``Result.after_detach``;
+Agent checks (``_agent_entry``) follow Deadline: cache lookup, ``agent.min_start_budget``, slot
+wait, the same budget test again, then the run (``agent.run_session``). Every failure on the way
+is an ``escalate`` entry; a verdict is only as good as ``agentjudge.judge`` (TODO(#25): until it
+lands every completed run escalates ``check_error``). A validated verdict of a ``done`` run is
+written to the cache after the decision is recorded (``_record``), under that decision's id.
+
+Seams: SIGTERM, SIGINT and SIGHUP (TODO(#35)), and the detached ``post-decision`` hook supervisor
+that starts after the descriptors are pointed at ``/dev/null`` (``Result.after_detach``;
 ``hooks.start_detached``).
 """
 
@@ -39,9 +44,26 @@ import os
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from gatectl import audit, drift, history, hooks, ids, inputs, plan, rules, runner, tmptree
+from gatectl import (
+    agent,
+    agentcache,
+    agentfiles,
+    agentjudge,
+    audit,
+    drift,
+    history,
+    hooks,
+    ids,
+    inputs,
+    plan,
+    rules,
+    runner,
+    slots,
+    tmptree,
+)
 from gatectl import fingerprint as fingerprint_mod
 from gatectl import store as store_mod
 from gatectl.clock import now_ts
@@ -60,7 +82,6 @@ from gatectl.setcmd import _os_user_name
 STDIN_FD = 0
 DETAIL_CAP = history.DETAIL_CAP
 SHADOW_ERROR_MESSAGE = "could not record the decision"
-AGENT_NOT_IMPLEMENTED = "agent checks are not implemented"
 _SEVERITY = {"allow": 0, "escalate": 1, "deny": 2}
 _STRICTNESS = {"off": 0, "shadow": 1, "enforced": 2}
 _EXIT_ENFORCED = {"allow": 0, "deny": 11, "escalate": 13}
@@ -217,6 +238,12 @@ class Env:
     gateway: Gateway = field(default_factory=SubprocessGateway)
     monotonic: Callable[[], float] = time.monotonic
     environ: Mapping[str, str] = field(default_factory=lambda: os.environ)
+    limits: agent.Limits = field(default_factory=agent.Limits)
+
+
+def default_env() -> Env:
+    """The environment of a real ``check`` (a seam for tests)."""
+    return Env()
 
 
 def handle(ctx: Context) -> Result:
@@ -225,7 +252,7 @@ def handle(ctx: Context) -> Result:
         from gatectl import dryrun
 
         return dryrun.handle(ctx)
-    return run(ctx, Env())
+    return run(ctx, default_env())
 
 
 # --- the run -----------------------------------------------------------------------------
@@ -291,6 +318,9 @@ class _Run:
     decision_id: str | None = None
     script_n: int = 0
     out_of_budget: bool = False  # a script check was refused for want of budget (not its text)
+    # (cache key, validated verdict, ttl) of fresh agent results, written once the decision is
+    # recorded (the row names that decision as its producer).
+    cache_puts: list[tuple[str, agentcache.Verdict, timedelta]] = field(default_factory=list)
 
     @property
     def state(self) -> str:
@@ -553,20 +583,194 @@ def _run_checks(run: _Run) -> list[Entry]:
 
 
 def _agent_entry(run: _Run, check: AgentCheck) -> Entry:
-    # TODO(#24): the agent run sequence (cache, slot, claude-session). Until it lands an agent
-    # check that would run escalates; it can never allow. The sequence, in order:
-    # - agentfiles.load_instruction(..., fingerprint.definition()'s instruction_sha256), then
-    #   agentfiles.prepare(), both before a slot is taken;
-    # - tool_missing for a missing bundled plugin, skill plugin or SKILL.md, before any session
-    #   and before write(), through the runner's exec-failure path (issue #22, comment 2);
-    # - after the slot: tmptree.create_decision_dir, then PreparedFiles.write();
-    # - AgentFiles.delete() on every exit path (it can raise OSError when a file stays);
-    # - map AgentFilesError.reason, tmptree.UnsafeTree, FileExistsError and OSError to outcomes
-    #   without putting exception text or paths in the audit line or detail, and never log or
-    #   serialize an AgentFiles (it holds the nonce).
-    return Entry(
-        check.name, "agent", "escalate", "check_error", AGENT_NOT_IMPLEMENTED, 0, None, False
+    """One agent check (Deadline, an agent check's steps). Never raises for a failure of the
+    run: every failure is an ``escalate`` entry. The one exception is the documented
+    ``InternalError`` of the store (a tampered cache row: exit 1)."""
+    started = run.env.monotonic()
+
+    def finish(
+        verdict: str,
+        reason: str | None,
+        detail: str | None,
+        *,
+        confidence: float | None = None,
+        reused: bool = False,
+        cache_key: str | None = None,
+    ) -> Entry:
+        ms = max(0, int((run.env.monotonic() - started) * 1000))
+        return Entry(
+            check.name, "agent", verdict, reason, detail, ms, confidence, reused, cache_key
+        )
+
+    try:
+        return _run_agent(run, check, finish)
+    except InternalError:
+        raise
+    except Exception:  # a bug, never a verdict: fail closed with fixed text
+        _log("warning", "warn", message="an agent check could not run", policy=run.name,
+             scope=run.scope.scope, data={"check": check.name})  # fmt: skip
+        return finish("escalate", "check_error", "agent check failed")
+
+
+_Finish = Callable[..., Entry]
+
+
+def _judged(finish: _Finish, judgement: agentjudge.Judgement, **extra: Any) -> Entry:
+    confidence = None if judgement.confidence is None else float(judgement.confidence)
+    return finish(
+        judgement.verdict, judgement.reason, judgement.detail, confidence=confidence, **extra
     )
+
+
+def _run_agent(run: _Run, check: AgentCheck, finish: _Finish) -> Entry:
+    env, shared = run.env, run.loaded.shared
+    bundled = fingerprint_mod.bundled_plugin_dir()
+    cfg = agent.resolve_settings(check, shared, run.policy.cache_ttl, bundled)
+    obj = run.obj
+    assert obj is not None  # an agent check runs only for a usable input
+    key: str | None = None
+    if cfg.cache_ttl > timedelta(0):
+        ignore = run.policy.input.ignore if run.policy.input is not None else []
+        key = agentcache.cache_key(
+            fingerprint=run.fingerprint,
+            check_name=check.name,
+            scope=run.scope.scope,
+            input_hash=agentcache.input_hash_for_key(obj, ignore),
+        )
+    store = store_mod.open_store(create=True, busy_timeout=run.reserve)
+    assert store is not None
+    with store:
+        # 1. cache lookup: a hit needs no budget and no slot
+        if key is not None and not run.ctx.args.no_cache:
+            hit = agentcache.get(store, key, now=datetime.now(UTC), ttl=cfg.cache_ttl)
+            if hit is not None:
+                reused = agentjudge.from_verdict(hit.verdict, cfg.threshold)
+                return _judged(finish, reused, reused=True, cache_key=key)
+
+        # Before any slot or file: what the run needs must be readable and found.
+        defined = fingerprint_mod.definition(
+            run.name, run.policy, shared, deadline=run.deadline, monotonic=env.monotonic
+        )
+        if fingerprint_mod.fingerprint_of(defined) != run.fingerprint:
+            return finish("escalate", "check_error", "definition changed during the check")
+        expected = next(
+            c["instruction_sha256"] for c in defined["checks"] if c["name"] == check.name
+        )
+        try:
+            instruction = agentfiles.load_instruction(
+                check.instruction, check.instruction_file, expected
+            )
+            prepared = agentfiles.prepare(obj, instruction, input_max_bytes=cfg.input_max_bytes)
+        except agentfiles.AgentFilesError as e:
+            return finish("escalate", e.reason, e.detail)
+        try:
+            plugin_dirs = agent.find_plugin_dirs(cfg.skill, shared.agent.plugin_dirs, bundled)
+        except agent.ToolMissing as e:
+            return finish("escalate", "tool_missing", e.detail)
+        session_cmd = run.loaded.session_cmd_resolved()
+        if session_cmd is None:
+            return finish(
+                "escalate", "tool_missing", agent.missing_session_detail(shared.session_cmd)
+            )
+
+        # 2. the launch window L; 3. a slot; 4. L again once the slot is held
+        def window() -> float:
+            return run.budget() - agent.LAUNCH_OVERHEAD
+
+        if window() < cfg.min_start_budget:
+            return finish("escalate", "budget_exhausted", "not enough time left to start")
+        decision_id = run.new_id()
+        left = max(run.deadline - env.monotonic(), 0.0)
+        try:
+            slot = slots.wait_for_slot(
+                store,
+                decision_id=decision_id,
+                max_parallel=cfg.max_parallel,
+                expires_at=datetime.now(UTC) + timedelta(seconds=left + 60.0),
+                launch_window=window,
+                min_start_budget=cfg.min_start_budget,
+                monotonic=env.monotonic,
+            )
+        except InternalError:
+            return finish("escalate", "check_error", "agent slot unavailable")
+        if slot is None:
+            return finish("escalate", "busy", "no agent slot became free")
+        with slots.held(store, slot):
+            if window() < cfg.min_start_budget:
+                return finish("escalate", "budget_exhausted", "not enough time left to start")
+            n = agent.launch_seconds(cfg.timeout, window())
+            try:
+                decision_dir = tmptree.create_decision_dir(audit.state_dir(), decision_id)
+                files = prepared.write(decision_dir)
+            except (tmptree.UnsafeTree, OSError, ValueError):  # no text of the error is kept
+                return finish("escalate", "check_error", "agent files could not be written")
+            try:
+                launch = agent.Launch(
+                    session_cmd=tuple(session_cmd),
+                    skill=cfg.skill,
+                    prompt_file=str(files.prompt_path),
+                    input_file=str(files.input_path),
+                    outcome_file=str(decision_dir / agent.OUTCOME_NAME),
+                    plugin_dirs=plugin_dirs,
+                    timeout_s=n,
+                    policy=run.name,
+                    decision_id=decision_id,
+                    state_tag=agent.state_tag(audit.state_dir()),
+                    permission_profile=cfg.permission_profile,
+                    sandbox=cfg.sandbox,
+                    setting_sources=cfg.setting_sources,
+                    env_allowlist=cfg.env_allowlist,
+                    repo=None if run.scope.scope == STAR else run.scope.scope,
+                    model=cfg.model,
+                )
+                # TODO(#35): pass a ``cancel`` that turns true on SIGTERM, SIGINT and SIGHUP.
+                result = agent.run_session(
+                    env.gateway,
+                    launch,
+                    nonce=files.nonce,
+                    threshold=cfg.threshold,
+                    environ=env.environ,
+                    limits=env.limits,
+                    store=store,
+                    slot=slot,
+                    monotonic=env.monotonic,
+                )
+            finally:
+                _delete_agent_files(run, files)
+        for code in result.warnings:
+            _log(
+                "warning", "warn", message=f"agent_{code}", policy=run.name,
+                scope=run.scope.scope, decision_id=decision_id, data={"check": check.name},
+            )  # fmt: skip
+        judgement = result.judgement
+        if key is not None and judgement.cacheable and judgement.validated is not None:
+            run.cache_puts.append((key, judgement.validated, cfg.cache_ttl))
+        return _judged(finish, judgement)
+
+
+def _delete_agent_files(run: _Run, files: agentfiles.AgentFiles) -> None:
+    """Delete the run's files (they hold the untrusted input and the nonce). A file that stays
+    is a ``workdir_left`` warning and never changes the verdict; the whole directory is removed
+    again when the checks end."""
+    try:
+        files.delete()
+        tmptree.remove_private_files(files.directory, [agent.OUTCOME_NAME])
+    except Exception:
+        _log("warning", "warn", message="workdir_left", policy=run.name, scope=run.scope.scope,
+             decision_id=run.decision_id)  # fmt: skip
+
+
+def _write_cache(run: _Run, store: store_mod.Store, decision_id: str) -> None:
+    """Store the fresh validated verdicts under the decision that produced them. A cache that
+    cannot be written never changes the decision."""
+    for key, verdict, ttl in run.cache_puts:
+        try:
+            agentcache.put(
+                store, key, verdict, decision_id=decision_id, now=datetime.now(UTC), ttl=ttl
+            )
+        except Exception:
+            _log("warning", "warn", message="agent cache write failed", policy=run.name,
+                 scope=run.scope.scope, decision_id=decision_id)  # fmt: skip
 
 
 def _remove_tmp(run: _Run) -> None:
@@ -681,6 +885,8 @@ def _record(
 
         # No retry of mine around this: Store.transact retries only a lock never obtained.
         resolved, when = store.transact(body)
+        if resolved.state != "off":
+            _write_cache(run, store, decision_id)
 
     if resolved.state == "off":  # a set to off committed while the checks ran: nothing recorded
         run.resolved = resolved
