@@ -235,7 +235,7 @@ def _write_new(dir_fd: int, name: str, data: bytes) -> None:
 
 
 def _open_mine(directory: Path) -> int:
-    """Open an existing directory without following a link; it must be owned by this user."""
+    """Open an existing directory without following a link; owned by us, no group or other bits."""
     try:
         fd = os.open(directory, _DIR_FLAGS)
     except OSError as e:
@@ -243,6 +243,9 @@ def _open_mine(directory: Path) -> int:
     if not _mine(os.fstat(fd)):
         os.close(fd)
         raise _unsafe(str(directory), "not owned by this user")
+    if stat.S_IMODE(os.fstat(fd).st_mode) & 0o077:
+        os.close(fd)
+        raise _unsafe(str(directory), "accessible by others")
     return fd
 
 
@@ -267,7 +270,10 @@ def write_private_files(directory: Path, files: list[tuple[str, bytes]]) -> None
 
 
 def unlink_names(dir_fd: int, names: list[str]) -> None:
-    """Unlink each name (a link is unlinked, never followed); missing names are ignored."""
+    """Best effort: unlink each name (a link is unlinked, never followed); every error is ignored.
+
+    Used while a failed write unwinds, where the original error must win.
+    """
     for name in names:
         try:
             os.unlink(name, dir_fd=dir_fd)
@@ -276,17 +282,30 @@ def unlink_names(dir_fd: int, names: list[str]) -> None:
 
 
 def remove_private_files(directory: Path, names: list[str]) -> None:
-    """Delete the named files from ``directory``; a missing directory or file is fine."""
+    """Delete the named files from ``directory``; a missing directory or file is fine.
+
+    Every name is attempted. Any failure other than a missing file raises a fixed-text
+    ``OSError`` afterwards (no path or content in it): a file that is still there must be seen.
+    """
     try:
         fd = _open_mine(directory)
     except UnsafeTree:
         if not os.path.lexists(directory):
             return
         raise
+    failed = False
     try:
-        unlink_names(fd, names)
+        for name in names:
+            try:
+                os.unlink(name, dir_fd=fd)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                failed = True
     finally:
         os.close(fd)
+    if failed:
+        raise OSError("could not remove a private file")
 
 
 def _write_owner(dir_fd: int, label: str) -> None:

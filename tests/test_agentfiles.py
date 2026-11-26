@@ -206,7 +206,7 @@ def test_the_nonce_comes_from_the_os_random_source(monkeypatch: pytest.MonkeyPat
     assert p.nonce == "10" * 16
 
 
-def test_input_that_contains_the_would_be_ids_makes_new_ones_are_drawn(
+def test_input_that_contains_the_would_be_ids_gets_new_ones_drawn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seq = iter([b"\xaa" * 8, b"\xbb" * 16, b"\xcc" * 8, b"\xdd" * 16])
@@ -216,11 +216,21 @@ def test_input_that_contains_the_would_be_ids_makes_new_ones_are_drawn(
     assert parse_fenced(text)[0] == "cc" * 8 and p.nonce == "dd" * 16
 
 
+def test_when_every_draw_collides_with_the_input_the_check_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(agentfiles.secrets, "token_bytes", lambda n: b"\xaa" * n)
+    obj = {"v": "aaaaaaaaaaaaaaaa"}
+    with pytest.raises(AgentFilesError) as e:
+        prepare(obj, inst(), input_max_bytes=CAP)
+    assert (e.value.reason, e.value.detail) == ("check_error", "no unused fence id")
+
+
 def test_the_prompt_has_the_nonce_and_the_input_has_the_fence_id_only() -> None:
     text, p = render({"a": 1})
     assert p.nonce not in text
     assert p.nonce in p.prompt_text
-    assert parse_fenced(text)[0] not in p.nonce
+    assert parse_fenced(text)[0] not in p.prompt_text
 
 
 # --- size caps -----------------------------------------------------------------------------
@@ -448,7 +458,8 @@ def test_prompt_keeps_a_hostile_instruction_text_after_the_rule() -> None:
 def test_prompt_ends_with_exactly_one_newline() -> None:
     for text in ("x", "x\n", "x\n\n"):
         p = prepare({"a": 1}, inst(text), input_max_bytes=CAP)
-        assert p.prompt_text.endswith(text.rstrip("\n") + "\n") or p.prompt_text.endswith(text)
+        assert p.prompt_text.endswith("\n") and not p.prompt_text.endswith("\n\n")
+        assert p.prompt_text.endswith(text.rstrip("\n") + "\n")
 
 
 # --- no leakage ----------------------------------------------------------------------------
@@ -589,3 +600,39 @@ def test_the_digest_equals_what_the_fingerprint_hashes(tmp_path: Path) -> None:
     path = _file(tmp_path, "policy é\n".encode())
     fp = _Files(None, time.monotonic).hash(path, cap=INSTRUCTION_CAP, over="unreadable")
     assert load_instruction(None, path, fp).sha256 == fp
+
+
+def test_delete_reports_a_file_it_could_not_remove_and_still_removes_the_other(
+    tmp_path: Path,
+) -> None:
+    d = create_decision_dir(tmp_path, ID)
+    _, p = render({"a": 1})
+    files = p.write(d)
+    os.unlink(d / INPUT_NAME)
+    (d / INPUT_NAME).mkdir()  # unlink of a directory fails
+    with pytest.raises(OSError) as e:
+        files.delete()
+    assert str(d) not in str(e.value) and files.nonce not in str(e.value)
+    assert not os.path.lexists(d / PROMPT_NAME)
+
+
+def test_delete_reports_failure_in_a_read_only_decision_dir(tmp_path: Path) -> None:
+    d = create_decision_dir(tmp_path, ID)
+    _, p = render({"a": 1})
+    files = p.write(d)
+    d.chmod(0o500)
+    try:
+        with pytest.raises(OSError):
+            files.delete()
+        assert os.path.lexists(d / PROMPT_NAME)
+    finally:
+        d.chmod(0o700)
+
+
+def test_write_refuses_a_decision_dir_open_to_others(tmp_path: Path) -> None:
+    d = create_decision_dir(tmp_path, ID)
+    d.chmod(0o777)
+    _, p = render({"a": 1})
+    with pytest.raises(UnsafeTree):
+        p.write(d)
+    assert sorted(x.name for x in d.iterdir()) == ["owner"]

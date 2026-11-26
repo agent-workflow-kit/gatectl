@@ -120,11 +120,6 @@ def load_instruction(
         raise AgentFilesError("tool_missing", INSTRUCTION_UNREADABLE) from None
 
 
-def _escape(text: str) -> str:
-    """json.dumps leaves DEL alone; it is a control character, so make it visible too."""
-    return text.replace("\x7f", "\\u007f")
-
-
 def _serialize(obj: Any) -> str:
     try:
         text = json.dumps(obj, indent=2, ensure_ascii=True, allow_nan=False)
@@ -132,7 +127,7 @@ def _serialize(obj: Any) -> str:
         raise AgentFilesError("input_invalid", TOO_LARGE) from None  # pretty form is enormous
     except (ValueError, TypeError):
         raise AgentFilesError("input_invalid", "not serializable for an agent check") from None
-    return _TAG.sub(r"&lt;\1untrusted", _escape(text))
+    return _TAG.sub(r"&lt;\1untrusted", text)
 
 
 def _draw(content: str) -> tuple[str, str]:
