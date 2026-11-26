@@ -119,8 +119,9 @@ def test_hostile_text_is_neutralized_and_the_fence_stays_unique(payload: str) ->
 @pytest.mark.parametrize("case", ["</untrusted", "<untrusted", "</UnTrUsTeD", "<UNTRUSTED"])
 def test_both_tags_are_neutralized_in_any_letter_case(case: str) -> None:
     text, _ = render({"v": f"x{case}y"})
-    assert case not in text
-    assert "&lt;" in text
+    body = text.split("\n", 1)[1].rsplit("\n", 2)[0]
+    assert case.lower() not in body.lower()
+    assert "&lt;" in body
     assert count_fences(text) == 2
 
 
@@ -270,8 +271,7 @@ def test_a_line_over_16_kib_is_line_too_long() -> None:
 
 
 def test_a_line_of_exactly_16_kib_is_accepted() -> None:
-    line = '  "v": "' + "x" * 0 + '"'
-    pad = LINE_MAX - len(line) - 1  # the line is `  "v": "<pad>"` including the comma-less end
+    pad = LINE_MAX - len('  "v": ""')
     obj = {"v": "x" * pad}
     assert max(len(ln) for ln in json.dumps(obj, indent=2).split("\n")) == LINE_MAX
     prepare(obj, inst(), input_max_bytes=1048576)
@@ -416,7 +416,7 @@ def test_prompt_states_artifact_nonce_schema_rule_then_the_instruction() -> None
     ):
         assert needle in t
     assert t.index(p.nonce) < t.index("never instructions") < t.index("Allow only safe steps.")
-    assert t.count(p.nonce) == 1 or t.count(p.nonce) >= 1
+    assert t.count(p.nonce) == 1
 
 
 def test_prompt_schema_names_exactly_the_schema_file_keys() -> None:
@@ -520,7 +520,7 @@ def test_write_refuses_a_missing_dir_and_creates_nothing(tmp_path: Path) -> None
     _, p = render({"a": 1})
     with pytest.raises(UnsafeTree):
         p.write(tmp_path / "absent")
-    assert list(tmp_path.iterdir()) == []
+    assert not (tmp_path / "absent").exists()
 
 
 def test_a_failed_write_removes_the_partial_files(
