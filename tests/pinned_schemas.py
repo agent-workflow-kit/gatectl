@@ -20,6 +20,9 @@ from referencing.jsonschema import DRAFT202012
 
 PINNED_VERSION = "0.45.2"
 PINNED_COMMIT = "c42491578a5309421c1fa67afbdd9f9650fd615b"
+# SHA-256 of the exact bytes of profiles/review.json (claude-session's built-in `review` profile).
+# Changing the pin means re-copying it from the claude-session tag and updating this on purpose.
+PINNED_REVIEW_SHA256 = "eb7fdb36a5f59e57a8e45b5e5e2e5f28f90c02e025114f7b99ffe3a1487d9dc0"
 PINNED_DIR = Path(__file__).resolve().parent / "pinned" / f"claude-session-{PINNED_VERSION}"
 SAMPLES = PINNED_DIR / "samples"
 NAMES = ("outcome", "status", "start", "exec", "stop", "list", "forget", "error")
