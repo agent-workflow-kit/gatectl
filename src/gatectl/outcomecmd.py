@@ -12,8 +12,10 @@ interface.md, Outcomes and the ``outcome`` command. The rules this module enforc
 * The record, the effective-outcome re-read, the optional drop row and every audit line are one
   ``Store.transact`` body. Nothing retries around it, so a second run cannot append a second line;
   an audit failure rolls everything back (exit 1).
-* The reason is untrusted: read with a byte cap, sanitized, cut to 1 KiB with a final ``…``,
-  stored in ``state.db`` only and never printed.
+* The reason is untrusted: read with a byte cap, sanitized, cut to 1 KiB with a final ``…`` and
+  stored in ``state.db``. It is never printed and the ``outcome`` audit line has no reason field;
+  on a drop, the ``state_change`` audit line carries the same sanitized, cut text in
+  ``result.reason``.
 """
 
 from __future__ import annotations
@@ -30,7 +32,6 @@ from gatectl.config import LoadedConfig, load_for_command
 from gatectl.context import Context, Result
 from gatectl.errors import InternalError, NotFoundError, UsageError
 from gatectl.sanitize import sanitize
-from gatectl.setcmd import _os_user_name
 
 STDIN_FD = 0
 REASON_MAX_BYTES = 1024
@@ -137,7 +138,7 @@ def handle(ctx: Context) -> Result:
     resolved = ids.resolve_actor(
         ctx.actor,
         stdin_tty=ctx.stdin_tty,
-        name=_os_user_name() if loaded.shared.me.name is None else loaded.shared.me.name,
+        name=ids.default_actor_name(loaded.shared.me.name),
     )
     actor = str(resolved.actor)
     signal: str = ctx.args.signal or ("human" if resolved.is_human else "auto")
@@ -267,11 +268,12 @@ def handle(ctx: Context) -> Result:
 
 def _drop_applies(store: store_mod.Store, loaded: LoadedConfig, d: _Decision) -> bool:
     """Whether the miss still belongs to the enforcement that gave the decision its state: the
-    policy is configured and the effective row of the decision's scope is that same row."""
+    policy is configured and the effective row of the decision's scope is that same row. A decision
+    with no ``state_rev`` (an indeterminate scope) never drops."""
     if d.policy not in loaded.policies:
         return False
     now = store.effective(d.policy, d.scope, _initial_state(loaded, d.policy))
-    return now.state == "enforced" and now.rev == d.state_rev
+    return d.state_rev is not None and now.state == "enforced" and now.rev == d.state_rev
 
 
 def _log_drop_skipped(done: _Done) -> None:

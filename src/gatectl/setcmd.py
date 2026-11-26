@@ -17,8 +17,6 @@ interface.md, State changes and Actors and human actions. The rules this module 
 
 from __future__ import annotations
 
-import os
-import pwd
 import time
 from typing import Any
 
@@ -52,13 +50,6 @@ HINT_REPO = (
     "This policy has no recorded decision for this repo; "
     "the repo spelling matches nothing seen yet."
 )
-
-
-def _os_user_name() -> str | None:
-    try:
-        return pwd.getpwuid(os.geteuid()).pw_name
-    except (KeyError, OSError):
-        return None
 
 
 def _check_usage(ctx: Context) -> tuple[str, str, str | None, bool]:
@@ -197,7 +188,7 @@ def handle(ctx: Context) -> Result:
         ctx.actor,
         stdin_tty=ctx.stdin_tty,
         # An empty configured name is sanitized to ``user``; only an absent one uses the OS name.
-        name=_os_user_name() if loaded.shared.me.name is None else loaded.shared.me.name,
+        name=ids.default_actor_name(loaded.shared.me.name),
     )
     reason = _read_reason(ctx.args.reason_file)
 

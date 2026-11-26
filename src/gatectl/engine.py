@@ -77,7 +77,6 @@ from gatectl.inputhash import input_sha256, input_sha256_raw
 from gatectl.inputs import InputInvalid, RawInput
 from gatectl.sanitize import sanitize
 from gatectl.scope import STAR, Scope, resolve_effective, resolve_scope
-from gatectl.setcmd import _os_user_name
 
 STDIN_FD = 0
 DETAIL_CAP = history.DETAIL_CAP
@@ -264,7 +263,7 @@ def _strictest(*states: str) -> str:
 
 def _actor(ctx: Context, loaded: LoadedConfig) -> ids.ResolvedActor:
     """The effective actor. Never fails: a bad ``me.name`` is sanitized, not refused."""
-    name = _os_user_name() if loaded.shared.me.name is None else loaded.shared.me.name
+    name = ids.default_actor_name(loaded.shared.me.name)
     return ids.resolve_actor(ctx.actor, stdin_tty=ctx.stdin_tty, name=name)
 
 

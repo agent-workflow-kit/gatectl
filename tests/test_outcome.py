@@ -93,6 +93,40 @@ def test_the_effective_rule_matches_the_model_for_every_sequence_up_to_length_5(
             assert history.effective_outcome(s, decision_id) == model(seq), seq
 
 
+# (actor, actor_kind, outcome): the rule keys on the actor prefix, never on the kind column.
+ODD_EVENTS = [
+    ("human:a", "human", "agree"),
+    ("human:a", "automatic", "agree"),  # kind disagrees with the prefix: still counts
+    ("auto:b", "human", "agree"),  # kind disagrees with the prefix: never counts
+    ("auto:unknown", "unattributed", "agree"),
+    ("humane:x", "automatic", "agree"),
+    ("human", "human", "agree"),  # no colon: not a human actor
+    ("human:a", "human", "disagree"),
+    ("auto:b", "human", "disagree"),
+    ("auto:unknown", "unattributed", "disagree"),
+    ("human", "automatic", "disagree"),
+]
+
+
+def test_the_effective_rule_keys_on_the_actor_prefix_not_the_kind_or_a_lookalike(
+    state_dir: Path,
+) -> None:
+    sequences = [s for n in range(4) for s in itertools.product(ODD_EVENTS, repeat=n)]
+    ids = {}
+    for n, seq in enumerate(sequences):
+        decision_id = seq_id(n)
+        ids[decision_id] = seq
+        put_decision(state_dir, decision_id)
+        for actor, kind, verdict in seq:
+            put_outcome(state_dir, decision_id, verdict, actor=actor, kind=kind)
+    s = store.open_store(state_dir, create=False)
+    assert s is not None
+    with s:
+        for decision_id, seq in ids.items():
+            expected = model([(actor, verdict) for actor, _, verdict in seq])
+            assert history.effective_outcome(s, decision_id) == expected, seq
+
+
 def test_the_spec_example_human_agree_auto_disagree_human_agree_ends_agree(
     capsys: pytest.CaptureFixture[str], config: str, state_dir: Path
 ) -> None:
