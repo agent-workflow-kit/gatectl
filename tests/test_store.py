@@ -487,6 +487,22 @@ def test_write_outside_a_transaction_is_refused(sdir: Path) -> None:
     s.close()
 
 
+def test_execute_outside_a_transaction_is_refused(sdir: Path) -> None:
+    s = opened(sdir)
+    with pytest.raises(RuntimeError):
+        s.execute("DELETE FROM agent_cache")
+    s.close()
+
+
+def test_execute_with_a_lone_surrogate_is_a_fixed_text_error_without_echo(sdir: Path) -> None:
+    s = opened(sdir)
+    with s.write(), pytest.raises(InternalError) as info:
+        s.execute("DELETE FROM agent_cache WHERE key = ?", ("\ud800CANARY-7f3a9c",))
+    assert "CANARY" not in str(info.value) and "CANARY" not in repr(info.value)
+    assert "\ud800" not in str(info.value)
+    s.close()
+
+
 @pytest.mark.parametrize(
     "kw",
     [

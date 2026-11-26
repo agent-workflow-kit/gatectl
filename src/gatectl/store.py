@@ -665,12 +665,19 @@ class Store:
             raise _translate(exc) from None
 
     def execute(self, sql: str, args: Sequence[object] = ()) -> int:
-        """Run one write statement (inside ``write()``) and return the rows it changed. Fixed SQL
-        text and bound parameters only; a SQLite failure is a fixed-text error."""
+        """Run one write statement inside ``write()`` and return the rows it changed. Fixed SQL
+        text and bound parameters only. Outside a transaction it raises ``RuntimeError`` (the
+        connection autocommits, so the statement would escape the caller's atomicity); a SQLite
+        failure, or a parameter that cannot be encoded (a lone surrogate), is a fixed-text
+        error that never echoes the value."""
+        if not self.con.in_transaction:
+            raise RuntimeError("a statement is executed inside a write transaction")
         try:
             return self.con.execute(sql, args).rowcount
         except sqlite3.Error as exc:
             raise _translate(exc) from None
+        except (UnicodeError, ValueError, OverflowError):
+            raise _fail(_UNUSABLE) from None
 
     @contextmanager
     def snapshot(self) -> Iterator[None]:

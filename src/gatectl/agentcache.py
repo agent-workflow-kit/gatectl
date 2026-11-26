@@ -34,7 +34,7 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from gatectl import clock, ids
@@ -66,6 +66,18 @@ _SELECT = (
 )
 
 
+def _confidence_ok(conf: object) -> bool:
+    """An int or float in [0, 1]. An int is range-checked as an int: ``math.isfinite`` would
+    convert it to a float first, which raises ``OverflowError`` for a huge one."""
+    if isinstance(conf, bool):
+        return False
+    if isinstance(conf, int):
+        return 0 <= conf <= 1
+    if isinstance(conf, float):
+        return math.isfinite(conf) and 0 <= conf <= 1
+    return False
+
+
 @dataclass(frozen=True)
 class Verdict:
     """The validated artifact fields that are cached. Construction validates strictly."""
@@ -79,10 +91,7 @@ class Verdict:
         if not (
             isinstance(self.decision, str)
             and self.decision in DECISIONS
-            and isinstance(conf, int | float)
-            and not isinstance(conf, bool)
-            and math.isfinite(conf)
-            and 0 <= conf <= 1
+            and _confidence_ok(conf)
             and isinstance(self.reasons, tuple)
             and len(self.reasons) <= MAX_REASONS
             and all(isinstance(r, str) and len(r) <= MAX_REASON_CHARS for r in self.reasons)
@@ -186,7 +195,7 @@ def _parse_artifact(text: str) -> Verdict:
                 sanitize(r, MAX_REASON_CHARS) if isinstance(r, str) else r for r in doc["reasons"]
             ),
         )
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         raise _bad() from None
 
 
@@ -238,7 +247,8 @@ def put(
     ttl: timedelta,
 ) -> bool:
     """Store (or refresh) the verdict under ``key``; returns False when nothing was written
-    (``ttl`` zero or less, or a time that does not fit the timestamp form).
+    (``ttl`` zero or less, or an expiry that does not fit the timestamp form). ``now`` must be
+    aware: a naive one is a ``ValueError``, as in ``get``.
 
     One transaction: the row is replaced (so the producer is the latest writer), rows past their
     expiry are dropped, and the table is cut to ``MAX_ROWS`` newest rows.
@@ -250,8 +260,8 @@ def put(
         raise ValueError("decision_id must be a gd- decision id")
     if ttl <= timedelta(0):
         return False
+    now_ts = clock.format_ts(now)  # ValueError for a naive ``now``, as in ``get``
     try:
-        now_ts = clock.format_ts(now.astimezone(UTC))
         expires_ts = clock.format_ts(now + ttl)
     except (OverflowError, ValueError):
         return False
@@ -274,10 +284,13 @@ def put(
             (key, now_ts, expires_ts, artifact, decision_id),
         )
         store.execute("DELETE FROM agent_cache WHERE expires_at <= ? AND key <> ?", (now_ts, key))
+        # the row just written is never evicted; rows dated after ``now`` (the clock stepped
+        # back) go first, then the oldest
         store.execute(
-            "DELETE FROM agent_cache WHERE key IN (SELECT key FROM agent_cache"
-            " ORDER BY time ASC, key ASC LIMIT max(0, (SELECT COUNT(*) FROM agent_cache) - ?))",
-            (MAX_ROWS,),
+            "DELETE FROM agent_cache WHERE key IN (SELECT key FROM agent_cache WHERE key <> ?"
+            " ORDER BY (time > ?) DESC, time ASC, key ASC"
+            " LIMIT max(0, (SELECT COUNT(*) FROM agent_cache) - ?))",
+            (key, now_ts, MAX_ROWS),
         )
         return True
 

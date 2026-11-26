@@ -33,7 +33,7 @@ from datetime import UTC, datetime
 
 from gatectl import clock, ids, procinfo
 from gatectl.errors import InternalError
-from gatectl.store import Store, cut_sql, uncut
+from gatectl.store import Store, StoreBusyError, cut_sql, uncut
 
 MAX_PARALLEL_LIMIT = 32  # the config bound of ``agent.max_parallel``
 POLL_SECONDS = 0.25
@@ -43,7 +43,10 @@ _PID_MAX = 2**31 - 1
 _START = re.compile(r"[0-9]{1,20}", re.ASCII)
 _BOOT = re.compile(r"[0-9A-Za-z._-]{1,64}", re.ASCII)
 _CHARS = 140
-_UNKNOWN_START = "0"  # a platform with no start-time method (TODO(#37)): rows read as dead
+# TODO(#37): where the start time is unknown (no /proc, e.g. macOS) the placeholders below make
+# every row, this process's own included, read as dead, so ``max_parallel`` is NOT enforced there;
+# deferred until the macOS start-time method lands (non-blocking: Linux is the supported target).
+_UNKNOWN_START = "0"
 _UNKNOWN_BOOT = "unknown"
 
 _SELECT = (
@@ -96,6 +99,8 @@ def holder_alive(pid: object, start: object, boot_id: object) -> bool:
 
 
 def current_holder(decision_id: str) -> Slot:
+    # TODO(#37): with no start time the placeholder row below is judged dead by holder_alive, so
+    # the slot cap is not enforced on a platform without /proc (see _UNKNOWN_START).
     start = procinfo.start_time(os.getpid())
     return Slot(
         pid=os.getpid(),
@@ -149,7 +154,17 @@ def _ts_or_none(value: object) -> str | None:
     return None
 
 
-def _read(store: Store, now_ts: str, limit: int) -> list[_Row]:
+_Identity = tuple[int, str, str]  # (pid, start time, boot id): unique to one process
+
+
+def _read(
+    store: Store,
+    now_ts: str,
+    limit: int,
+    known: dict[_Identity, bool] | None = None,
+) -> list[_Row]:
+    """The rows with their liveness. ``known`` holds verdicts already reached for an exact
+    identity (see ``_snapshot``); only identities not in it are looked up in ``/proc``."""
     rows: list[_Row] = []
     for raw in store.query(_SELECT, (limit,)):
         rowid, kind, pid, start, boot, decision, csession, started, expires = raw
@@ -169,7 +184,11 @@ def _read(store: Store, now_ts: str, limit: int) -> list[_Row]:
             continue
         cs = uncut(csession, _CHARS)
         cs_t = cs if isinstance(cs, str) and ids.is_caller_decision_id(cs) else None
-        alive = holder_alive(pid, start_t, boot_t)
+        identity = (pid, start_t, boot_t)
+        if known is not None and identity in known:
+            alive = known[identity]
+        else:
+            alive = holder_alive(pid, start_t, boot_t)
         expires_t = _ts_or_none(expires)
         rows.append(
             _Row(
@@ -190,10 +209,27 @@ def _read(store: Store, now_ts: str, limit: int) -> list[_Row]:
     return rows
 
 
-def _sweep(store: Store, now_ts: str, limit: int = _ROW_LIMIT + 1) -> tuple[int, int]:
+def _snapshot(store: Store, now_ts: str, limit: int = _ROW_LIMIT + 1) -> dict[_Identity, bool]:
+    """Liveness of the rows as read now, outside any write transaction, so the ``/proc`` reads
+    do not hold the write lock. The identity (pid, start time, boot id) is unique to one
+    process, so a row judged dead stays dead; one judged alive that has died since is kept by
+    the sweep that uses this and freed by the next."""
+    return {
+        (r.info.pid, r.info.start, r.info.boot_id): r.info.alive
+        for r in _read(store, now_ts, limit)
+        if r.info is not None
+    }
+
+
+def _sweep(
+    store: Store,
+    now_ts: str,
+    limit: int = _ROW_LIMIT + 1,
+    known: dict[_Identity, bool] | None = None,
+) -> tuple[int, int]:
     """Delete the dead and unrecognisable rows; return (live rows seen, rows deleted)."""
     live = deleted = 0
-    for row in _read(store, now_ts, limit):
+    for row in _read(store, now_ts, limit, known):
         if row.info is not None and row.info.alive:
             live += 1
         else:
@@ -219,9 +255,10 @@ def try_acquire(
     moment = now if now is not None else datetime.now(UTC)
     now_ts, expires_ts = _ts(moment), _ts(expires_at)
     slot = current_holder(decision)
+    known = _snapshot(store, now_ts)  # /proc is read here, not under the write lock
 
     def body() -> Slot | None:
-        live, _ = _sweep(store, now_ts)
+        live, _ = _sweep(store, now_ts, known=known)
         if live >= cap:
             return None
         store.execute(
@@ -252,13 +289,16 @@ def wait_for_slot(
     below ``min_start_budget`` (or ``max_wait`` elapsed) with every slot still live."""
     started = monotonic()
     while True:
-        slot = try_acquire(
-            store,
-            decision_id=decision_id,
-            max_parallel=max_parallel,
-            expires_at=expires_at,
-            now=now() if now is not None else None,
-        )
+        try:
+            slot = try_acquire(
+                store,
+                decision_id=decision_id,
+                max_parallel=max_parallel,
+                expires_at=expires_at,
+                now=now() if now is not None else None,
+            )
+        except StoreBusyError:
+            slot = None  # the write lock is held by someone else: no slot yet, keep polling
         if slot is not None:
             return slot
         slack = launch_window() - min_start_budget
@@ -336,4 +376,5 @@ def list_slots(store: Store, *, now: datetime | None = None) -> list[SlotInfo]:
 def purge_dead(store: Store) -> int:
     """Delete the dead and unrecognisable rows in one transaction; returns how many."""
     now_ts = _ts(datetime.now(UTC))
-    return store.transact(lambda: _sweep(store, now_ts)[1])
+    known = _snapshot(store, now_ts)
+    return store.transact(lambda: _sweep(store, now_ts, known=known)[1])

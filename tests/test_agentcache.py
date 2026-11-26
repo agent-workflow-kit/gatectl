@@ -13,6 +13,9 @@ import pytest
 
 from gatectl import agentcache, store
 from gatectl.errors import InternalError
+from gatectl.fingerprint import fingerprint
+from tests.config_util import load
+from tests.test_fingerprint import make_plugin
 
 NOW = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
 TTL = timedelta(minutes=10)
@@ -209,6 +212,8 @@ def test_verdict_validates_its_fields() -> None:
         ("allow", 1.1, ()),
         ("allow", float("nan"), ()),
         ("allow", float("inf"), ()),
+        ("allow", 10**400, ()),
+        ("allow", -(10**400), ()),
         ("allow", True, ()),
         ("allow", "0.5", ()),
         ("allow", 0.5, ("x",) * 11),
@@ -376,6 +381,94 @@ def test_the_table_is_capped(st: store.Store, monkeypatch: pytest.MonkeyPatch) -
     # the newest survive
     assert get(st, key(input_hash=f"{11:064x}"), now=NOW + timedelta(seconds=12)) is not None
     assert get(st, key(input_hash=f"{0:064x}"), now=NOW + timedelta(seconds=12)) is None
+
+
+def test_put_refuses_a_non_verdict_and_writes_nothing(st: store.Store) -> None:
+    for bad in ({"decision": "allow", "confidence": 1, "reasons": []}, None, "allow", 5):
+        with pytest.raises(ValueError):
+            put(st, verdict=bad)
+    assert st.con.execute("SELECT COUNT(*) FROM agent_cache").fetchone() == (0,)
+
+
+def test_put_requires_an_aware_now(st: store.Store) -> None:
+    with pytest.raises(ValueError):
+        put(st, now=datetime(2026, 3, 4, 5, 6, 7))
+    assert st.con.execute("SELECT COUNT(*) FROM agent_cache").fetchone() == (0,)
+
+
+def test_the_cap_never_evicts_the_row_just_written_after_a_backward_clock_step(
+    st: store.Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(agentcache, "MAX_ROWS", 3)
+    future = NOW + timedelta(hours=1)
+    for i in range(3):
+        when = future + timedelta(seconds=i)
+        put(st, key(input_hash=f"{i:064x}"), now=when, ttl=timedelta(hours=1))
+    assert put(st, key(input_hash=f"{9:064x}")) is True
+    assert get(st, key(input_hash=f"{9:064x}")) is not None
+    assert st.con.execute("SELECT COUNT(*) FROM agent_cache").fetchone() == (3,)
+
+
+def test_the_cap_evicts_future_dated_rows_before_older_valid_ones(
+    st: store.Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(agentcache, "MAX_ROWS", 3)
+    put(st, key(input_hash=f"{1:064x}"), now=NOW - timedelta(minutes=5))
+    raw_row(
+        st,
+        key(input_hash=f"{2:064x}"),
+        time="2026-03-04T06:06:07.000000Z",
+        expires="2026-03-04T07:06:07.000000Z",
+    )
+    put(st, key(input_hash=f"{3:064x}"), now=NOW - timedelta(minutes=4))
+    put(st, key(input_hash=f"{4:064x}"))
+    keys = {r[0] for r in st.con.execute("SELECT key FROM agent_cache")}
+    assert key(input_hash=f"{2:064x}") not in keys
+    assert {key(input_hash=f"{i:064x}") for i in (1, 3, 4)} == keys
+
+
+def test_put_sweeps_expired_rows_but_never_unexpired_rows_below_the_cap(st: store.Store) -> None:
+    other = key(input_hash="d" * 64)
+    live = key(input_hash="e" * 64)
+    raw_row(st, "f" * 64, time="1999-12-31T23:50:00.000000Z", expires="2000-01-01T00:00:00.000000Z")
+    raw_row(st, other)  # NOW .. NOW + 10 min: unexpired
+    raw_row(st, live, time="2026-03-04T06:00:00.000000Z", expires="2026-03-04T07:00:00.000000Z")
+    put(st)
+    keys = {r[0] for r in st.con.execute("SELECT key FROM agent_cache")}
+    assert keys == {key(), other, live}
+
+
+def test_a_huge_integer_confidence_is_a_fixed_text_error_without_echo(st: store.Store) -> None:
+    artifact = '{"schema_version":1,"decision":"allow","confidence":' + "9" * 400 + ',"reasons":[]}'
+    raw_row(st, key(), artifact=artifact)
+    with pytest.raises(InternalError) as info:
+        get(st)
+    assert str(info.value) == "state.db holds an invalid agent cache row"
+    assert "999" not in str(info.value) and "999" not in repr(info.value)
+
+
+def test_a_changed_instruction_or_skill_file_changes_the_cache_key(tmp_path: Path) -> None:
+    plugin = make_plugin(tmp_path / "bundled")
+    instr = tmp_path / "instr.md"
+    instr.write_bytes(b"one")
+    doc = {"checks": [{"name": "a", "type": "agent", "instruction_file": str(instr)}]}
+    cfg = load(tmp_path, {"policies": {"p": doc}})
+    policy = cfg.resolve_policy("p")
+
+    def fingerprint_now() -> str:
+        return fingerprint("p", policy, cfg.shared, bundled_plugin=str(plugin))
+
+    def key_now() -> str:
+        return key(fingerprint=fingerprint_now())
+
+    base = key_now()
+    instr.write_bytes(b"two")
+    changed_instruction = key_now()
+    assert changed_instruction != base
+    instr.write_bytes(b"one")
+    assert key_now() == base
+    (plugin / "skills" / "gate-check" / "SKILL.md").write_bytes(b"skill v2\n")
+    assert key_now() != base
 
 
 # --- tampered rows --------------------------------------------------------------------------

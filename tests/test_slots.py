@@ -570,6 +570,95 @@ def test_wait_is_bounded_even_when_the_window_never_shrinks(st: store.Store) -> 
     assert len(slept) <= 10
 
 
+def test_wait_treats_a_busy_store_as_no_slot_yet_and_ends_busy(sdir: Path, st: store.Store) -> None:
+    blocker = store.open_store(sdir, create=True)
+    assert blocker is not None
+    short = store.open_store(sdir, create=True, busy_timeout=0.05)
+    assert short is not None
+    ft = FakeTime(30.6)
+    try:
+        with blocker.write():
+            assert wait(short, ft) is None
+    finally:
+        blocker.close()
+        short.close()
+    assert ft.sleeps[:2] == [0.25, 0.25]
+    assert count(st) == 0
+
+
+def test_wait_takes_the_slot_once_a_busy_store_frees_up(sdir: Path, st: store.Store) -> None:
+    blocker = store.open_store(sdir, create=True)
+    assert blocker is not None
+    short = store.open_store(sdir, create=True, busy_timeout=0.05)
+    assert short is not None
+    ft = FakeTime(100.0)
+    real_sleep = ft.sleep
+    held_by_blocker = blocker.write()
+    held_by_blocker.__enter__()
+
+    def sleep(seconds: float) -> None:
+        nonlocal held_by_blocker
+        if held_by_blocker is not None:
+            held_by_blocker.__exit__(None, None, None)
+            held_by_blocker = None  # type: ignore[assignment]
+        real_sleep(seconds)
+
+    try:
+        got = slots.wait_for_slot(
+            short,
+            decision_id=D2,
+            max_parallel=1,
+            expires_at=LATER,
+            launch_window=ft.window,
+            min_start_budget=30.0,
+            sleep=sleep,
+            now=lambda: NOW,
+        )
+    finally:
+        blocker.close()
+        short.close()
+    assert got is not None
+    assert count(st) == 1
+
+
+def test_liveness_is_not_evaluated_inside_the_write_transaction_for_known_rows(
+    st: store.Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid, start, boot = me()
+    for decision in (D1, D3, D4):
+        insert_raw(st, pid=pid, start=start, boot=boot, decision=decision)
+    real = slots.holder_alive
+    inside: list[bool] = []
+
+    def spy(*args: Any) -> bool:
+        inside.append(st.con.in_transaction)
+        return real(*args)
+
+    monkeypatch.setattr(slots, "holder_alive", spy)
+    assert acquire(st, D2, cap=5) is not None
+    assert inside and not any(inside)
+
+
+def test_a_row_added_after_the_snapshot_is_still_judged_inside_the_transaction(
+    st: store.Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid, start, boot = me()
+    real = slots.holder_alive
+    state = {"added": False}
+
+    def spy(*args: Any) -> bool:
+        if not state["added"]:
+            state["added"] = True
+            insert_raw(st, pid=dead_pid(), start="1", boot=boot, decision=D3)
+        return real(*args)
+
+    insert_raw(st, pid=pid, start=start, boot=boot, decision=D1)
+    monkeypatch.setattr(slots, "holder_alive", spy)
+    assert acquire(st, D2, cap=2) is not None
+    monkeypatch.undo()
+    assert count(st) == 2  # the dead late row was deleted, the live one kept, the new one added
+
+
 def test_wait_does_not_hold_a_row_when_it_ends_busy(st: store.Store) -> None:
     pid, start, boot = me()
     insert_raw(st, pid=pid, start=start, boot=boot)
