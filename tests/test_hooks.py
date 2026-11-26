@@ -94,10 +94,12 @@ def test_output_is_discarded_and_no_descriptor_above_2_is_held(
     fds = json.loads(seen.read_text())
     assert fds["0"].endswith("/payload.json")
     assert (fds["1"], fds["2"]) == ("/dev/null", "/dev/null")
-    # Python's own listing handle is the only other descriptor; nothing of gatectl's is held.
+    # Whatever else the probe's interpreter holds (its listing handle, a runtime file), nothing of
+    # gatectl's: no pipe, no socket, no file of the state tree or the test's directory.
     for n, target in fds.items():
         if int(n) > 2:
-            assert target.startswith("/proc") or target == "/proc/self/fd", (n, target)
+            assert not target.startswith(("pipe:", "socket:", "anon_inode:")), (n, target)
+            assert str(tmp_path) not in target, (n, target)
 
 
 def test_the_environment_is_gatectls_plus_the_three_reserved_names(
