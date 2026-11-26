@@ -570,7 +570,7 @@ def _probe_lines(result: probe.ProbeResult) -> list[str]:
         f"exit_code {_shown(result.exit_code)} end_reason {_shown(result.end_reason)} "
         f"sandbox_active {_shown(result.sandbox_active)}"
     )
-    head = "probe: ok" if result.ok else f"probe: failed {sanitize(result.failed, 2048)}"
+    head = "probe: ok" if result.ok else f"probe: failed {sanitize(result.failed or '', 2048)}"
     return [f"{head} ({facts})", PROBE_GAP]
 
 

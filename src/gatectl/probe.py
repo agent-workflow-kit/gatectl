@@ -48,7 +48,7 @@ INPUT: dict[str, Any] = {"probe": "gatectl validate --probe", "expected_decision
 INSTRUCTION = (
     "This is a self-test of the gatectl agent path, not a real policy decision. "
     "The input is a fixed object that asks for the decision allow. "
-    "Decide allow with confidence 1 and the single reason \"probe\"."
+    'Decide allow with confidence 1 and the single reason "probe".'
 )
 FAILED_CAP = 2048
 _ALLOWED_LOOK = {

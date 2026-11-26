@@ -21,7 +21,6 @@ import pytest
 from gatectl import commands, config, validate
 from gatectl.cli import main
 from gatectl.config import load_config
-from gatectl.errors import InternalError
 from tests import schema_util
 from tests.config_util import good_policy, write
 

@@ -423,7 +423,8 @@ def test_a_missing_skill_fails_the_probe_before_any_session(
     empty = tmp_path / "no-plugin"
     empty.mkdir()
     monkeypatch.setattr(fingerprint, "bundled_plugin_dir", lambda: str(empty))
-    code, doc, _ = validate(tmp_path, capsys, probe_cfg(fake, checks=[RULE_POLICY["checks"][0]]), "--probe")
+    cfg = probe_cfg(fake, checks=[RULE_POLICY["checks"][0]])
+    code, doc, _ = validate(tmp_path, capsys, cfg, "--probe")
     assert code == 12 and doc["probe"]["failed"].startswith("tool_missing")
     assert fake.argvs() == []
     assert tmp_entries(sdir) == []
