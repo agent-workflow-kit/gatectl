@@ -214,15 +214,98 @@ def create_hook_dir(state_dir: Path, payload: bytes) -> Path:
 
 
 def _write_payload(dir_fd: int, payload: bytes) -> None:
+    _write_new(dir_fd, PAYLOAD, payload)
+
+
+def _write_new(dir_fd: int, name: str, data: bytes) -> None:
+    """Create ``name`` exclusively (a link or existing file is an error), mode 0600, and fill it."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
-    fd = os.open(PAYLOAD, flags, 0o600, dir_fd=dir_fd)
+    fd = os.open(name, flags, 0o600, dir_fd=dir_fd)  # ours from here: removed again on failure
     try:
-        os.fchmod(fd, 0o600)
-        view = memoryview(payload)
-        while view:
-            view = view[os.write(fd, view) :]
+        try:
+            os.fchmod(fd, 0o600)
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view) :]
+        except BaseException:
+            unlink_names(dir_fd, [name])
+            raise
     finally:
         os.close(fd)
+
+
+def _open_mine(directory: Path) -> int:
+    """Open an existing directory without following a link; owned by us, no group or other bits."""
+    try:
+        fd = os.open(directory, _DIR_FLAGS)
+    except OSError as e:
+        raise _unsafe(str(directory), e.strerror or "cannot open") from e
+    if not _mine(os.fstat(fd)):
+        os.close(fd)
+        raise _unsafe(str(directory), "not owned by this user")
+    if stat.S_IMODE(os.fstat(fd).st_mode) & 0o077:
+        os.close(fd)
+        raise _unsafe(str(directory), "accessible by others")
+    return fd
+
+
+def write_private_files(directory: Path, files: list[tuple[str, bytes]]) -> None:
+    """Create each ``(name, data)`` in ``directory`` (mode 0600, exclusive, no link followed).
+
+    The directory is opened once without following a link and the files are made relative to
+    that descriptor. If any step fails, the files this call created are unlinked again (never
+    one that already existed: an existing name is an error) and the error is raised.
+    """
+    fd = _open_mine(directory)
+    made: list[str] = []
+    try:
+        for name, data in files:
+            _write_new(fd, name, data)
+            made.append(name)
+    except BaseException:
+        unlink_names(fd, made)
+        raise
+    finally:
+        os.close(fd)
+
+
+def unlink_names(dir_fd: int, names: list[str]) -> None:
+    """Best effort: unlink each name (a link is unlinked, never followed); every error is ignored.
+
+    Used while a failed write unwinds, where the original error must win.
+    """
+    for name in names:
+        try:
+            os.unlink(name, dir_fd=dir_fd)
+        except OSError:
+            pass
+
+
+def remove_private_files(directory: Path, names: list[str]) -> None:
+    """Delete the named files from ``directory``; a missing directory or file is fine.
+
+    Every name is attempted. Any failure other than a missing file raises a fixed-text
+    ``OSError`` afterwards (no path or content in it): a file that is still there must be seen.
+    """
+    try:
+        fd = _open_mine(directory)
+    except UnsafeTree:
+        if not os.path.lexists(directory):
+            return
+        raise
+    failed = False
+    try:
+        for name in names:
+            try:
+                os.unlink(name, dir_fd=fd)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                failed = True
+    finally:
+        os.close(fd)
+    if failed:
+        raise OSError("could not remove a private file")
 
 
 def _write_owner(dir_fd: int, label: str) -> None:

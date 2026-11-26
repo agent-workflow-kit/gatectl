@@ -149,6 +149,20 @@ class _Files:
         return name if isinstance(name, str) else None
 
 
+def read_instruction_file(path: str) -> bytes | None:
+    """The bytes of an ``instruction_file``, read like the fingerprint reads it, or None.
+
+    None means unreadable: not absolute, not a regular file, over ``INSTRUCTION_CAP``, or
+    changed while read. The prompt writer uses these bytes, so the fingerprint and the prompt
+    see the same file contents under the same rules.
+    """
+    try:
+        data = _Files(None, time.monotonic)._load(path, INSTRUCTION_CAP, "unreadable", False)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, bytes) else None
+
+
 def plugin_name_of(directory: str) -> str | None:
     """The plugin's ``name`` (``.claude-plugin/plugin.json``, read like every hashed file)."""
     return _Files(None, time.monotonic).plugin_name(directory)
@@ -217,8 +231,8 @@ def _agent(
     skill = pick(check.skill, block.skill)
     profile = pick(check.permission_profile, block.permission_profile)
     if check.instruction_file is not None:
-        # todo(#22): the prompt writer must read instruction_file once and use the same bytes as
-        # the fingerprint (definition() returns only the digest)
+        # agentfiles.load_instruction re-reads this file with read_instruction_file and refuses
+        # it unless its digest equals this instruction_sha256, so the prompt uses these bytes.
         instruction = files.hash(check.instruction_file, cap=INSTRUCTION_CAP, over="unreadable")
     else:
         instruction = _text_sha256(check.instruction or "")

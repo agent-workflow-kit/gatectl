@@ -554,7 +554,16 @@ def _run_checks(run: _Run) -> list[Entry]:
 
 def _agent_entry(run: _Run, check: AgentCheck) -> Entry:
     # TODO(#24): the agent run sequence (cache, slot, claude-session). Until it lands an agent
-    # check that would run escalates; it can never allow.
+    # check that would run escalates; it can never allow. The sequence, in order:
+    # - agentfiles.load_instruction(..., fingerprint.definition()'s instruction_sha256), then
+    #   agentfiles.prepare(), both before a slot is taken;
+    # - tool_missing for a missing bundled plugin, skill plugin or SKILL.md, before any session
+    #   and before write(), through the runner's exec-failure path (issue #22, comment 2);
+    # - after the slot: tmptree.create_decision_dir, then PreparedFiles.write();
+    # - AgentFiles.delete() on every exit path (it can raise OSError when a file stays);
+    # - map AgentFilesError.reason, tmptree.UnsafeTree, FileExistsError and OSError to outcomes
+    #   without putting exception text or paths in the audit line or detail, and never log or
+    #   serialize an AgentFiles (it holds the nonce).
     return Entry(
         check.name, "agent", "escalate", "check_error", AGENT_NOT_IMPLEMENTED, 0, None, False
     )
