@@ -6,9 +6,10 @@ private ``tmp/<id>/``, ``agent.run_session`` and the strict judge), so it proves
 configuration end to end: the sandbox, the skill, the plugin and a validated artifact.
 
 It records no decision, no audit line and no cache row. Its only write is the pair of ``meta``
-markers ``probe_ok_at`` and ``probe_agent_hash`` after a pass; a failed probe removes any earlier
-pair, so the ``set ... enforced`` hint comes back (fail closed). The hash is
-``agenthash.agent_config_hash`` of the configuration the probe actually ran with.
+markers ``probe_ok_at`` and ``probe_agent_hash`` after a pass; a failed probe of any kind
+(``busy`` and ``budget_exhausted`` included) removes any earlier pair, so the ``set ... enforced``
+hint comes back (fail closed). The hash is ``agenthash.agent_config_hash`` of the configuration
+the probe actually ran with.
 
 The probe covers the ``agent:`` block's settings only; a check that sets its own ``sandbox``,
 ``skill``, ``permission_profile``, ``setting_sources``, ``env_allowlist`` or ``model`` is an
@@ -21,7 +22,7 @@ the artifact's ``reasons``) and no config value is echoed.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -51,6 +52,8 @@ INSTRUCTION = (
     'Decide allow with confidence 1 and the single reason "probe".'
 )
 FAILED_CAP = 2048
+START_SLACK = 5.0  # seconds of the window spent before the first budget test
+NOT_CLEARED = "the earlier marker could not be removed"
 _ALLOWED_LOOK = {
     "check_denied": "the agent denied the probe input",
     "check_escalated": "the agent escalated the probe input",
@@ -102,26 +105,80 @@ def _store_marker(store: store_mod.Store, config_hash: str) -> None:
     store.transact(body)
 
 
-def _clear_marker(store: store_mod.Store) -> None:
+def _clear_marker(store: store_mod.Store) -> bool:
+    """Remove the marker pair; False when that failed (the caller says so in the failure text)."""
     try:
         store.transact(
             lambda: store.execute(
                 "DELETE FROM meta WHERE key IN ('probe_ok_at', 'probe_agent_hash')"
             )
         )
-    except Exception:  # noqa: S110 - a marker that cannot be cleared never hides the failure
-        pass
+    except Exception:
+        return False
+    return True
+
+
+def _failed_with_clear(store: store_mod.Store, result: ProbeResult) -> ProbeResult:
+    """Every failed probe removes the earlier marker; a failure to do so is part of the text."""
+    if _clear_marker(store):
+        return result
+    head = sanitize(result.failed or "", FAILED_CAP - len(NOT_CLEARED) - 2)
+    return replace(result, failed=f"{head}; {NOT_CLEARED}")
 
 
 def run_probe(loaded: LoadedConfig, env: Env) -> ProbeResult:
     """Run the probe for a valid config. Never raises for a failure of the run (the store's own
     refusals, such as a newer schema, are the ``InternalError`` every command has)."""
     shared = loaded.shared
+    # The start window is the agent's timeout, but never less than ``min_start_budget`` plus a
+    # slack for the work before the first budget test (a config whose real checks start must be
+    # able to probe); the deadline adds the launch overhead to that.
+    cfg = agent.resolve_settings(
+        AgentCheck(name=CHECK_NAME, type="agent", instruction=INSTRUCTION),
+        shared,
+        None,
+        fingerprint.bundled_plugin_dir(),
+    )
+    start_window = max(cfg.timeout, cfg.min_start_budget + START_SLACK)
+    deadline = env.monotonic() + start_window + agent.LAUNCH_OVERHEAD
+
+    def window() -> float:
+        return deadline - env.monotonic() - agent.LAUNCH_OVERHEAD
+
+    store = store_mod.open_store(create=True)
+    assert store is not None
+    with store:
+        result = _attempt(loaded, env, store, cfg, window)
+        if not result.ok:
+            return _failed_with_clear(store, result)
+        session_cmd = loaded.session_cmd_resolved()
+        assert session_cmd is not None
+        try:
+            _store_marker(store, agenthash.agent_config_hash(shared, session_cmd))
+        except Exception:  # fixed text; the cause is never echoed
+            return _failed_with_clear(
+                store,
+                _fail(
+                    "marker_unwritable",
+                    "the probe passed but its marker could not be stored",
+                    exit_code=result.exit_code,
+                    end_reason=result.end_reason,
+                    sandbox_active=result.sandbox_active,
+                ),
+            )
+    return result
+
+
+def _attempt(
+    loaded: LoadedConfig,
+    env: Env,
+    store: store_mod.Store,
+    cfg: agent.Settings,
+    window: Any,
+) -> ProbeResult:
     bundled = fingerprint.bundled_plugin_dir()
-    check = AgentCheck(name=CHECK_NAME, type="agent", instruction=INSTRUCTION)
-    cfg = agent.resolve_settings(check, shared, None, bundled)
     try:
-        plugin_dirs = agent.find_plugin_dirs(cfg.skill, shared.agent.plugin_dirs, bundled)
+        plugin_dirs = agent.find_plugin_dirs(cfg.skill, loaded.shared.agent.plugin_dirs, bundled)
     except agent.ToolMissing:
         return _fail("tool_missing", "the plugin or skill was not found")
     session_cmd = loaded.session_cmd_resolved()
@@ -136,32 +193,7 @@ def run_probe(loaded: LoadedConfig, env: Env) -> ProbeResult:
         )
     except agentfiles.AgentFilesError as error:
         return _fail(error.reason, error.detail)
-    config_hash = agenthash.agent_config_hash(shared, session_cmd)
-
-    deadline = env.monotonic() + cfg.timeout + agent.LAUNCH_OVERHEAD
-
-    def window() -> float:
-        return deadline - env.monotonic() - agent.LAUNCH_OVERHEAD
-
-    store = store_mod.open_store(create=True)
-    assert store is not None
-    with store:
-        result = _run(loaded, env, store, cfg, prepared, plugin_dirs, session_cmd, window)
-        if not result.ok:
-            _clear_marker(store)
-            return result
-        try:
-            _store_marker(store, config_hash)
-        except Exception:  # fixed text; the cause is never echoed
-            _clear_marker(store)
-            return _fail(
-                "marker_unwritable",
-                "the probe passed but its marker could not be stored",
-                exit_code=result.exit_code,
-                end_reason=result.end_reason,
-                sandbox_active=result.sandbox_active,
-            )
-    return result
+    return _run(loaded, env, store, cfg, prepared, plugin_dirs, session_cmd, window)
 
 
 def _run(

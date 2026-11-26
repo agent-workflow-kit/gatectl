@@ -588,7 +588,10 @@ def _text(report: Report, ran: probe.ProbeResult | None = None) -> str:
         lines.append(f"session_cmd: {shown}")
     if ran is not None:
         lines += _probe_lines(ran)
-    lines.append("invalid" if report.problems else "valid")
+    if report.problems:
+        lines.append("invalid")
+    else:
+        lines.append("probe failed" if ran is not None and not ran.ok else "valid")
     return "\n".join(lines)
 
 

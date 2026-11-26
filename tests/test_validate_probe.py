@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from gatectl import agent, agenthash, fingerprint, probe, slots, tmptree
+from gatectl import agent, agenthash, engine, fingerprint, ids, probe, slots
 from gatectl import store as store_mod
 from gatectl.cli import main
 from gatectl.config import load_config
@@ -24,7 +24,7 @@ from tests.agent_util import Fake, agent_check, config, limits_env, state_store,
 from tests.check_util import audit_lines, decisions, isolate, rows
 from tests.command_util import config_file
 from tests.proc_util import Tracker
-from tests.set_util import AGENT_ONLY, RULE_POLICY, make_config
+from tests.set_util import AGENT_ONLY, RULE_POLICY
 
 CANARY = "CANARY-5d1e8a"
 POLICY_WITH_AGENT: dict[str, Any] = {"checks": [AGENT_ONLY["checks"][0], RULE_POLICY["checks"][0]]}
@@ -551,6 +551,7 @@ def test_the_text_form_reports_the_probe_and_the_per_check_override_gap(
     assert "per-check" in out and "not covered" in out
     out = text_of(tmp_path, capsys, probe_cfg(Fake(tmp_path / "x", FAKE_CS_DECISION="deny")))
     assert "probe: failed check_denied" in out
+    assert out.rstrip().splitlines()[-1] == "probe failed"
 
 
 def test_validate_still_checks_the_per_check_overrides_the_probe_does_not_cover(
@@ -578,5 +579,366 @@ def test_the_probe_input_is_a_fixed_builtin_that_asks_for_allow() -> None:
     assert probe.POLICY_LABEL == "probe"
 
 
-def test_the_helper_modules_stay_importable() -> None:
-    assert tmptree.remove_tree and store_mod.open_store and make_config
+# --- review round 1 ---------------------------------------------------------------------------
+
+
+def make_plugin_dir(root: Path) -> Path:
+    (root / ".claude-plugin").mkdir(parents=True)
+    (root / ".claude-plugin" / "plugin.json").write_text('{"name": "other"}', encoding="utf-8")
+    (root / "skills" / "review").mkdir(parents=True)
+    (root / "skills" / "review" / "SKILL.md").write_text("# review\n", encoding="utf-8")
+    (root / ".claude").mkdir()
+    for placeholder in (".mcp.json", "CLAUDE.md", "CLAUDE.local.md"):
+        (root / placeholder).write_text("")
+    return root
+
+
+def flag_values(start: list[str], flag: str) -> list[str]:
+    return [start[i + 1] for i, a in enumerate(start) if a == flag]
+
+
+def test_a_min_start_budget_above_the_timeout_still_lets_the_probe_start(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+) -> None:
+    fake = Fake(tmp_path)
+    limits_env(monkeypatch, tracker)
+    cfg = probe_cfg(fake, agent_block={"timeout": "20s", "min_start_budget": "30s"})
+    code, doc, _ = validate(tmp_path, capsys, cfg, "--probe")
+    assert code == 0 and doc["probe"]["ok"] is True
+    start = fake.argvs()[0]
+    assert flag_values(start, "--timeout") == ["20s"]
+    clean(fake, sdir)
+
+
+def test_the_text_trailer_is_probe_failed_after_a_failed_probe_and_invalid_for_a_bad_config(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+) -> None:
+    limits_env(monkeypatch, tracker)
+    bad = Fake(tmp_path / "bad", FAKE_CS_DECISION="deny")
+    assert text_of(tmp_path, capsys, probe_cfg(bad)).rstrip().splitlines()[-1] == "probe failed"
+    broken = probe_cfg(Fake(tmp_path / "x"))
+    broken["bogus"] = 1
+    assert text_of(tmp_path, capsys, broken).rstrip().splitlines()[-1] == "invalid"
+
+
+def _earlier_marker(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+) -> Fake:
+    fake = Fake(tmp_path / "good")
+    limits_env(monkeypatch, tracker)
+    assert validate(tmp_path, capsys, probe_cfg(fake), "--probe")[0] == 0
+    assert meta(sdir, "probe_ok_at") is not None
+    return fake
+
+
+def test_a_session_cmd_that_goes_missing_removes_the_earlier_marker(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+) -> None:
+    _earlier_marker(tmp_path, capsys, sdir, monkeypatch, tracker)
+    cfg = probe_cfg(None, session_cmd=["claude-session-nowhere"], checks=[RULE_POLICY["checks"][0]])
+    assert validate(tmp_path, capsys, cfg, "--probe")[0] == 12
+    assert meta(sdir, "probe_ok_at") is None and meta(sdir, "probe_agent_hash") is None
+
+
+def test_a_missing_plugin_removes_the_earlier_marker(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+) -> None:
+    fake = _earlier_marker(tmp_path, capsys, sdir, monkeypatch, tracker)
+    empty = tmp_path / "no-plugin"
+    empty.mkdir()
+    monkeypatch.setattr(fingerprint, "bundled_plugin_dir", lambda: str(empty))
+    cfg = probe_cfg(fake, checks=[RULE_POLICY["checks"][0]])
+    assert validate(tmp_path, capsys, cfg, "--probe")[0] == 12
+    assert meta(sdir, "probe_ok_at") is None and meta(sdir, "probe_agent_hash") is None
+
+
+def test_an_input_over_input_max_bytes_fails_with_its_reason_and_removes_the_marker(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+) -> None:
+    fake = _earlier_marker(tmp_path, capsys, sdir, monkeypatch, tracker)
+    calls = len(fake.argvs())
+    monkeypatch.setattr(probe, "INPUT", {"blob": ["x" * 40] * 60})
+    cfg = probe_cfg(fake, agent_block={"input_max_bytes": 1024})
+    code, doc, _ = validate(tmp_path, capsys, cfg, "--probe")
+    assert code == 12 and doc["probe"]["failed"].startswith("input_invalid")
+    assert len(fake.argvs()) == calls  # no session was started
+    assert meta(sdir, "probe_ok_at") is None and meta(sdir, "probe_agent_hash") is None
+
+
+NOT_CLEARED = "the earlier marker could not be removed"
+
+
+def _break_clear(monkeypatch: pytest.MonkeyPatch) -> None:
+    real = store_mod.Store.execute
+
+    def execute(self: store_mod.Store, sql: str, *args: Any, **kw: Any) -> Any:
+        if sql.lstrip().startswith("DELETE FROM meta"):
+            raise OSError("disk")
+        return real(self, sql, *args, **kw)
+
+    monkeypatch.setattr(store_mod.Store, "execute", execute)
+
+
+def test_a_marker_that_cannot_be_removed_after_a_failed_probe_is_reported(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+) -> None:
+    _earlier_marker(tmp_path, capsys, sdir, monkeypatch, tracker)
+    _break_clear(monkeypatch)
+    bad = Fake(tmp_path / "bad", FAKE_CS_DECISION="deny")
+    code, doc, _ = validate(tmp_path, capsys, probe_cfg(bad), "--probe")
+    assert code == 12 and doc["probe"]["ok"] is False
+    failed = doc["probe"]["failed"]
+    assert failed.startswith("check_denied") and failed.endswith(NOT_CLEARED)
+    assert len(failed) <= 2048
+
+
+def test_a_marker_that_cannot_be_removed_after_an_early_failure_is_reported(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+) -> None:
+    _earlier_marker(tmp_path, capsys, sdir, monkeypatch, tracker)
+    _break_clear(monkeypatch)
+    cfg = probe_cfg(None, session_cmd=["claude-session-nowhere"], checks=[RULE_POLICY["checks"][0]])
+    code, doc, _ = validate(tmp_path, capsys, cfg, "--probe")
+    assert code == 12 and doc["probe"]["failed"].endswith(NOT_CLEARED)
+
+
+def test_an_unwritable_marker_whose_clearing_also_fails_says_so(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+) -> None:
+    fake = Fake(tmp_path)
+    limits_env(monkeypatch, tracker)
+
+    def broken(*a: Any, **k: Any) -> None:
+        raise OSError("disk")
+
+    monkeypatch.setattr(probe, "_store_marker", broken)
+    _break_clear(monkeypatch)
+    code, doc, _ = validate(tmp_path, capsys, probe_cfg(fake), "--probe")
+    assert code == 12 and doc["probe"]["failed"].startswith("marker_unwritable")
+    assert doc["probe"]["failed"].endswith(NOT_CLEARED)
+
+
+def test_a_non_default_agent_block_and_the_given_environment_reach_the_session(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+) -> None:
+    fake = Fake(tmp_path)
+    monkeypatch.setenv("CLAUDE_FROM_OS", "1")
+    seen = {
+        "PATH": os.environ["PATH"],
+        "HOME": os.environ["HOME"],
+        "CLAUDE_FROM_ENV": "1",
+        "GATECTL_NOT_ALLOWED": "1",
+    }
+    limits_env(monkeypatch, tracker, environ=seen)
+    cfg = probe_cfg(
+        fake,
+        agent_block={"sandbox": "preferred", "env_allowlist": ["MY_TOKEN"], "model": "haiku"},
+    )
+    assert validate(tmp_path, capsys, cfg, "--probe")[0] == 0
+    start = fake.argvs()[0]
+    assert flag_values(start, "--sandbox") == ["preferred"]
+    assert flag_values(start, "--env-allowlist-only") == ["MY_TOKEN"]
+    names = fake.calls()[0]["env_names"]
+    assert "CLAUDE_FROM_ENV" in names
+    assert "CLAUDE_FROM_OS" not in names and "GATECTL_NOT_ALLOWED" not in names
+
+
+def test_setting_sources_reach_the_session(
+    tmp_path: Path,
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+) -> None:
+    # validate refuses a non-empty setting_sources, so the probe is run directly
+    fake = Fake(tmp_path)
+    limits_env(monkeypatch, tracker)
+    loaded = load_config(
+        config_file(tmp_path, probe_cfg(fake, agent_block={"setting_sources": ["project"]}))
+    )
+    probe.run_probe(loaded, engine.default_env())
+    assert flag_values(fake.argvs()[0], "--setting-sources") == ["project"]
+
+
+def test_a_configured_plugin_dir_holding_the_skill_is_passed_to_the_session(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+) -> None:
+    other = make_plugin_dir(tmp_path / "other-plugin")
+    fake = Fake(tmp_path)
+    limits_env(monkeypatch, tracker)
+    cfg = probe_cfg(fake, agent_block={"skill": "other:review", "plugin_dirs": [str(other)]})
+    code, doc, _ = validate(tmp_path, capsys, cfg, "--probe")
+    assert (code, doc["problems"]) == (0, [])
+    dirs = flag_values(fake.argvs()[0], "--plugin-dir")
+    assert dirs == [fingerprint.bundled_plugin_dir(), str(other)]
+
+
+def test_a_newer_schema_is_the_usual_internal_error_and_nothing_starts(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+) -> None:
+    import sqlite3
+
+    fake = Fake(tmp_path)
+    limits_env(monkeypatch, tracker)
+    sdir.mkdir(parents=True, mode=0o700, exist_ok=True)
+    con = sqlite3.connect(sdir / "state.db")
+    con.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT)")
+    con.execute("INSERT INTO meta VALUES('schema_version', '999')")
+    con.commit()
+    con.close()
+    (sdir / "state.db").chmod(0o600)
+    path = config_file(tmp_path, probe_cfg(fake))
+    code = main(["validate", "--probe", "--json", "--config", path])
+    out = capsys.readouterr().out
+    assert code == 1 and json.loads(out)["error"]["reason"] == "schema_newer"
+    assert fake.argvs() == []
+    assert rows(sdir, "SELECT key FROM meta WHERE key LIKE 'probe%'") == []
+
+
+def test_a_failed_text_is_capped_and_sanitized() -> None:
+    result = probe._fail("check_error", "\x1b[31m" + "x" * 5000)
+    assert result.failed is not None
+    assert len(result.failed) <= 2048 and "\x1b" not in result.failed
+    assert result.ok is False
+
+
+def test_the_slot_outlives_the_run_by_more_than_the_agent_timeout(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+) -> None:
+    fake = Fake(tmp_path)
+    limits_env(monkeypatch, tracker)
+    seen: dict[str, Any] = {}
+    real = agent.run_session
+
+    def spy(gw: Any, launch: agent.Launch, **kw: Any) -> agent.SessionResult:
+        seen["expires"] = rows(sdir, "SELECT expires_at FROM agent_slots")[0][0]
+        seen["now"] = datetime.now(UTC)
+        return real(gw, launch, **kw)
+
+    monkeypatch.setattr(agent, "run_session", spy)
+    cfg = probe_cfg(fake, agent_block={"timeout": "30s"})
+    assert validate(tmp_path, capsys, cfg, "--probe")[0] == 0
+    assert _parse(seen["expires"]) > seen["now"] + timedelta(seconds=30)
+
+
+class Jump:
+    """A monotonic clock a test can push forward."""
+
+    def __init__(self) -> None:
+        self.offset = 0.0
+
+    def __call__(self) -> float:
+        import time
+
+        return time.monotonic() + self.offset
+
+
+def test_no_time_left_before_the_slot_is_budget_exhausted_and_starts_nothing(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+) -> None:
+    fake = Fake(tmp_path)
+    clock = Jump()
+    limits_env(monkeypatch, tracker, monotonic=clock)
+    real = ids.new_decision_id
+
+    def new_id() -> str:
+        clock.offset = 10_000.0
+        return real()
+
+    monkeypatch.setattr(ids, "new_decision_id", new_id)
+    code, doc, _ = validate(tmp_path, capsys, probe_cfg(fake), "--probe")
+    assert code == 12 and doc["probe"]["failed"].startswith("budget_exhausted")
+    assert fake.argvs() == []
+    clean(fake, sdir)
+
+
+def test_no_time_left_after_the_slot_is_budget_exhausted_and_the_slot_is_released(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tracker: Tracker,
+) -> None:
+    fake = Fake(tmp_path)
+    clock = Jump()
+    limits_env(monkeypatch, tracker, monotonic=clock)
+    real = slots.wait_for_slot
+
+    def wait(*a: Any, **k: Any) -> Any:
+        slot = real(*a, **k)
+        clock.offset = 10_000.0
+        return slot
+
+    monkeypatch.setattr(slots, "wait_for_slot", wait)
+    code, doc, _ = validate(tmp_path, capsys, probe_cfg(fake), "--probe")
+    assert code == 12 and doc["probe"]["failed"].startswith("budget_exhausted")
+    assert fake.argvs() == []
+    clean(fake, sdir)
+
+
+def test_the_hash_follows_the_gatectl_version_and_the_session_cmd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gatectl.config_models import SharedConfig
+
+    shared = SharedConfig()
+    before = agenthash.agent_config_hash(shared, ["/x/cs"])
+    monkeypatch.setattr(agenthash, "__version__", "999.0.0")
+    assert agenthash.agent_config_hash(shared, ["/x/cs"]) != before
+    monkeypatch.undo()
+    assert agenthash.agent_config_hash(shared, ["/y/cs"]) != before
