@@ -1031,7 +1031,8 @@
           "items": {
             "$ref": "#/$defs/check_def"
           },
-          "minItems": 1
+          "minItems": 1,
+          "maxItems": 128
         },
         "cache_ttl": {
           "$ref": "#/$defs/duration",
@@ -1073,7 +1074,8 @@
           "items": {
             "$ref": "#/$defs/check_def"
           },
-          "minItems": 1
+          "minItems": 1,
+          "maxItems": 128
         },
         "cache_ttl": {
           "$ref": "#/$defs/duration",

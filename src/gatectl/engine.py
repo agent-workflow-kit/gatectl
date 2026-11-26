@@ -289,6 +289,7 @@ class _Run:
     would_be: Combined | None = None
     decision_id: str | None = None
     script_n: int = 0
+    out_of_budget: bool = False  # a script check was refused for want of budget (not its text)
 
     @property
     def state(self) -> str:
@@ -347,16 +348,17 @@ def run(ctx: Context, env: Env) -> Result:
     resolved = store_mod.read_effective(
         name, scope.scope, policy.state, indeterminate=scope.indeterminate
     )
-    warnings = list(scope.warnings)
-    repo = None if scope.scope == STAR else scope.scope
-    if loaded.warns_config_problem_for(name, repo):
-        warnings.append("config_problem")
-
     state = _Run(
         ctx, env, loaded, name, policy, scope, fingerprint, resolved, raw, obj,
-        deadline, reserve, warnings,
+        deadline, reserve, list(scope.warnings),
     )  # fmt: skip
     try:
+        # todo(#35): from here the checks run; #35 installs the SIGTERM, SIGINT and SIGHUP
+        # handlers (stop what was started, a `terminated` log event, remove tmp/<decision_id>/,
+        # no raw KeyboardInterrupt traceback, exit 128 plus the signal number).
+        repo = None if scope.scope == STAR else scope.scope
+        if loaded.warns_config_problem_for(name, repo):
+            state.warnings.append("config_problem")
         return _decide(state)
     except Exception as exc:  # the state is known: shadow never blocks, enforced fails closed
         return _failure(state, exc)
@@ -427,7 +429,6 @@ def _decide(run: _Run) -> Result:
     entries: list[Entry] = []
     if invalid is None:
         entries = _run_checks(run)
-    run.entries = entries
     combined = run.would_be if invalid is not None else combine(entries)
     assert combined is not None
     run.would_be = combined
@@ -482,6 +483,7 @@ def _script_entry(run: _Run, check: ScriptCheck) -> Entry:
     defaults = run.loaded.shared.defaults
     remaining = run.budget()
     if remaining <= 0:
+        run.out_of_budget = True
         return Entry(check.name, "script", "escalate", "timeout", "not started", 0)
     own = check.timeout if check.timeout is not None else defaults.script_timeout
     run.script_n += 1
@@ -519,9 +521,8 @@ def _run_checks(run: _Run) -> list[Entry]:
     """Steps 6 and 7. Results come back in execution order: rule and script checks in listed
     order, then agent checks."""
     order = plan.execution_order(run.policy)
-    entries: list[Entry] = []
+    entries = run.entries  # filled in place: a failure mid-way keeps what already ran
     denied = False
-    out_of_time = False
     try:
         for check in order:
             if isinstance(check, AgentCheck):
@@ -530,13 +531,11 @@ def _run_checks(run: _Run) -> list[Entry]:
                 entries.append(skipped(check))
             elif isinstance(check, RuleCheck):
                 entries.append(_rule_entry(run, check))
-            elif out_of_time:
+            elif run.out_of_budget:
                 entries.append(skipped(check))
             else:
                 assert isinstance(check, ScriptCheck)
-                entry = _script_entry(run, check)
-                out_of_time = entry.detail == "not started" and entry.reason == "timeout"
-                entries.append(entry)
+                entries.append(_script_entry(run, check))
             denied = denied or entries[-1].verdict == "deny"
         so_far = combine(entries).decision if entries else "allow"
         for check in order:

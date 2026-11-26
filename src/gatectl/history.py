@@ -14,10 +14,11 @@ sanitized and cut to its cap. The effective outcome is computed in SQL from the 
 sequence order (interface.md, Outcomes): the last ``disagree`` or human ``agree`` decides, and an
 automatic ``agree`` never counts.
 
-Seam: the check engine (TODO(#18)) writes ``checks_json``. Its entries are the ``check_entry``
-shape of ``schemas/defs.json``; an agent entry that reused a cached result also carries
+The check engine writes ``checks_json``. Its entries are the ``check_entry`` shape of
+``schemas/defs.json``; an agent entry that reused a cached result also carries
 ``cache_key``, the ``agent_cache.key`` it read, which ``show`` follows to the decision that
-produced the result (``cache_source``) and never prints.
+produced the result (``cache_source``) and never prints. TODO(#24): the agent run is the
+producer of ``cache_key``.
 """
 
 from __future__ import annotations
