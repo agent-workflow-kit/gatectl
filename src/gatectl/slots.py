@@ -17,8 +17,9 @@ process's ``agent.max_parallel`` rows are *live* at once, across all gatectl pro
 * ``release`` is best effort and never raises for a store problem: a row that stays behind
   belongs to a process that is about to end, and the next acquire deletes it as dead.
 
-The run sequence that calls these is #24; ``reconcile``'s use of ``list_slots`` (overdue live
-holders, rows to sweep) and ``purge_dead`` is #32. Nothing here starts a process.
+The run sequence that calls these is ``engine._agent_entry``; ``reconcile``'s use of
+``list_slots`` (overdue live holders, rows to sweep) and ``purge_dead`` is #32. Nothing here
+starts a process.
 """
 
 from __future__ import annotations

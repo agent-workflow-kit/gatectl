@@ -131,15 +131,20 @@ def test_rule_and_script_checks_run_in_listed_order_then_agents_last(
             rule,
             sc("s2", make_script(tmp_path, "b", ALLOW)),
         ],
+        top={"session_cmd": ["/nonexistent/claude-session"]},
     )
     _, doc, _ = do_check(capsys, config, "p", "--input", write_input(tmp_path, {}))
     assert [(c["name"], c["verdict"]) for c in doc["checks"]] == [
         ("s1", "allow"), ("r", "allow"), ("s2", "allow"), ("ai", "escalate"),
     ]  # fmt: skip
-    # TODO(#24): the agent run; until then an agent check that would run escalates, never allows
-    assert doc["checks"][3]["detail"] == "agent checks are not implemented"
+    # no claude-session at the configured path: the agent check escalates tool_missing
+    assert doc["checks"][3]["reason"] == "tool_missing"
+    assert doc["checks"][3]["detail"] == (
+        "/nonexistent/claude-session not found; install: "
+        "uv tool install git+https://github.com/agent-workflow-kit/claude-session"
+    )
     assert (doc["checks"][3]["confidence"], doc["checks"][3]["reused"]) == (None, False)
-    assert doc["decision"] == "escalate" and doc["reason"] == "check_error"
+    assert doc["decision"] == "escalate" and doc["reason"] == "tool_missing"
 
 
 def test_an_agent_check_is_skipped_after_a_deny_or_an_escalate(

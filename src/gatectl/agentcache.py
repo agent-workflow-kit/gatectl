@@ -23,7 +23,8 @@ a verdict, and never echoes what it holds. ``reasons`` can quote input: they are
 capped when stored and when read.
 
 Whether a result may be cached (a valid artifact of a ``done`` run only), ``--no-cache`` and the
-reuse sequence are the engine's (TODO(#24)); this module stores what it is given.
+reuse sequence are the engine's (``engine._agent_entry``, ``engine._write_cache``); this module
+stores what it is given.
 """
 
 from __future__ import annotations
