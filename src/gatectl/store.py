@@ -26,6 +26,7 @@ Upgrades). This module owns how it is opened and what is in it:
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 import sqlite3
@@ -172,6 +173,38 @@ class StateRow:
     cause: str
     fingerprint: str
     rev: int
+
+
+@dataclass(frozen=True)
+class DecisionRow:
+    """One ``decisions`` row as ``check`` records it (interface.md, Check order step 8).
+
+    ``declared_json`` and ``checks_json`` are compact JSON text; ``repo`` is None for scope ``*``;
+    ``state_rev`` is the ``rev`` of the row that supplied the state (None for the initial state
+    and for an indeterminate scope); ``input_json`` is only set for a policy with
+    ``record_input``.
+    """
+
+    id: str
+    time: str
+    policy: str
+    scope: str
+    fingerprint: str
+    state: str
+    decision: str
+    reason: str
+    tool: str | None
+    hook: str | None
+    object_type: str | None
+    object_id: str | None
+    repo: str | None
+    input_sha256: str
+    case_key: str | None
+    state_rev: int | None
+    declared_json: str | None
+    checks_json: str | None
+    actor: str
+    input_json: str | None
 
 
 @dataclass(frozen=True)
@@ -463,6 +496,24 @@ class Store:
 
     def _commit(self) -> None:
         self.con.execute("COMMIT")
+
+    def insert_decision(self, row: DecisionRow) -> None:
+        """Insert one decision row. Only inside ``write()``; an id that exists, or a value the
+        schema refuses, is a fixed-text ``InternalError`` (never the driver's text)."""
+        if self.readonly:
+            raise RuntimeError("the store was opened read-only")
+        if not self.con.in_transaction:
+            raise RuntimeError("a decision is inserted inside a write transaction")
+        try:
+            self.con.execute(
+                "INSERT INTO decisions(id, time, policy, scope, fingerprint, state, decision,"
+                " reason, tool, hook, object_type, object_id, repo, input_sha256, case_key,"
+                " state_rev, declared_json, checks_json, actor, input_json)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                dataclasses.astuple(row),
+            )
+        except sqlite3.Error as exc:
+            raise _translate(exc) from None
 
     def append_audit(self, record: Mapping[str, Any]) -> None:
         """Append one record to ``audit.jsonl`` inside the open write transaction, before the

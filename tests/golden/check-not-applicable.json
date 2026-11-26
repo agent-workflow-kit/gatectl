@@ -1,1 +1,1 @@
-{"schema_version":1,"policy":"auto-merge","scope":"*","state":"enforced","shadow":false,"enforced":false,"decision":"allow","reason":"not_applicable","fingerprint":"sha256:abababababababababababababababababababababababababababababababab","checks":[],"warnings":[],"error":null}
+{"schema_version":1,"policy":"auto-merge","scope":"*","state":"enforced","shadow":false,"enforced":false,"decision":"allow","reason":"not_applicable","fingerprint":"sha256:40195df44370bda08f31cb8cc9336c6a56b3b9fbfc1111aebffd995d289fb780","checks":[],"warnings":[],"error":null}

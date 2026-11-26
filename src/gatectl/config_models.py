@@ -529,7 +529,14 @@ class InputDecl(_Base):
         return self
 
 
+# A decision stores one entry per check; `show` refuses a row of more than history.MAX_CHECKS
+# (256) entries or 64 KiB, so a policy is capped well below that (agent entries are larger).
+MAX_POLICY_CHECKS = 128
+
+
 def _no_duplicate_names(checks: list[Any]) -> None:
+    if len(checks) > MAX_POLICY_CHECKS:
+        raise fail("invalid_value", f"at most {MAX_POLICY_CHECKS} checks per policy", "checks")
     seen: set[str] = set()
     for index, check in enumerate(checks):
         if check.name in seen:

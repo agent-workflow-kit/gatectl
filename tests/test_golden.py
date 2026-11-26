@@ -17,12 +17,7 @@ SCHEMAS = Path(__file__).resolve().parent.parent / "schemas"
 # golden stem -> the command whose stdout it is. The handlers are stubs until each command lands:
 # the owner issue replaces the stub with the real command output (see the todo on each entry).
 COMMAND_OF = {
-    # todo(#18): replace the stub with the real check output
-    "check-shadow-allow": "check",
-    "check-enforced-deny": "check",
-    "check-not-applicable": "check",
-    "check-off": "check",
-    "check-shadow-error": "check",
+    # the check goldens are real (#18): see tests/test_check_golden.py
     # check-dry-run is real (#11): see tests/test_dry_run.py::test_the_plan_is_golden
     # todo(#28): replace the stub with the real outcome output
     "outcome": "outcome",

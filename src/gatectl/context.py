@@ -7,8 +7,9 @@ importing the command table (which imports the handler modules).
 from __future__ import annotations
 
 import argparse
+import time
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -25,6 +26,8 @@ class Context:
     actor: str | None  # validated against the grammar, not yet resolved to a default
     decision_ids: tuple[str, ...]  # the caller's --decision-id values, validated
     stdin_tty: bool
+    # The monotonic time the process started (``check``'s deadline counts from it).
+    started: float = field(default_factory=time.monotonic)
 
 
 @dataclass(frozen=True)
@@ -45,3 +48,6 @@ class Result:
     # ``stderr_after`` runs once the stream ends and may give the one stderr line.
     stream: Iterator[str] | None = None
     stderr_after: Callable[[], str | None] | None = None
+    # Point descriptors 0, 1 and 2 at /dev/null once everything is printed (``check`` after it
+    # recorded a decision: a hook must never inherit the caller's pipes).
+    detach: bool = False
