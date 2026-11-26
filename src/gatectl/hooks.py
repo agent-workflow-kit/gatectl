@@ -51,6 +51,8 @@ SHELL = "/bin/sh"
 MAX_HOOKS = 64
 # A payload (and so a job) over this is not sent: a hook payload is small by construction.
 MAX_PAYLOAD = 256 * 1024
+# A job (frame body) over this is neither sent nor read.
+MAX_JOB = MAX_PAYLOAD * 2 + 1024 * 64
 # Supervisors that may run hooks at the same time, machine-wide (state directory); another one
 # logs ``hook_skipped`` (``busy``) and ends. Released by the kernel when its holder dies.
 MAX_SLOTS = 16
@@ -372,7 +374,7 @@ def read_job(
     while True:
         if size is not None and len(data) >= size:
             return data
-        if len(data) > MAX_PAYLOAD * 2 + 1024 * 64 and size is None:
+        if len(data) > MAX_JOB and size is None:
             raise JobInvalid("header too long")
         remaining = end - time.monotonic()
         if remaining <= 0 or (cancel is not None and cancel()):
@@ -393,7 +395,7 @@ def read_job(
                 if not head.startswith(_MAGIC) or not head[len(_MAGIC) :].isdigit():
                     raise JobInvalid("bad header")
                 body = int(head[len(_MAGIC) :])
-                if body > MAX_PAYLOAD * 2 + 1024 * 64:
+                if body > MAX_JOB:
                     raise JobInvalid("job too large")
                 size = len(head) + 1 + body
                 if len(data) > size:
@@ -409,21 +411,32 @@ def read_job(
 
 def acquire_slot(state_dir: Path) -> int | None:
     """Take one of ``MAX_SLOTS`` advisory locks (``hook-slot-<n>.lock`` in the state directory);
-    ``None`` when all are held, ``OSError`` when the lock files cannot be used at all. The
+    ``None`` when all usable ones are held, ``OSError`` when none can be used at all (a slot
+    file that cannot be opened or locked is skipped for the next). The
     descriptor is close-on-exec, so no hook inherits it, and the kernel releases the lock when
     the holder ends, however it ends."""
     os.makedirs(state_dir, mode=0o700, exist_ok=True)
+    unusable: OSError | None = None
+    usable = False
     for n in range(MAX_SLOTS):
         path = state_dir / f"hook-slot-{n}.lock"
-        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        except OSError as e:  # one bad slot file (a symlink, a permission) never disables the rest
+            unusable = e
+            continue
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as e:
             os.close(fd)
             if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
-                continue
-            raise
+                usable = True
+            else:
+                unusable = e
+            continue
         return fd
+    if unusable is not None and not usable:
+        raise unusable
     return None
 
 
@@ -464,11 +477,12 @@ def start_detached(
     try:
         encode_payload(ev.payload)
         frame = encode_job(ev, state_dir)
-        if len(frame) > MAX_PAYLOAD * 2 + 1024 * 64:
-            raise ValueError("job too large")
         spec = supervisor_spec(environ)
     except (TypeError, ValueError):
         log_event(state_dir, ev, "hook_skipped", "warn", {"reason": "payload_invalid"})
+        return False
+    if len(frame) > MAX_JOB:  # the supervisor would refuse it, silently: say so here
+        log_event(state_dir, ev, "hook_skipped", "warn", {"reason": "payload_too_large"})
         return False
     try:
         child = gw.start(spec)

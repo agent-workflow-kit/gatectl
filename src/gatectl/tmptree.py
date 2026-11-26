@@ -181,7 +181,14 @@ def create_hook_dir(state_dir: Path, payload: bytes) -> Path:
         else:
             raise OSError("no unused hook directory name")
         path = state_dir / "tmp" / name
-        fd = _open_dir(name, tmp_fd, str(path))
+        try:
+            fd = _open_dir(name, tmp_fd, str(path))
+        except BaseException:
+            try:
+                os.rmdir(name, dir_fd=tmp_fd)
+            except OSError:
+                pass
+            raise
         try:
             _write_owner(fd, str(path))
             _write_payload(fd, payload)

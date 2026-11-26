@@ -339,3 +339,17 @@ def test_hook_dir_leaves_nothing_when_the_payload_cannot_be_written(
     with pytest.raises(OSError):
         tmptree.create_hook_dir(tmp_path, b"x")
     assert list((tmp_path / "tmp").iterdir()) == []
+
+
+def test_hook_dir_leaves_nothing_when_the_new_directory_cannot_be_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gatectl import tmptree
+
+    def boom(*a: object, **k: object) -> int:
+        raise OSError(24, "too many open files")
+
+    monkeypatch.setattr(tmptree, "_open_dir", boom)
+    with pytest.raises(OSError):
+        tmptree.create_hook_dir(tmp_path, b"x")
+    assert list((tmp_path / "tmp").iterdir()) == []

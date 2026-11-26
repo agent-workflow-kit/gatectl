@@ -41,6 +41,8 @@ def ev(*cmds: str, **kw: Any) -> HookEvent:
 
 
 def run_supervisor(tmp_path: Path, stdin: bytes) -> subprocess.CompletedProcess[bytes]:
+    """The supervisor as a direct child, ended by its own handle: ``subprocess.run`` kills the
+    child it started (never anything found by pattern) when the 30 s bound passes."""
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     env = {"PATH": os.environ["PATH"], "HOME": str(home), "XDG_STATE_HOME": str(home / "state")}
@@ -49,7 +51,7 @@ def run_supervisor(tmp_path: Path, stdin: bytes) -> subprocess.CompletedProcess[
         input=stdin,
         capture_output=True,
         env=env,
-        timeout=60,
+        timeout=30,
         check=False,
     )
 
@@ -162,6 +164,23 @@ def test_with_every_slot_taken_the_hooks_are_skipped_and_logged_busy(tmp_path: P
             os.close(fd)
 
 
+def test_an_unusable_slot_file_is_skipped_and_the_next_slot_is_used(tmp_path: Path) -> None:
+    (tmp_path / "elsewhere").write_text("")
+    os.symlink(tmp_path / "elsewhere", tmp_path / "hook-slot-0.lock")  # O_NOFOLLOW refuses it
+    fd = hooks.acquire_slot(tmp_path)
+    assert fd is not None
+    os.close(fd)
+    assert (tmp_path / "hook-slot-1.lock").exists()
+
+
+def test_with_no_usable_slot_file_acquire_raises(tmp_path: Path) -> None:
+    (tmp_path / "elsewhere").write_text("")
+    for n in range(hooks.MAX_SLOTS):
+        os.symlink(tmp_path / "elsewhere", tmp_path / f"hook-slot-{n}.lock")
+    with pytest.raises(OSError):
+        hooks.acquire_slot(tmp_path)
+
+
 def test_a_slot_is_free_again_when_its_holder_ends(tmp_path: Path) -> None:
     first = hooks.acquire_slot(tmp_path)
     assert first is not None
@@ -199,6 +218,17 @@ def test_start_detached_with_no_hooks_starts_nothing(tmp_path: Path) -> None:
     gw = FakeGateway()
     assert not hooks.start_detached(gw, ev(), state_dir=tmp_path, environ={})
     assert gw.calls == []
+
+
+def test_a_job_over_the_frame_cap_is_logged_payload_too_large_and_never_sent(
+    tmp_path: Path,
+) -> None:
+    gw = FakeGateway()
+    many = ev(*[("echo " + "x" * 20_000)] * 40)  # each payload is small; the job is not
+    assert not hooks.start_detached(gw, many, state_dir=tmp_path, environ={})
+    assert gw.calls == []
+    (rec,) = [json.loads(x) for x in (tmp_path / "log.jsonl").read_text().splitlines()]
+    assert (rec["event"], rec["data"]) == ("hook_skipped", {"reason": "payload_too_large"})
 
 
 def test_start_detached_never_raises_when_the_supervisor_cannot_start(tmp_path: Path) -> None:

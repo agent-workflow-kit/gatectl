@@ -7,9 +7,11 @@ each in its own process group with the hook's timeout, the TERM-then-KILL sequen
 only, and a lifeline watchdog that kills the group if this process is killed.
 
 SIGTERM ends the running hook's group, skips the rest and removes the hook's directory; SIGHUP and
-SIGINT are ignored (no terminal reaches a session of its own). SIGKILL cannot be handled: the
-watchdog kills the hook's group and the directory is left for ``reconcile``. The exit status is
-always 0 for a job that was understood: a hook's failure is a log event, never an error here.
+SIGINT are caught and dropped (no terminal reaches a session of its own), by a handler and not
+``SIG_IGN``: an ignore would be inherited across ``exec`` and a hook could not trap them.
+SIGKILL cannot be handled: the watchdog kills the hook's group and the directory is left for
+``reconcile``. The exit status is always 0 for a job that was understood: a hook's failure is a log
+event, never an error here.
 """
 
 from __future__ import annotations
@@ -35,6 +37,10 @@ def _devnull_stdin() -> None:
         pass
 
 
+def _drop(signum: int, frame: object) -> None:
+    """Survive the signal; nothing to do."""
+
+
 def main() -> int:
     terminated = [False]
 
@@ -42,8 +48,8 @@ def main() -> int:
         terminated[0] = True
 
     signal.signal(signal.SIGTERM, on_term)
-    signal.signal(signal.SIGHUP, signal.SIG_IGN)
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGHUP, _drop)  # a handler is reset to the default at exec, SIG_IGN is not
+    signal.signal(signal.SIGINT, _drop)
 
     def cancel() -> bool:
         return terminated[0]

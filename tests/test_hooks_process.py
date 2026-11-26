@@ -61,6 +61,50 @@ def test_a_caller_reading_to_eof_is_not_held_by_a_sync_and_an_async_hook(
     assert not second.exists()  # hooks of one event run one after the other
 
 
+def test_hooks_run_one_after_the_other_never_concurrently(tmp_path: Path, tracker: Tracker) -> None:
+    pid_file, first_done, second_ran = tmp_path / "a.pid", tmp_path / "first", tmp_path / "second"
+    config = hook_config(
+        tmp_path,
+        hook(f"echo $$ > {pid_file}; sleep 2; touch {first_done}"),
+        hook(f"touch {second_ran}"),
+    )
+    caller = Caller(tmp_path, config)
+    try:
+        caller.read_to_eof()
+        caller.proc.wait(timeout=5)
+    finally:
+        caller.close()
+    first_pid = read_pid(pid_file)
+    tracker.track_pid(first_pid)
+    tracker.expect_survivor(first_pid)
+    time.sleep(1.0)  # well inside the first hook's 2 s: the second must still be waiting
+    assert tracker.alive(first_pid) and not first_done.exists()
+    assert not second_ran.exists()
+    wait_exists(second_ran, 10)
+    assert first_done.exists()  # the second started only after the first had finished
+    assert second_ran.stat().st_mtime_ns >= first_done.stat().st_mtime_ns
+
+
+def test_hooks_start_with_default_dispositions_for_sighup_and_sigint(
+    tmp_path: Path, tracker: Tracker
+) -> None:
+    pid_file, status = tmp_path / "pid", tmp_path / "status"
+    cmd = f"grep SigIgn /proc/$$/status > {status}; echo $$ > {pid_file}; exec sleep 20"
+    caller = Caller(tmp_path, hook_config(tmp_path, hook(cmd)))
+    try:
+        caller.read_to_eof()
+        caller.proc.wait(timeout=5)
+    finally:
+        caller.close()
+    running = hooked(tracker, pid_file)
+    ignored = int(status.read_text().split()[1], 16)
+    assert ignored & ((1 << (signal.SIGHUP - 1)) | (1 << (signal.SIGINT - 1))) == 0
+    os.kill(running.supervisor, signal.SIGHUP)  # the recorded, verified supervisor pid
+    os.kill(running.supervisor, signal.SIGINT)
+    time.sleep(0.3)
+    assert tracker.alive(running.supervisor) and tracker.alive(running.hook)
+
+
 def test_the_supervisor_and_hook_hold_no_descriptor_of_the_caller_and_have_own_groups(
     tmp_path: Path, tracker: Tracker
 ) -> None:
@@ -197,8 +241,7 @@ def test_a_sigkilled_supervisor_leaves_its_directory_and_the_watchdog_kills_the_
     assert tracker.wait_dead(running.hook, 10.0)  # the lifeline watchdog killed the group
     assert directory.is_dir() and (directory / "payload.json").exists()
     assert json.loads((directory / "owner").read_text())["pid"] == running.supervisor
-    time.sleep(0)  # nothing removes it: that is reconcile's
-    assert directory.is_dir()
+    assert directory.is_dir()  # nothing removes it: that is reconcile's
     assert log_events(tmp_path) == []
 
 
@@ -269,5 +312,5 @@ def test_a_check_killed_with_sigkill_leaves_no_process_holding_the_callers_pipes
         caller.close()
     assert out == b"" and err == b""
     assert tracker.wait_dead(pid, 5.0)  # the lifeline watchdog killed the script's group
-    time.sleep(0.5)
+    time.sleep(0.5)  # a bounded settle: the (absent) hook would have started by now
     assert not marker.exists() and hook_dirs(tmp_path) == []  # no decision, no hook

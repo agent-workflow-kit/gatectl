@@ -94,12 +94,26 @@ def test_output_is_discarded_and_no_descriptor_above_2_is_held(
     fds = json.loads(seen.read_text())
     assert fds["0"].endswith("/payload.json")
     assert (fds["1"], fds["2"]) == ("/dev/null", "/dev/null")
-    # Whatever else the probe's interpreter holds (its listing handle, a runtime file), nothing of
-    # gatectl's: no pipe, no socket, no file of the state tree or the test's directory.
+    # Whatever else the probe's interpreter holds must be a regular file that is the payload, the
+    # null device or interpreter-owned (its prefixes, system libraries, /proc, /sys): no pipe,
+    # socket, anon inode or terminal, and nothing of the state tree or the test's directory.
+    allowed = (
+        os.path.realpath(sys.prefix),
+        os.path.realpath(sys.base_prefix),
+        "/usr/",
+        "/lib",
+        "/proc/",
+        "/sys/",
+    )
     for n, target in fds.items():
-        if int(n) > 2:
-            assert not target.startswith(("pipe:", "socket:", "anon_inode:")), (n, target)
-            assert str(tmp_path) not in target, (n, target)
+        if int(n) <= 2:
+            continue
+        assert target.startswith("/"), (n, target)  # pipe:, socket:, anon_inode: and the like
+        assert not target.startswith(("/dev/pts/", "/dev/tty")), (n, target)
+        if target.endswith("/payload.json") or target == "/dev/null":
+            continue
+        assert str(tmp_path) not in target, (n, target)
+        assert target.startswith(allowed), (n, target)
 
 
 def test_the_environment_is_gatectls_plus_the_three_reserved_names(

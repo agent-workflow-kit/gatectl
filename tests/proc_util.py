@@ -103,8 +103,9 @@ class Tracker:
         if cmdline_contains is not None:
             line = _settled_cmdline(pid)
             # A just-spawned child can still show its parent's command line for an instant
-            # after the spawn returns; re-read for a short bound before calling it a mismatch.
-            for _ in range(50):
+            # after the spawn returns; re-read for a bounded ~5 s (a slow runner) before calling
+            # it a mismatch.
+            for _ in range(500):
                 if not line or cmdline_contains in line:
                     break
                 time.sleep(0.01)
