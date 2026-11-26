@@ -465,6 +465,17 @@ def list_decisions(
     return found, len(rows) > limit
 
 
+def effective_outcome(store: Store, decision_id: str) -> str:
+    """The effective outcome of one decision (``pending`` when it has no counting record).
+
+    The same SQL expression the ``--outcome`` filter and ``show`` use, so the rule has one home.
+    """
+    rows = store.query(f"SELECT {_EFFECTIVE} FROM decisions d WHERE d.id = ?", (decision_id,))  # noqa: S608
+    if not rows:
+        raise NotFoundError("no such decision")
+    return _one_of(rows[0][0], ("pending", *OUTCOMES))
+
+
 def resolve(store: Store, ref: ids.DecisionRef) -> str:
     """The one stored id ``ref`` names: unknown exits 10, ambiguous exits 21."""
     low = f"gd-{ref.prefix}"
