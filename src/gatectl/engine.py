@@ -28,7 +28,8 @@ check starts only while it is above 0 and gets the smaller of its own timeout an
 
 Seams: agent checks are not implemented yet (TODO(#24): the run sequence; until then an agent
 check that would run escalates ``check_error``, never allows), and the detached ``post-decision``
-hook supervisor starts after the descriptors are pointed at ``/dev/null`` (TODO(#20)).
+hook supervisor starts after the descriptors are pointed at ``/dev/null`` (``Result.after_detach``;
+``hooks.start_detached``).
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from gatectl import audit, drift, history, ids, inputs, plan, rules, runner, tmptree
+from gatectl import audit, drift, history, hooks, ids, inputs, plan, rules, runner, tmptree
 from gatectl import fingerprint as fingerprint_mod
 from gatectl import store as store_mod
 from gatectl.clock import now_ts
@@ -701,8 +702,41 @@ def _record(
             combined.decision, run.name, run.scope.scope, combined.reason, combined.check,
             decision_id,
         )  # fmt: skip
-    # TODO(#20): start the detached post-decision hook supervisor here, after the commit.
-    return Result(payload=doc, exit_code=code, stderr=line, detach=True)
+    return Result(
+        payload=doc,
+        exit_code=code,
+        stderr=line,
+        detach=True,
+        after_detach=_post_decision(run, doc, str(actor.actor)),
+    )
+
+
+def _post_decision(run: _Run, doc: Mapping[str, Any], actor: str) -> Callable[[], None] | None:
+    """The ``post-decision`` hooks, to be started once the result is printed and the caller's
+    descriptors are gone (``cli.main`` calls this after the detach). ``None`` when none are
+    configured: no process is started. The decision is committed, so this runs only on the
+    recorded path (never for off, ``not_applicable`` or a shadow failure)."""
+    entries = run.loaded.shared.hooks.post_decision
+    if not entries:
+        return None
+    event = hooks.post_decision_event(
+        commands=[hooks.HookCommand(h.cmd, h.timeout.total_seconds()) for h in entries],
+        decision_id=doc["decision_id"],
+        policy=doc["policy"],
+        scope=doc["scope"],
+        state=doc["state"],
+        decision=doc["decision"],
+        reason=doc["reason"],
+        fingerprint=doc["fingerprint"],
+        actor=actor,
+        checks=doc["checks"],
+    )
+    gateway, environ, state_dir = run.env.gateway, run.env.environ, audit.state_dir()
+
+    def start() -> None:
+        hooks.start_detached(gateway, event, state_dir=state_dir, environ=environ)
+
+    return start
 
 
 def _failure(run: _Run, exc: Exception) -> Result:

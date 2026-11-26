@@ -483,3 +483,106 @@ def test_child_spec_survives_deepcopy_and_pickle() -> None:
             clone.env["B"] = "2"  # type: ignore[index]
     bare = spec(py("pass"))
     assert copy.deepcopy(bare) == bare
+
+
+# --- a file as stdin, and a new session (detached hooks, #20) ---------------------------------
+
+
+def test_stdin_file_is_the_files_content_and_seekable(tmp_path: Path) -> None:
+    path = tmp_path / "payload.json"
+    path.write_bytes(b'{"a": 1}')
+    code = "import sys; sys.stdout.write(sys.stdin.read() + str(sys.stdin.seekable()))"
+    s = ChildSpec(
+        (sys.executable, "-c", code),
+        stdin=Stdio.FILE,
+        stdin_path=str(path),
+        stdout=Stdio.PIPE,
+        stderr=Stdio.DEVNULL,
+    )
+    with started(SubprocessGateway(), s) as child:
+        assert child.stdin is None
+        assert output(child) == b'{"a": 1}True'
+
+
+def test_stdin_file_missing_raises_oserror(tmp_path: Path) -> None:
+    s = ChildSpec(
+        ("true",),
+        stdin=Stdio.FILE,
+        stdin_path=str(tmp_path / "nope"),
+        stdout=Stdio.DEVNULL,
+        stderr=Stdio.DEVNULL,
+    )
+    with pytest.raises(OSError):
+        SubprocessGateway().start(s)
+
+
+def test_stdin_file_does_not_follow_a_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "secret"
+    target.write_bytes(b"x")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    s = ChildSpec(
+        ("true",),
+        stdin=Stdio.FILE,
+        stdin_path=str(link),
+        stdout=Stdio.DEVNULL,
+        stderr=Stdio.DEVNULL,
+    )
+    with pytest.raises(OSError):
+        SubprocessGateway().start(s)
+
+
+def test_stdin_file_and_path_go_together() -> None:
+    with pytest.raises(ValueError, match="stdin_path"):
+        ChildSpec(("x",), stdin=Stdio.FILE, stdout=Stdio.DEVNULL, stderr=Stdio.DEVNULL)
+    with pytest.raises(ValueError, match="stdin_path"):
+        ChildSpec(
+            ("x",), stdin=Stdio.PIPE, stdin_path="/a", stdout=Stdio.DEVNULL, stderr=Stdio.DEVNULL
+        )
+    with pytest.raises(ValueError, match="stdin_path"):
+        ChildSpec(
+            ("x",), stdin=Stdio.FILE, stdin_path="a\x00b", stdout=Stdio.DEVNULL,
+            stderr=Stdio.DEVNULL,
+        )  # fmt: skip
+
+
+@pytest.mark.parametrize("which", ["stdout", "stderr"])
+def test_only_stdin_may_be_a_file(which: str) -> None:
+    kw: dict[str, object] = {"stdin": Stdio.DEVNULL, "stdout": Stdio.DEVNULL}
+    kw["stderr"] = Stdio.DEVNULL
+    kw[which] = Stdio.FILE
+    with pytest.raises(ValueError, match=which):
+        ChildSpec(("x",), **kw)  # type: ignore[arg-type]
+
+
+def test_new_session_makes_the_child_a_session_and_group_leader() -> None:
+    code = "import os; print(os.getsid(0), os.getpgid(0), os.getpid())"
+    with started(SubprocessGateway(), spec(py(code), new_session=True)) as child:
+        assert child.own_group
+        sid, pgid, pid = map(int, output(child).split())
+        assert sid == pgid == pid == child.pid
+        assert sid != os.getsid(0)
+
+
+def test_new_session_child_can_be_signalled_as_a_group() -> None:
+    with started(
+        SubprocessGateway(), spec(py("import time; time.sleep(30)"), new_session=True)
+    ) as child:
+        child.signal_group(signal.SIGKILL)
+        assert child.wait(timeout=10) == -signal.SIGKILL
+
+
+def test_spec_rejects_non_bool_new_session_and_pickles() -> None:
+    with pytest.raises(ValueError, match="new_session"):
+        ChildSpec(("x",), stdin=Stdio.DEVNULL, stdout=Stdio.DEVNULL, stderr=Stdio.DEVNULL,
+                  new_session=1)  # type: ignore[arg-type]  # fmt: skip
+    s = ChildSpec(
+        ("x",),
+        stdin=Stdio.FILE,
+        stdin_path="/a",
+        stdout=Stdio.DEVNULL,
+        stderr=Stdio.DEVNULL,
+        new_session=True,
+    )
+    assert pickle.loads(pickle.dumps(s)) == s
+    assert hash(s) == hash(pickle.loads(pickle.dumps(s)))

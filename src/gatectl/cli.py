@@ -9,7 +9,7 @@ import os
 import re
 import sys
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
 from typing import Any, NoReturn
 
@@ -189,6 +189,15 @@ def _detach_descriptors() -> None:
             os.close(devnull)
 
 
+def _after_detach(action: Callable[[], None]) -> None:
+    """Run what must start after the caller's descriptors are gone. Whatever it does (or raises)
+    never changes the exit code or the output, which are already final."""
+    try:
+        action()
+    except Exception:  # noqa: S110
+        pass
+
+
 def _stderr_line(text: str) -> str:
     return sanitize(text, STDERR_CAP).replace("\n", " ") + "\n"
 
@@ -293,6 +302,8 @@ def main(argv: list[str] | None = None) -> int:
         code = _emit(result, json_mode=ctx.json or is_check)
         if result.detach and real_process:
             _detach_descriptors()
+        if result.after_detach is not None:
+            _after_detach(result.after_detach)
         return code
     except Exception as exc:  # the envelope hides the text of anything that is not ours
         return _error_exit(exc, json_mode=ns.json, is_check=is_check, policy=policy)

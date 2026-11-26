@@ -25,7 +25,8 @@ them; ``run_script_check`` adds the private working directory and the environmen
 Nothing here decodes with the locale: output is bytes, and text is decoded as UTF-8.
 """
 
-# TODO(#20): detached hooks reuse ``run_process`` pieces (own group, deadlines, watchdog).
+# Detached hooks (``hooks.run_hooks``) reuse ``run_process``: own group, deadlines, watchdog; a
+# hook's payload file is ``stdin_path`` and its output goes to /dev/null (``capture_output``).
 # TODO(#37): where ``os.waitid`` is missing (some macOS builds), ``Child.wait_exited`` in
 #   gateway.py needs the ``kqueue`` fallback; the watchdog's start-time guard needs a macOS
 #   ``procinfo.start_time``.
@@ -86,6 +87,10 @@ class RunSpec:
     cwd: str
     timeout: float
     stdin_data: bytes | None = None
+    # A file the child reads as its stdin (a hook's payload file); excludes ``stdin_data``.
+    stdin_path: str | None = None
+    # False: stdout and stderr go to /dev/null and nothing is read (a hook's output is discarded).
+    capture_output: bool = True
     stdout_cap: int = OUTPUT_CAP
     stderr_cap: int = OUTPUT_CAP
     kill_grace: float = KILL_GRACE
@@ -109,6 +114,15 @@ class RunSpec:
             raise ValueError(f"timeout must be a positive finite number, got {self.timeout!r}")
         if self.stdin_data is not None and not isinstance(self.stdin_data, bytes):
             raise ValueError("stdin_data must be bytes or None")
+        if self.stdin_path is not None and (
+            self.stdin_data is not None
+            or not isinstance(self.stdin_path, str)
+            or not self.stdin_path
+            or "\x00" in self.stdin_path
+        ):
+            raise ValueError("stdin_path must be a path string and excludes stdin_data")
+        if not isinstance(self.capture_output, bool):
+            raise ValueError("capture_output must be a bool")
         for name in ("stdout_cap", "stderr_cap"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -222,11 +236,17 @@ class _Run:
 
     def _run_check(self) -> None:
         spec = self.spec
+        out = Stdio.PIPE if spec.capture_output else Stdio.DEVNULL
+        if spec.stdin_path is not None:
+            stdin = Stdio.FILE
+        else:
+            stdin = Stdio.DEVNULL if spec.stdin_data is None else Stdio.PIPE
         child_spec = ChildSpec(
             spec.argv,
-            stdin=Stdio.DEVNULL if spec.stdin_data is None else Stdio.PIPE,
-            stdout=Stdio.PIPE,
-            stderr=Stdio.PIPE,
+            stdin=stdin,
+            stdin_path=spec.stdin_path,
+            stdout=out,
+            stderr=out,
             own_group=True,
             cwd=spec.cwd,
             env=spec.env,
@@ -286,7 +306,8 @@ class _Run:
         writer: _Writer | None = None
         try:
             for stream, sink in ((child.stdout, self.out), (child.stderr, self.err)):
-                assert stream is not None
+                if stream is None:
+                    continue  # discarded: sent to /dev/null, nothing to read
                 fd = stream.fileno()
                 os.set_blocking(fd, False)
                 sel.register(fd, selectors.EVENT_READ)

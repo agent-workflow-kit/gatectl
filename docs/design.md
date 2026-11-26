@@ -125,7 +125,7 @@ Still to verify: a live sandbox containment attack, the lifeline watchdog handsh
 | `inputs.py` | reading the input (regular files only, bounded, polled, deadline-aware), the strict JSON parser wrapper, declaration validation and declared-field and identity capture |
 | `inputhash.py` | canonical input serialization and `input_sha256` |
 | `errors.py` | errors that carry an exit code (usage 2, not found 10, ambiguous 21) |
-| `hooks.py` | the three post hooks, started detached by a supervisor process |
+| `hooks.py`, `supervisor.py` | the hook runner, the job format and the launcher; the detached supervisor process (`python -I -m gatectl.supervisor`) that runs a check's `post-decision` hooks (started with `-I`, so gatectl must be an installed package of that interpreter; a supervisor that cannot start is silent) |
 | `gateway.py` | every subprocess call, so tests substitute fakes |
 | `plugin/` (package data) | the bundled plugin: `.claude-plugin/plugin.json`, `skills/gate-check/SKILL.md`, the placeholder files, the permission profile file (a copy of claude-session's built-in `review` profile, added in the plan's agent stage, with a test that fails when it drifts from a pinned copy of the built-in) |
 
