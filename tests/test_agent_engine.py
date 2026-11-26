@@ -258,6 +258,24 @@ def test_the_budget_is_checked_again_once_the_slot_is_held_and_the_slot_is_relea
     assert_refused_early(fake, sdir)
 
 
+def test_a_deadline_passed_before_the_definition_is_read_again_is_budget_exhausted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = Fake(tmp_path)
+    offset = [0.0]
+    limits_env(monkeypatch, monotonic=lambda: time.monotonic() + offset[0])
+    real = agentcache.get
+
+    def late(*args: Any, **kwargs: Any) -> Any:
+        offset[0] = 1000.0  # the clock jumps past the deadline between the two steps
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(agentcache, "get", late)
+    _, doc, _ = check(tmp_path, capsys, config(fake))
+    assert entry_of(doc) == ("escalate", "budget_exhausted")
+    assert_refused_early(fake, sdir)
+
+
 def test_slot_starvation_is_busy(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -401,6 +419,30 @@ def test_files_that_cannot_be_deleted_never_change_the_verdict(
     assert "secret" not in text
     assert any(line.get("message") == "workdir_left" for line in log_lines(sdir))
     assert fake.unforgotten() == []
+
+
+def test_a_failing_delete_still_removes_the_outcome_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], sdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = Fake(tmp_path)
+    limits_env(monkeypatch)
+    judged(monkeypatch)
+    removed: list[list[str]] = []
+    real = tmptree.remove_private_files
+
+    def spy(directory: Any, names: Any) -> Any:
+        removed.append(list(names))
+        return real(directory, names)
+
+    def boom(_self: Any) -> None:
+        raise OSError("no")
+
+    monkeypatch.setattr(agentfiles.AgentFiles, "delete", boom)
+    monkeypatch.setattr(tmptree, "remove_private_files", spy)
+    _, doc, _ = check(tmp_path, capsys, config(fake))
+    assert entry_of(doc) == ("allow", None)
+    assert ["outcome.json"] in removed
+    assert any(line.get("message") == "workdir_left" for line in log_lines(sdir))
 
 
 def test_two_agent_checks_each_get_their_own_session_and_files(

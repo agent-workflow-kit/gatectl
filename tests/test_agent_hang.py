@@ -144,7 +144,9 @@ def test_a_hung_exec_and_stop_end_within_the_documented_bound(
     limits_env(monkeypatch, tracker, SHORT)
     doc, elapsed = run_check(tmp_path, capsys, cfg_for(fake))
     assert doc["checks"][0]["reason"] == "timeout"
-    bound = 1.0 + SHORT.cleanup_budget + 2 * SHORT.kill_grace + SHORT.call_timeout + 3.0
+    # clean-up calls are charged their kill grace, so the whole budget is the bound; the exec
+    # guard and its grace come before it
+    bound = 1.0 + SHORT.cleanup_budget + SHORT.kill_grace + SHORT.call_timeout + 3.0
     assert elapsed < bound + 4.0  # + start/status process start-up on a slow machine
     assert tracker.items  # a leak is failed by the tracker fixture itself
 

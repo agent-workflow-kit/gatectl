@@ -76,8 +76,8 @@ INSTALL_HINT = "uv tool install git+https://github.com/agent-workflow-kit/claude
 SESSION_ID = re.compile(r"cs-[a-z2-7]{8}", re.ASCII)
 _END_REASON = re.compile(r"[a-z][a-z0-9_]{0,63}", re.ASCII)
 _OUTPUT_CAP = 64 * 1024
-_OUTCOME_CAP = 64 * 1024
-_STATUS_CAP = 1024 * 1024
+_OUTCOME_CAP = 2 * 1024 * 1024
+_STATUS_CAP = 2 * 1024 * 1024
 _LIST_CAP = 1024 * 1024
 _MAX_LISTED = 64
 _MAX_RUN = 2**31 - 1
@@ -257,8 +257,10 @@ class _Session:
         return self.budget
 
     def _bounded(self) -> float:
-        """The timeout of a clean-up call: the smaller of the cap and what is left (<= 0: none)."""
-        return min(self.limits.call_timeout, self._shared().remaining())
+        """The timeout of a clean-up call: the smaller of the cap and what is left once the
+        runner's SIGKILL grace is set aside, so a call that ignores SIGTERM still ends inside
+        the shared budget (<= 0: skip the call)."""
+        return min(self.limits.call_timeout, self._shared().remaining() - self.limits.kill_grace)
 
     @staticmethod
     def _ok(result: runner.RunResult) -> bool:
@@ -449,9 +451,13 @@ class _Session:
                 self.warnings.append("forget_failed")
             return
         listed = self._list()
-        targets: dict[str, bool] = dict(listed) if listed is not None else {}
-        if self.csession_id is not None and self.csession_id not in targets:
-            targets[self.csession_id] = listed is not None  # unknown state: stop it to be safe
+        # An answered list is the truth: only the ids it returned (they carry our labels) are
+        # acted on. Without an answer the one id start gave is the target, never known final.
+        targets: dict[str, bool] = {}
+        if listed is not None:
+            targets = dict(listed)
+        elif self.csession_id is not None:
+            targets[self.csession_id] = False
         for session_id, final in targets.items():
             if not final and not self._stop(session_id):
                 self.warnings.append("stop_failed")

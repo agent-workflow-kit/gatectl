@@ -647,6 +647,15 @@ def _run_agent(run: _Run, check: AgentCheck, finish: _Finish) -> Entry:
                 reused = agentjudge.from_verdict(hit.verdict, cfg.threshold)
                 return _judged(finish, reused, reused=True, cache_key=key)
 
+        # 2. the launch window L; 3. a slot; 4. L again once the slot is held
+        def window() -> float:
+            return run.budget() - agent.LAUNCH_OVERHEAD
+
+        # Tested before the definition is read again: past the deadline every file would hash
+        # as unreadable and the check would end check_error instead of budget_exhausted.
+        if window() < cfg.min_start_budget:
+            return finish("escalate", "budget_exhausted", "not enough time left to start")
+
         # Before any slot or file: what the run needs must be readable and found.
         defined = fingerprint_mod.definition(
             run.name, run.policy, shared, deadline=run.deadline, monotonic=env.monotonic
@@ -673,12 +682,6 @@ def _run_agent(run: _Run, check: AgentCheck, finish: _Finish) -> Entry:
                 "escalate", "tool_missing", agent.missing_session_detail(shared.session_cmd)
             )
 
-        # 2. the launch window L; 3. a slot; 4. L again once the slot is held
-        def window() -> float:
-            return run.budget() - agent.LAUNCH_OVERHEAD
-
-        if window() < cfg.min_start_budget:
-            return finish("escalate", "budget_exhausted", "not enough time left to start")
         decision_id = run.new_id()
         left = max(run.deadline - env.monotonic(), 0.0)
         try:
@@ -752,10 +755,16 @@ def _delete_agent_files(run: _Run, files: agentfiles.AgentFiles) -> None:
     """Delete the run's files (they hold the untrusted input and the nonce). A file that stays
     is a ``workdir_left`` warning and never changes the verdict; the whole directory is removed
     again when the checks end."""
+    left = False
     try:
         files.delete()
+    except Exception:
+        left = True
+    try:
         tmptree.remove_private_files(files.directory, [agent.OUTCOME_NAME])
     except Exception:
+        left = True
+    if left:
         _log("warning", "warn", message="workdir_left", policy=run.name, scope=run.scope.scope,
              decision_id=run.decision_id)  # fmt: skip
 

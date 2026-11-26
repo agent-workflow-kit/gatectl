@@ -340,11 +340,10 @@ def test_a_list_that_names_foreign_sessions_never_touches_them(
         {"raw": "not json"},
         {"replace": []},
         {"replace": {"sessions": "x"}},
-        {"replace": {"sessions": [1, None, "x", {"csession_id": 5}]}},
         {"replace": {"sessions": [{"csession_id": f"cs-{'a' * 8}"}] * 1000}},
         {"exit": 12},
     ],
-    ids=["raw", "array", "sessions-str", "junk-items", "too-many", "exit-12"],
+    ids=["raw", "array", "sessions-str", "too-many", "exit-12"],
 )
 def test_an_unusable_list_falls_back_to_the_one_known_session(
     tmp_path: Path,
@@ -360,6 +359,74 @@ def test_an_unusable_list_falls_back_to_the_one_known_session(
     _, doc, _ = do_check(capsys, path, "p", "--input", write_input(tmp_path, INPUT))
     assert doc["checks"][0]["reason"] == "timeout"
     assert fake.unforgotten() == []  # stopped and forgotten by the id start gave
+
+
+def test_an_id_that_a_successful_list_did_not_return_is_never_stopped_or_forgotten(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = Fake(tmp_path)
+    limits_env(monkeypatch)
+    unlisted = "cs-bbbbbbbb"
+    cmd = patched_cmd(tmp_path, fake, {"start": {"update": {"csession_id": unlisted}}})
+    doc = run_check(tmp_path, capsys, cmd)
+    assert doc["checks"][0]["reason"] == "check_error"
+    acted = {a[1] for a in fake.argvs() if a[0] in ("stop", "forget") and len(a) > 1}
+    assert unlisted not in acted
+    assert fake.unforgotten() == []  # the listed (real) session was forgotten
+
+
+def test_a_failed_list_stops_then_forgets_the_known_id(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    sdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = Fake(tmp_path, FAKE_CS_BEHAVIOR_EXEC="hang", FAKE_CS_HANG_MAX="3")
+    limits_env(monkeypatch, limits=agent.Limits(1.5, -2.0, 5.0, 0.5))
+    cmd = patched_cmd(tmp_path, fake, {"list": {"exit": 12}})
+    path = config_file(tmp_path, config(None, session_cmd=cmd, checks=[agent_check(timeout="3s")]))
+    do_check(capsys, path, "p", "--input", write_input(tmp_path, INPUT))
+    tail = [a[0] for a in fake.argvs() if a[0] in ("stop", "forget")]
+    assert tail[-2:] == ["stop", "forget"]
+    assert tail.count("forget") == 1
+
+
+def test_a_maximal_legal_outcome_and_status_body_fits_the_caps_and_parses() -> None:
+    """claude-session caps summary and reason at 65536 UTF-8 bytes each and prints with
+    ensure_ascii, so a control character costs 6 bytes (the worst case); status adds at most 20
+    events."""
+    import json
+
+    text = "\x01" * 65536
+    report = {"status": "done", "implicit": False, "summary": text, "reason": text}
+    events = [{"event_id": "e" * 64, "note": "x" * 512} for _ in range(20)]
+    outcome = {"csession_id": "cs-aaaaaaaa", "report": report}
+    status = {**outcome, "events": events, "labels": ["l" * 128] * 64}
+    for body, cap in ((outcome, agent._OUTCOME_CAP), (status, agent._STATUS_CAP)):
+        data = json.dumps(body, ensure_ascii=True, allow_nan=False).encode()
+        assert len(data) > 64 * 1024
+        assert len(data) <= cap
+        assert agent.parse_object(data) == body
+
+
+def test_the_cleanup_call_budget_sets_the_kill_grace_aside() -> None:
+    now = [100.0]
+    limits = agent.Limits(call_timeout=5.0, exec_margin=10.0, cleanup_budget=10.0, kill_grace=2.0)
+    session = agent._Session(
+        gw=None, launch=None, nonce="", threshold=0.0, store=None, slot=None,  # type: ignore[arg-type]
+        env={}, limits=limits, monotonic=lambda: now[0], cancel=None,
+    )  # fmt: skip
+    assert session._bounded() == 5.0  # min(cap 5, 10 - 2)
+    now[0] = 106.0
+    assert session._bounded() == 2.0  # 4 s left, 2 s of it kill grace
+    now[0] = 108.0
+    assert session._bounded() <= 0  # nothing left but the grace: the call is skipped
+    # a call that ignores SIGTERM runs timeout + grace: never past the budget end (110)
+    now[0] = 106.0
+    assert now[0] + session._bounded() + limits.kill_grace <= 110.0
 
 
 def test_an_outcome_that_names_another_session_is_dropped_before_the_judge(
