@@ -173,7 +173,8 @@ def test_one_resolved_case_has_the_bound_of_one_case(
     put_decision(state_dir, ID, raw={"case_key": "0" * 64})
     put_outcome(state_dir, ID, "agree")
     code, out, _ = run_json(capsys, "stats", "--config", config)
-    assert code == 0 and json.loads(out)["records"][0]["upper_bound"] == pytest.approx(0.95)
+    bound = json.loads(out)["records"][0]["upper_bound"]
+    assert code == 0 and bound == pytest.approx(0.95, abs=2e-6)
 
 
 def test_hostile_flags_are_bound_parameters_never_sql(

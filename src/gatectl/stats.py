@@ -101,10 +101,10 @@ def upper_bound(k: int, n: int, confidence: float) -> float:
 
 
 def printed_bound(bound: float) -> float:
-    """The bound rounded **up** to 6 decimals, capped at 1. ``upper_bound`` overshoots the root by
-    less than ``BOUND_TOLERANCE``; that is taken off first, so an exact value such as 0.95 does not
-    print as 0.950001."""
-    return min(1.0, math.ceil(round((bound - BOUND_TOLERANCE) * 1e6, 4)) / 1e6)
+    """The bound rounded **up** to 6 decimals, capped at 1. ``upper_bound`` is the bracket end,
+    never below the root, so rounding it up directly never prints below the true bound; an exact
+    value such as 0.95 may therefore print as 0.950001."""
+    return min(1.0, math.ceil(bound * 1e6) / 1e6)
 
 
 def recommendation(state: str, bound: float, max_miss_rate: float) -> str:

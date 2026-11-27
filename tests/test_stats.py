@@ -548,9 +548,15 @@ def test_no_resolved_allows_and_all_misses_are_not_yet_at_max_miss_rate_one(
 
 def test_the_printed_bound_rounds_up_to_6_decimals() -> None:
     assert stats.printed_bound(0.0500004) == 0.050001
-    assert stats.printed_bound(0.05) == 0.05
     assert stats.printed_bound(1.0) == 1.0
     assert stats.printed_bound(0.7763931) == 0.776394
+
+
+def test_the_printed_bound_is_never_below_the_true_bound() -> None:
+    # k = 0, n = 1180, confidence 0.8: the true bound is 0.0013630007039 (1 - 0.2 ** (1 / 1180)),
+    # the bisection returns 0.0013630008325; the printed value must not be 0.001363.
+    assert stats.printed_bound(stats.upper_bound(0, 1180, 0.8)) >= 0.0013630007039
+    assert stats.printed_bound(stats.upper_bound(0, 1180, 0.8)) == 0.001364
 
 
 def test_a_tiny_bound_never_prints_as_zero() -> None:
