@@ -589,7 +589,7 @@ def _run_gatectl(argv: list[str], *, stdout: Any, stderr: Any = subprocess.PIPE,
 
 
 # (argv, intended exit code): not implemented -> 1, usage -> 2
-_STREAM_CASES = [(["stats", "--json"], 1), (["check", "p", "--js"], 2), (["stats"], 1)]
+_STREAM_CASES = [(["reconcile", "--json"], 1), (["check", "p", "--js"], 2), (["reconcile"], 1)]
 
 
 @pytest.mark.parametrize(("argv", "code"), _STREAM_CASES)

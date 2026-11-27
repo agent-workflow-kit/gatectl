@@ -19,7 +19,7 @@ import re
 from typing import Any
 
 from gatectl import fingerprint as fingerprint_mod
-from gatectl import ids, plan
+from gatectl import history, ids, plan, statscmd
 from gatectl import store as store_mod
 from gatectl.clock import parse_ts
 from gatectl.config import LoadedConfig, load_for_command
@@ -131,8 +131,12 @@ def _entry(
             {"name": c.name, "type": c.type, "summary": plan.summarize(c, shared)}
             for c in plan.execution_order(effective.policy)
         ],
-        # TODO(#29): the track record of each fingerprint (stats builds them).
-        "records": [],
+        # the track record, with its recommendation, of each fingerprint of the shown scope
+        "records": (
+            statscmd.build_records(store, loaded, history.Filters(policy=name, scope=scope.scope))
+            if store is not None
+            else []
+        ),
     }
     return entry, effective.overridden
 

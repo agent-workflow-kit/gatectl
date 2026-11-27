@@ -51,7 +51,7 @@ def _parse_object_id(text: str | None) -> str | None:
     return text
 
 
-def _parse_policy(text: str | None) -> str | None:
+def parse_policy(text: str | None) -> str | None:
     if text is not None and not ids.is_policy_name(text):
         raise UsageError("invalid --policy")
     return text
@@ -64,7 +64,7 @@ def _filters(ctx: Context) -> history.Filters:
         since = format_ts(parse_since(args.since, datetime.now(UTC)))
     return history.Filters(
         since=since,
-        policy=_parse_policy(args.policy),
+        policy=parse_policy(args.policy),
         scope=args.repo,  # already validated by the dispatcher; ``*`` selects scope ``*``
         object_id=_parse_object_id(args.object_id),
         outcome=args.outcome,
@@ -73,7 +73,7 @@ def _filters(ctx: Context) -> history.Filters:
     )
 
 
-def _warning(ctx: Context, loaded: LoadedConfig) -> str | None:
+def warning(ctx: Context, loaded: LoadedConfig) -> str | None:
     return _CONFIG_WARNING if loaded.shared_problems and not ctx.quiet else None
 
 
@@ -106,10 +106,10 @@ def handle_decisions(ctx: Context) -> Result:
     rows: list[dict[str, Any]] = []
     truncated = False
     if store is None:
-        _require_known(loaded, None, filters.policy)
+        require_known(loaded, None, filters.policy)
     else:
         with store:
-            _require_known(loaded, store, filters.policy)
+            require_known(loaded, store, filters.policy)
             rows, truncated = history.list_decisions(store, filters, limit, set(loaded.policies))
     lines = [_decision_line(d) for d in rows] or ["no decisions"]
     if truncated:
@@ -117,11 +117,11 @@ def handle_decisions(ctx: Context) -> Result:
     return Result(
         payload={"decisions": rows, "truncated": truncated},
         text="\n".join(lines),
-        stderr=_warning(ctx, loaded),
+        stderr=warning(ctx, loaded),
     )
 
 
-def _require_known(loaded: LoadedConfig, store: store_mod.Store | None, policy: str | None) -> None:
+def require_known(loaded: LoadedConfig, store: store_mod.Store | None, policy: str | None) -> None:
     """A ``--policy`` that is neither configured nor in ``state.db`` exits 2."""
     if policy is None or policy in loaded.policies:
         return
@@ -175,4 +175,4 @@ def handle_show(ctx: Context) -> Result:
         raise NotFoundError("no such decision")
     with store, store.snapshot():
         document = history.load(store, history.resolve(store, ref), set(loaded.policies))
-    return Result(payload=document, text=_show_text(document), stderr=_warning(ctx, loaded))
+    return Result(payload=document, text=_show_text(document), stderr=warning(ctx, loaded))

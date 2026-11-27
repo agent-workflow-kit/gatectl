@@ -97,7 +97,7 @@ def _bounded(column: str, max_bytes: int) -> str:
 
 # The effective outcome (interface.md, Outcomes): the last outcome record that counts (any
 # disagree, or an agree from a human actor), else pending. ``d`` is the decisions row.
-_EFFECTIVE = (
+EFFECTIVE = (
     "COALESCE((SELECT o.outcome FROM outcomes o WHERE o.decision_id = d.id"
     " AND (o.outcome = 'disagree' OR (o.outcome = 'agree' AND substr(o.actor, 1, 6) = 'human:'"
     " AND instr(CAST(o.actor AS BLOB), x'00') = 0))"
@@ -129,7 +129,7 @@ _COLUMNS = (
     + ", d.state_rev, "
     + _bounded("d.declared_json", DECLARED_MAX_BYTES)
     + ", "
-    + _EFFECTIVE
+    + EFFECTIVE
 )
 
 _SHOW_COLUMNS = _COLUMNS + ", " + _bounded("d.checks_json", CHECKS_MAX_BYTES)
@@ -417,7 +417,7 @@ def _checks(raw: object) -> tuple[list[dict[str, Any]], list[str]]:
 # --- the queries --------------------------------------------------------------------------------
 
 
-def _where(filters: Filters) -> tuple[str, list[Any]]:
+def where_clause(filters: Filters) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     args: list[Any] = []
     if filters.since is not None:
@@ -436,7 +436,7 @@ def _where(filters: Filters) -> tuple[str, list[Any]]:
         clauses.append("d.decision = ?")
         args.append(filters.decision)
     if filters.outcome is not None:
-        clauses.append(f"{_EFFECTIVE} = ?")
+        clauses.append(f"{EFFECTIVE} = ?")
         args.append(filters.outcome)
     if filters.declared is not None:
         clauses.append(
@@ -455,7 +455,7 @@ def list_decisions(
     store: Store, filters: Filters, limit: int, configured: Mapping[str, Any] | set[str]
 ) -> tuple[list[dict[str, Any]], bool]:
     """Up to ``limit`` decisions, newest first, and whether more matched."""
-    where, args = _where(filters)
+    where, args = where_clause(filters)
     rows = store.query(
         f"SELECT {_COLUMNS} FROM decisions d{where}"  # noqa: S608  (fixed text, bound values)
         " ORDER BY d.time DESC, d.id DESC LIMIT ?",
@@ -470,7 +470,7 @@ def effective_outcome(store: Store, decision_id: str) -> str:
 
     The same SQL expression the ``--outcome`` filter and ``show`` use, so the rule has one home.
     """
-    rows = store.query(f"SELECT {_EFFECTIVE} FROM decisions d WHERE d.id = ?", (decision_id,))  # noqa: S608
+    rows = store.query(f"SELECT {EFFECTIVE} FROM decisions d WHERE d.id = ?", (decision_id,))  # noqa: S608
     if not rows:
         raise NotFoundError("no such decision")
     return _one_of(rows[0][0], ("pending", *OUTCOMES))
