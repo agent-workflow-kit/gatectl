@@ -26,8 +26,6 @@ _EPS = 1e-15
 _TINY = 1e-300
 _MAX_ITERATIONS = 200_000  # the continued fraction needs O(sqrt(n)) steps; n is a row count
 
-RECOMMENDATIONS = ("enforce", "not_yet", "keep", "reconsider")
-
 
 def _invalid() -> ValueError:
     return ValueError("invalid arguments for the bound")
@@ -102,10 +100,19 @@ def upper_bound(k: int, n: int, confidence: float) -> float:
     return high
 
 
+def printed_bound(bound: float) -> float:
+    """The bound rounded **up** to 6 decimals, capped at 1. ``upper_bound`` overshoots the root by
+    less than ``BOUND_TOLERANCE``; that is taken off first, so an exact value such as 0.95 does not
+    print as 0.950001."""
+    return min(1.0, math.ceil(round((bound - BOUND_TOLERANCE) * 1e6, 4)) / 1e6)
+
+
 def recommendation(state: str, bound: float, max_miss_rate: float) -> str:
     """The advisory recommendation (interface.md): ``enforce`` or ``not_yet`` when the scope is
     not ``enforced``, ``keep`` or ``reconsider`` when it is."""
-    holds = bound <= max_miss_rate
+    # A bound of 1 is "no evidence" (n = 0) or "every case missed" (k = n): it never holds, even
+    # with max_miss_rate = 1 (which the schema allows).
+    holds = bound < 1.0 and bound <= max_miss_rate
     if state == "enforced":
         return "keep" if holds else "reconsider"
     return "enforce" if holds else "not_yet"

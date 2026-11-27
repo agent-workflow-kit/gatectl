@@ -513,6 +513,72 @@ def test_the_golden_output_is_printed_byte_for_byte(
     golden.assert_output("stats", out)
 
 
+# --- no evidence is never enough, a printed bound is never below the true one -------------------
+
+
+@pytest.mark.parametrize("state", ["off", "shadow"])
+def test_a_bound_of_one_never_recommends_enforce_even_with_max_miss_rate_one(state: str) -> None:
+    assert stats.recommendation(state, 1.0, 1.0) == "not_yet"
+
+
+def test_a_bound_of_one_on_an_enforced_scope_is_reconsider_even_with_max_miss_rate_one() -> None:
+    assert stats.recommendation("enforced", 1.0, 1.0) == "reconsider"
+
+
+def test_a_bound_below_one_still_holds_at_max_miss_rate_one() -> None:
+    assert stats.recommendation("shadow", 0.99, 1.0) == "enforce"
+
+
+def test_no_resolved_allows_and_all_misses_are_not_yet_at_max_miss_rate_one(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, state_dir: Path
+) -> None:
+    loose = config_file(
+        tmp_path / "loose",
+        {"policies": {"p": {"checks": [rule()], "recommend": {"max_miss_rate": 1}}}},
+    )
+    fingerprint = current_fingerprint(loose, "p")
+    allows(state_dir, 1, fingerprint, outcome=None)  # n = 0
+    r = only(stat(capsys, loose)[1])
+    assert (r["resolved_allows"], r["upper_bound"], r["recommend"]) == (0, 1.0, "not_yet")
+    allows(state_dir, 1, fingerprint, start=10, outcome="disagree")  # k == n == 1
+    r = only(stat(capsys, loose)[1])
+    assert (r["resolved_allows"], r["unsafe_miss_cases"]) == (1, 1)
+    assert (r["upper_bound"], r["recommend"]) == (1.0, "not_yet")
+
+
+def test_the_printed_bound_rounds_up_to_6_decimals() -> None:
+    assert stats.printed_bound(0.0500004) == 0.050001
+    assert stats.printed_bound(0.05) == 0.05
+    assert stats.printed_bound(1.0) == 1.0
+    assert stats.printed_bound(0.7763931) == 0.776394
+
+
+def test_a_tiny_bound_never_prints_as_zero() -> None:
+    assert stats.printed_bound(stats.upper_bound(0, 10_000_000, 0.95)) > 0
+
+
+def test_the_state_rows_are_read_inside_the_same_snapshot_as_the_decisions(
+    capsys: pytest.CaptureFixture[str],
+    config: str,
+    state_dir: Path,
+    fp: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gatectl.store import Store
+
+    allows(state_dir, 1, fp)
+    seen: list[bool] = []
+    real = Store.effective
+
+    def spy(self: Store, *args: Any, **kwargs: Any) -> Any:
+        seen.append(self.con.in_transaction)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Store, "effective", spy)
+    stat(capsys, config)
+    assert seen == [True]
+
+
 # --- policies shows the records -----------------------------------------------------------------
 
 
@@ -546,7 +612,3 @@ def test_policies_with_no_history_has_no_records(
 def test_the_dependency_on_sqlite_json_is_available() -> None:
     con = sqlite3.connect(":memory:")
     assert con.execute("SELECT json_valid('[]')").fetchone() == (1,)
-
-
-def test_the_module_exports_the_closed_recommendation_list() -> None:
-    assert stats.RECOMMENDATIONS == ("enforce", "not_yet", "keep", "reconsider")

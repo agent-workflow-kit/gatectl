@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,9 @@ def _cases() -> list[tuple[str, dict[str, Any]]]:
         ("bad-time", {"time": EVIL}),
         ("short-time", {"time": "2026-11-24T12:00:00Z"}),
         ("int-time", {"time": 5}),
+        ("month-99-time", {"time": "2026-99-24T12:00:00.000000Z"}),
+        ("hour-25-time", {"time": "2026-11-24T25:00:00.000000Z"}),
+        ("feb-30-time", {"time": "2026-02-30T12:00:00.000000Z"}),
         ("bad-decision", {"decision": "maybe"}),
         ("bad-fingerprint", {"fingerprint": EVIL}),
         ("short-fingerprint", {"fingerprint": "sha256:abc"}),
@@ -109,6 +113,23 @@ def test_a_tampered_outcome_row_exits_1(
     sql(state_dir, f"UPDATE outcomes SET {column} = ?", value)  # noqa: S608  (a fixed test column)
     code, out, err = run_json(capsys, "stats", "--config", config)
     assert code == 1 and CANARY not in out + err
+    assert json.loads(out)["error"]["message"] == "state.db holds an invalid decision row"
+
+
+def test_an_outcome_value_outside_agree_disagree_exits_1(
+    capsys: pytest.CaptureFixture[str], config: str, state_dir: Path
+) -> None:
+    put_decision(state_dir, ID)
+    put_outcome(state_dir, ID, "agree")
+    con = sqlite3.connect(state_dir / "state.db")
+    try:
+        con.execute("PRAGMA ignore_check_constraints = ON")
+        con.execute("UPDATE outcomes SET outcome = 'maybe'")
+        con.commit()
+    finally:
+        con.close()
+    code, out, err = run_json(capsys, "stats", "--config", config)
+    assert code == 1 and "maybe" not in out + err
     assert json.loads(out)["error"]["message"] == "state.db holds an invalid decision row"
 
 
